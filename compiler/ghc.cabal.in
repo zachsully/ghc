@@ -259,6 +259,7 @@ Library
         SMRep
         CoreArity
         CoreFVs
+        CoreJoins
         CoreLint
         CorePrep
         CoreSubst
