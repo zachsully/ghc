@@ -1,6 +1,7 @@
 {-# LANGUAGE CPP #-}
 
-module CoreJoins (findJoinsInPgm, eraseJoins, lintJoinsInCoreBindings,
+module CoreJoins (findJoinsInPgm, findJoinsInExpr,
+  eraseJoins, lintJoinsInCoreBindings,
   SortedBndr(..), BndrSort(..), isJoinBndr, isValBndr, sbSort, sbBndr,
   ExprWithJoins, BindWithJoins, AltWithJoins, ProgramWithJoins) where
 
@@ -8,6 +9,7 @@ import CoreSyn
 import MonadUtils
 import Outputable
 import PprCore ()
+import Util
 import Var
 import VarEnv
 import VarSet
@@ -18,6 +20,9 @@ import Control.Monad
 
 data BndrSort   = ValBndr | JoinBndr deriving (Eq)
 data SortedBndr = SB CoreBndr BndrSort
+
+instance WrappedBndr SortedBndr where
+  unwrapBndr (SB bndr _) = bndr
 
 isJoinBndr, isValBndr :: SortedBndr -> Bool
 isJoinBndr = (== JoinBndr) . sbSort
@@ -36,6 +41,11 @@ type ProgramWithJoins = [Bind SortedBndr]
 
 findJoinsInPgm :: CoreProgram -> ProgramWithJoins
 findJoinsInPgm pgm = map (\bind -> initFJ $ fjTopBind bind) pgm
+
+findJoinsInExpr :: CoreExpr -> ExprWithJoins
+findJoinsInExpr expr = initFJ $ do (expr', anal) <- fjExpr expr
+                                   MASSERT(isEmptyJoinAnal anal)
+                                   return expr'
 
 eraseJoins :: ProgramWithJoins -> CoreProgram
 eraseJoins = map doBind
@@ -281,6 +291,9 @@ type BadSet = IdSet
 
 emptyJoinAnal :: JoinAnal
 emptyJoinAnal = (emptyVarSet, emptyVarSet)
+
+isEmptyJoinAnal :: JoinAnal -> Bool
+isEmptyJoinAnal (good, bad) = isEmptyVarSet good && isEmptyVarSet bad
 
 oneGoodId :: Id -> JoinAnal
 oneGoodId id = (unitVarSet id, emptyVarSet)

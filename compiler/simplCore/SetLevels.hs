@@ -67,6 +67,7 @@ import CoreMonad        ( FloatOutSwitches(..) )
 import CoreUtils        ( exprType, exprOkForSpeculation, exprIsBottom )
 import CoreArity        ( exprBotStrictness_maybe )
 import CoreFVs          -- all of it
+import CoreJoins
 import CoreSubst
 import MkCore           ( sortQuantVars )
 import Id
@@ -233,14 +234,15 @@ setLevels float_lams binds us
 
 lvlTopBind :: LevelEnv -> Bind Id -> LvlM (LevelledBind, LevelEnv)
 lvlTopBind env (NonRec bndr rhs)
-  = do { rhs' <- lvlExpr env (freeVars rhs)
-       ; let (env', [bndr']) = substAndLvlBndrs NonRecursive env tOP_LEVEL [bndr]
+  = do { rhs' <- lvlExpr env (freeVars (findJoinsInExpr rhs))
+       ; let (env', [bndr']) = substAndLvlBndrs NonRecursive env tOP_LEVEL [SB bndr ValBndr]
        ; return (NonRec bndr' rhs', env') }
 
 lvlTopBind env (Rec pairs)
   = do let (bndrs,rhss) = unzip pairs
-           (env', bndrs') = substAndLvlBndrs Recursive env tOP_LEVEL bndrs
-       rhss' <- mapM (lvlExpr env' . freeVars) rhss
+           (env', bndrs') = substAndLvlBndrs Recursive env tOP_LEVEL
+                              [ SB bndr ValBndr | bndr <- bndrs ]
+       rhss' <- mapM (lvlExpr env' . freeVars . findJoinsInExpr) rhss
        return (Rec (bndrs' `zip` rhss'), env')
 
 {-
@@ -265,8 +267,12 @@ top level -- but then they must be applied to a constant dictionary and
 will almost certainly be optimised away anyway.
 -}
 
+type InExpr = ExprWithFVs SortedBndr
+type InBind = BindWithFVs SortedBndr
+type InAlt  = AltWithFVs  SortedBndr
+
 lvlExpr :: LevelEnv             -- Context
-        -> CoreExprWithFVs      -- Input expression
+        -> InExpr               -- Input expression
         -> LvlM LevelledExpr    -- Result expression
 
 {-
@@ -370,8 +376,8 @@ lvlExpr env (_, AnnCase scrut case_bndr ty alts)
 lvlCase :: LevelEnv             -- Level of in-scope names/tyvars
         -> DVarSet              -- Free vars of input scrutinee
         -> LevelledExpr         -- Processed scrutinee
-        -> Id -> Type           -- Case binder and result type
-        -> [CoreAltWithFVs]     -- Input alternatives
+        -> InVar -> Type        -- Case binder and result type
+        -> [InAlt]              -- Input alternatives
         -> LvlM LevelledExpr    -- Result expression
 lvlCase env scrut_fvs scrut' case_bndr ty alts
   | [(con@(DataAlt {}), bs, body)] <- alts
@@ -450,7 +456,7 @@ That's why we apply exprOkForSpeculation to scrut' and not to scrut.
 
 lvlMFE ::  Bool                 -- True <=> strict context [body of case or let]
         -> LevelEnv             -- Level of in-scope names/tyvars
-        -> CoreExprWithFVs      -- input expression
+        -> InExpr               -- input expression
         -> LvlM LevelledExpr    -- Result expression
 -- lvlMFE is just like lvlExpr, except that it might let-bind
 -- the expression, so that it can itself be floated.
@@ -475,7 +481,7 @@ lvlMFE True env e@(_, AnnCase {})
   = lvlExpr env e     -- Don't share cases
 
 lvlMFE strict_ctxt env ann_expr
-  |  isUnliftedType (exprType expr)
+  |  isUnliftedType (exprType (unwrapBndrsInExpr expr))
          -- Can't let-bind it; see Note [Unlifted MFEs]
          -- This includes coercions, which we don't want to float anyway
          -- NB: no need to substitute cos isUnliftedType doesn't change
@@ -492,7 +498,7 @@ lvlMFE strict_ctxt env ann_expr
   where
     expr     = deAnnotate ann_expr
     fvs      = freeVarsOf ann_expr
-    is_bot   = exprIsBottom expr      -- Note [Bottoming floats]
+    is_bot   = exprIsBottom (unwrapBndrsInExpr expr)      -- Note [Bottoming floats]
     dest_lvl = destLevel env fvs (isFunction ann_expr) is_bot
     abs_vars = abstractVars dest_lvl env fvs
 
@@ -590,7 +596,7 @@ annotateBotStr id Nothing            = id
 annotateBotStr id (Just (arity, sig)) = id `setIdArity` arity
                                            `setIdStrictness` sig
 
-notWorthFloating :: CoreExprWithFVs -> [Var] -> Bool
+notWorthFloating :: InExpr -> [Var] -> Bool
 -- Returns True if the expression would be replaced by
 -- something bigger than it is now.  For example:
 --   abs_vars = tvars only:  return True if e is trivial,
@@ -690,10 +696,10 @@ The binding stuff works for top level too.
 -}
 
 lvlBind :: LevelEnv
-        -> CoreBindWithFVs
+        -> InBind
         -> LvlM (LevelledBind, LevelEnv)
 
-lvlBind env (AnnNonRec bndr rhs)
+lvlBind env (AnnNonRec sorted_bndr@(SB bndr sort) rhs)
   | isTyVar bndr    -- Don't do anything for TyVar binders
                     --   (simplifier gets rid of them pronto)
   || isCoVar bndr   -- Difficult to fix up CoVar occurrences (see extendPolyLvlEnv)
@@ -706,20 +712,20 @@ lvlBind env (AnnNonRec bndr rhs)
   = -- No float
     do { rhs' <- lvlExpr env rhs
        ; let  bind_lvl        = incMinorLvl (le_ctxt_lvl env)
-              (env', [bndr']) = substAndLvlBndrs NonRecursive env bind_lvl [bndr]
+              (env', [bndr']) = substAndLvlBndrs NonRecursive env bind_lvl [sorted_bndr]
        ; return (NonRec bndr' rhs', env') }
 
   -- Otherwise we are going to float
   | null abs_vars
   = do {  -- No type abstraction; clone existing binder
          rhs' <- lvlExpr (setCtxtLvl env dest_lvl) rhs
-       ; (env', [bndr']) <- cloneLetVars NonRecursive env dest_lvl [bndr]
+       ; (env', [bndr']) <- cloneLetVars NonRecursive env dest_lvl [sorted_bndr]
        ; return (NonRec (TB bndr' (FloatMe dest_lvl)) rhs', env') }
 
   | otherwise
   = do {  -- Yes, type abstraction; create a new binder, extend substitution, etc
          rhs' <- lvlFloatRhs abs_vars dest_lvl env rhs
-       ; (env', [bndr']) <- newPolyBndrs dest_lvl env abs_vars [bndr]
+       ; (env', [bndr']) <- newPolyBndrs dest_lvl env abs_vars [sorted_bndr]
        ; return (NonRec (TB bndr' (FloatMe dest_lvl)) rhs', env') }
 
   where
@@ -727,7 +733,7 @@ lvlBind env (AnnNonRec bndr rhs)
     bind_fvs   = rhs_fvs `unionDVarSet` dIdFreeVars bndr
     abs_vars   = abstractVars dest_lvl env bind_fvs
     dest_lvl   = destLevel env bind_fvs (isFunction rhs) is_bot
-    is_bot     = exprIsBottom (deAnnotate rhs)
+    is_bot     = exprIsBottom (unwrapBndrsInExpr (deAnnotate rhs))
 
 lvlBind env (AnnRec pairs)
   | not (profitableFloat env dest_lvl)
@@ -786,10 +792,10 @@ lvlBind env (AnnRec pairs)
         -- Finding the free vars of the binding group is annoying
     bind_fvs = ((unionDVarSets [ freeVarsOf rhs | (_, rhs) <- pairs])
                 `unionDVarSet`
-                (runFVDSet $ unionsFV [ idFreeVarsAcc bndr
+                (runFVDSet $ unionsFV [ idFreeVarsAcc (unwrapBndr bndr)
                                       | (bndr, (_,_)) <- pairs]))
                `delDVarSetList`
-                bndrs
+                unwrapBndrs bndrs
 
     dest_lvl = destLevel env bind_fvs (all isFunction rhss) False
     abs_vars = abstractVars dest_lvl env bind_fvs
@@ -802,7 +808,7 @@ profitableFloat env dest_lvl
 ----------------------------------------------------
 -- Three help functions for the type-abstraction case
 
-lvlFloatRhs :: [OutVar] -> Level -> LevelEnv -> CoreExprWithFVs
+lvlFloatRhs :: [OutVar] -> Level -> LevelEnv -> InExpr
             -> UniqSM (Expr LevelledBndr)
 lvlFloatRhs abs_vars dest_lvl env rhs
   = do { rhs' <- lvlExpr rhs_env rhs
@@ -826,14 +832,15 @@ substAndLvlBndrs is_rec env lvl bndrs
 
 substBndrsSL :: RecFlag -> LevelEnv -> [InVar] -> (LevelEnv, [OutVar])
 -- So named only to avoid the name clash with CoreSubst.substBndrs
-substBndrsSL is_rec env@(LE { le_subst = subst, le_env = id_env }) bndrs
+substBndrsSL is_rec env@(LE { le_subst = subst, le_env = id_env, le_joins = joins }) bndrs
   = ( env { le_subst    = subst'
-          , le_env      = foldl add_id  id_env (bndrs `zip` bndrs') }
+          , le_env      = foldl add_id  id_env (bndrs `zip` bndrs')
+          , le_joins    = extendVarSetList joins [ bndr | SB bndr JoinBndr <- bndrs ]}
     , bndrs')
   where
     (subst', bndrs') = case is_rec of
-                         NonRecursive -> substBndrs    subst bndrs
-                         Recursive    -> substRecBndrs subst bndrs
+                         NonRecursive -> substBndrs    subst (unwrapBndrs bndrs)
+                         Recursive    -> substRecBndrs subst (unwrapBndrs bndrs)
 
 lvlLamBndrs :: LevelEnv -> Level -> [OutVar] -> (LevelEnv, [LevelledBndr])
 -- Compute the levels for the binders of a lambda group
@@ -885,7 +892,7 @@ destLevel env fvs is_function is_bot
   | otherwise = maxFvLevel isId env fvs  -- Max over Ids only; the tyvars
                                          -- will be abstracted
 
-isFunction :: CoreExprWithFVs -> Bool
+isFunction :: InExpr -> Bool
 -- The idea here is that we want to float *functions* to
 -- the top level.  This saves no work, but
 --      (a) it can make the host function body a lot smaller,
@@ -900,8 +907,8 @@ isFunction :: CoreExprWithFVs -> Bool
 -- We may only want to do this if there are sufficiently few free
 -- variables.  We certainly only want to do it for values, and not for
 -- constructors.  So the simple thing is just to look for lambdas
-isFunction (_, AnnLam b e) | isId b    = True
-                           | otherwise = isFunction e
+isFunction (_, AnnLam (SB b _) e) | isId b    = True
+                                  | otherwise = isFunction e
 -- isFunction (_, AnnTick _ e)          = isFunction e  -- dubious
 isFunction _                           = False
 
@@ -920,10 +927,10 @@ countFreeIds = foldVarSet add 0 . udfmToUfm
 ************************************************************************
 -}
 
-type InVar  = Var   -- Pre  cloning
-type InId   = Id    -- Pre  cloning
-type OutVar = Var   -- Post cloning
-type OutId  = Id    -- Post cloning
+type InVar  = SortedBndr   -- Pre  cloning
+type InId   = SortedBndr   -- Pre  cloning
+type OutVar = Var          -- Post cloning
+type OutId  = Id           -- Post cloning
 
 data LevelEnv
   = LE { le_switches :: FloatOutSwitches
@@ -934,6 +941,7 @@ data LevelEnv
                                         -- (since we want to substitute a LevelledExpr for
                                         -- an Id via le_env) but we do use the Co/TyVar substs
        , le_env      :: IdEnv ([OutVar], LevelledExpr)  -- Domain is pre-cloned Ids
+       , le_joins    :: IdSet           -- Pre-cloned ids of join points
     }
         -- We clone let- and case-bound variables so that they are still
         -- distinct when floated out; hence the le_subst/le_env.
@@ -962,7 +970,8 @@ initialEnv float_lams
        , le_ctxt_lvl = tOP_LEVEL
        , le_lvl_env = emptyVarEnv
        , le_subst = emptySubst
-       , le_env = emptyVarEnv }
+       , le_env = emptyVarEnv
+       , le_joins = emptyVarSet }
 
 addLvl :: Level -> VarEnv Level -> OutVar -> VarEnv Level
 addLvl dest_lvl env v' = extendVarEnv env v' dest_lvl
@@ -985,12 +994,12 @@ setCtxtLvl env lvl = env { le_ctxt_lvl = lvl }
 -- extendCaseBndrEnv adds the mapping case-bndr->scrut-var if it can
 -- See Note [Binder-swap during float-out]
 extendCaseBndrEnv :: LevelEnv
-                  -> Id                 -- Pre-cloned case binder
+                  -> InId               -- Pre-cloned case binder
                   -> Expr LevelledBndr  -- Post-cloned scrutinee
                   -> LevelEnv
 extendCaseBndrEnv le@(LE { le_subst = subst, le_env = id_env })
                   case_bndr (Var scrut_var)
-  = le { le_subst   = extendSubstWithVar subst case_bndr scrut_var
+  = le { le_subst   = extendSubstWithVar subst (unwrapBndr case_bndr) scrut_var
        , le_env     = add_id id_env (case_bndr, scrut_var) }
 extendCaseBndrEnv env _ _ = env
 
@@ -1066,7 +1075,7 @@ newPolyBndrs :: Level -> LevelEnv -> [OutVar] -> [InId] -> UniqSM (LevelEnv, [Ou
 -- the ctxt_lvl is unaffected
 newPolyBndrs dest_lvl
              env@(LE { le_lvl_env = lvl_env, le_subst = subst, le_env = id_env })
-             abs_vars bndrs
+             abs_vars sorted_bndrs
  = ASSERT( all (not . isCoVar) bndrs )   -- What would we add to the CoSubst in this case. No easy answer.
    do { uniqs <- getUniquesM
       ; let new_bndrs = zipWith mk_poly_bndr bndrs uniqs
@@ -1076,6 +1085,8 @@ newPolyBndrs dest_lvl
                        , le_env     = foldl add_id    id_env  bndr_prs }
       ; return (env', new_bndrs) }
   where
+    bndrs = unwrapBndrs sorted_bndrs
+    
     add_subst env (v, v') = extendIdSubst env v (mkVarApps (Var v') abs_vars)
     add_id    env (v, v') = extendVarEnv env v ((v':abs_vars), mkVarApps (Var v') abs_vars)
 
@@ -1100,11 +1111,11 @@ newLvlVar lvld_rhs is_bot
     rhs_ty = exprType de_tagged_rhs
     mk_name uniq = mkSystemVarName uniq (mkFastString "lvl")
 
-cloneCaseBndrs :: LevelEnv -> Level -> [Var] -> LvlM (LevelEnv, [Var])
+cloneCaseBndrs :: LevelEnv -> Level -> [InVar] -> LvlM (LevelEnv, [Var])
 cloneCaseBndrs env@(LE { le_subst = subst, le_lvl_env = lvl_env, le_env = id_env })
                new_lvl vs
   = do { us <- getUniqueSupplyM
-       ; let (subst', vs') = cloneBndrs subst us vs
+       ; let (subst', vs') = cloneBndrs subst us (unwrapBndrs vs)
              env' = env { le_ctxt_lvl = new_lvl
                         , le_lvl_env  = addLvls new_lvl lvl_env vs'
                         , le_subst    = subst'
@@ -1112,7 +1123,7 @@ cloneCaseBndrs env@(LE { le_subst = subst, le_lvl_env = lvl_env, le_env = id_env
 
        ; return (env', vs') }
 
-cloneLetVars :: RecFlag -> LevelEnv -> Level -> [Var] -> LvlM (LevelEnv, [Var])
+cloneLetVars :: RecFlag -> LevelEnv -> Level -> [InVar] -> LvlM (LevelEnv, [OutVar])
 -- See Note [Need for cloning during float-out]
 -- Works for Ids bound by let(rec)
 -- The dest_lvl is attributed to the binders in the new env,
@@ -1122,8 +1133,8 @@ cloneLetVars is_rec
           dest_lvl vs
   = do { us <- getUniqueSupplyM
        ; let (subst', vs1) = case is_rec of
-                               NonRecursive -> cloneBndrs      subst us vs
-                               Recursive    -> cloneRecIdBndrs subst us vs
+                               NonRecursive -> cloneBndrs      subst us (unwrapBndrs vs)
+                               Recursive    -> cloneRecIdBndrs subst us (unwrapBndrs vs)
              vs2  = map zap_demand_info vs1  -- See Note [Zapping the demand info]
              prs  = vs `zip` vs2
              env' = env { le_lvl_env = addLvls dest_lvl lvl_env vs2
@@ -1132,8 +1143,8 @@ cloneLetVars is_rec
 
        ; return (env', vs2) }
 
-add_id :: IdEnv ([Var], LevelledExpr) -> (Var, Var) -> IdEnv ([Var], LevelledExpr)
-add_id id_env (v, v1)
+add_id :: IdEnv ([Var], LevelledExpr) -> (InVar, Var) -> IdEnv ([Var], LevelledExpr)
+add_id id_env (SB v _, v1)
   | isTyVar v = delVarEnv    id_env v
   | otherwise = extendVarEnv id_env v ([v1], ASSERT(not (isCoVar v1)) Var v1)
 
