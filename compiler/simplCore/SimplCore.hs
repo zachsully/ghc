@@ -127,6 +127,7 @@ getCoreToDo dflags
     rules_on      = gopt Opt_EnableRewriteRules           dflags
     eta_expand_on = gopt Opt_DoLambdaEtaExpansion         dflags
     ww_on         = gopt Opt_WorkerWrapper                dflags
+    joins_to_top_only = gopt Opt_FloatJoinsOnlyToTop      dflags
 
     maybe_rule_check phase = runMaybe rule_check (CoreDoRuleCheck phase)
 
@@ -229,7 +230,8 @@ getCoreToDo dflags
            CoreDoFloatOutwards FloatOutSwitches {
                                  floatOutLambdas   = Just 0,
                                  floatOutConstants = True,
-                                 floatOutOverSatApps = False },
+                                 floatOutOverSatApps = False,
+                                 floatJoinsOnlyToTop = joins_to_top_only },
                 -- Was: gentleFloatOutSwitches
                 --
                 -- I have no idea why, but not floating constants to
@@ -280,7 +282,8 @@ getCoreToDo dflags
            CoreDoFloatOutwards FloatOutSwitches {
                                  floatOutLambdas     = floatLamArgs dflags,
                                  floatOutConstants   = True,
-                                 floatOutOverSatApps = True },
+                                 floatOutOverSatApps = True,
+                                 floatJoinsOnlyToTop = gopt Opt_FloatJoinsOnlyToTop dflags },
                 -- nofib/spectral/hartel/wang doubles in speed if you
                 -- do full laziness late in the day.  It only happens
                 -- after fusion and other stuff, so the early pass doesn't

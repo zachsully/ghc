@@ -435,6 +435,7 @@ data GeneralFlag
    | Opt_Loopification                  -- See Note [Self-recursive tail calls]
    | Opt_CprAnal
    | Opt_WorkerWrapper
+   | Opt_FloatJoinsOnlyToTop
 
    -- Interface files
    | Opt_IgnoreInterfacePragmas
@@ -3377,7 +3378,8 @@ fFlagsDeps = [
   flagSpec "vectorisation-avoidance"          Opt_VectorisationAvoidance,
   flagSpec "vectorise"                        Opt_Vectorise,
   flagSpec "worker-wrapper"                   Opt_WorkerWrapper,
-  flagSpec "show-warning-groups"              Opt_ShowWarnGroups
+  flagSpec "show-warning-groups"              Opt_ShowWarnGroups,
+  flagSpec "float-joins-only-to-top"          Opt_FloatJoinsOnlyToTop
   ]
 
 -- | These @-f\<blah\>@ flags can all be reversed with @-fno-\<blah\>@

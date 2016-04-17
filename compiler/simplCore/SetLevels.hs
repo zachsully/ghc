@@ -709,6 +709,8 @@ lvlBind env (AnnNonRec sorted_bndr@(SB bndr sort) rhs)
           -- We can't float an unlifted binding to top level, so we don't
           -- float it at all.  It's a bit brutal, but unlifted bindings
           -- aren't expensive either
+  || (not (isTopLvl dest_lvl) && sort == JoinBndr &&
+                                   floatJoinsOnlyToTop (le_switches env))
   = -- No float
     do { rhs' <- lvlExpr env rhs
        ; let  bind_lvl        = incMinorLvl (le_ctxt_lvl env)
@@ -737,6 +739,8 @@ lvlBind env (AnnNonRec sorted_bndr@(SB bndr sort) rhs)
 
 lvlBind env (AnnRec pairs)
   | not (profitableFloat env dest_lvl)
+  || (not (isTopLvl dest_lvl) && all (isJoinBndr . fst) pairs &&
+                                   floatJoinsOnlyToTop (le_switches env))
   = do { let bind_lvl = incMinorLvl (le_ctxt_lvl env)
              (env', bndrs') = substAndLvlBndrs Recursive env bind_lvl bndrs
        ; rhss' <- mapM (lvlExpr env') rhss
