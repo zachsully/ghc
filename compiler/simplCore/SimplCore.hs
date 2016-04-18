@@ -122,6 +122,28 @@ getCoreToDo dflags
     cse           = gopt Opt_CSE                          dflags
     spec_constr   = gopt Opt_SpecConstr                   dflags
     liberate_case = gopt Opt_LiberateCase                 dflags
+    late_lambda_float =
+      if not (gopt Opt_LLF dflags)
+         || Just 0 == nonrec && Just 0 == fps_rec fps
+      then Nothing else Just (nonrec, fps)
+      where nonrec = lateFloatNonRecLam dflags
+            fps = FinalPassSwitches
+              { fps_trace          = dopt Opt_D_dump_late_float dflags
+              , fps_stabilizeFirst = gopt Opt_LLF_Stabilize     dflags
+              , fps_rec            = lateFloatRecLam            dflags
+              , fps_absUnsatVar    = gopt Opt_LLF_AbsUnsat      dflags
+              , fps_absSatVar      = gopt Opt_LLF_AbsSat        dflags
+              , fps_absOversatVar  = gopt Opt_LLF_AbsOversat    dflags
+              , fps_createPAPs     = gopt Opt_LLF_CreatePAPs    dflags
+              , fps_ifInClo        = lateFloatIfInClo           dflags
+              , fps_cloGrowth      = lateFloatCloGrowth         dflags
+              , fps_cloGrowthInLam = lateFloatCloGrowthInLam    dflags
+              , fps_ignoreLNEClo   = gopt Opt_LLF_IgnoreLNEClo  dflags
+              , fps_strictness     = gopt Opt_LLF_UseStr        dflags
+              , fps_floatLNE0      = gopt Opt_LLF_FloatLNE0     dflags
+              , fps_oneShot        = gopt Opt_LLF_OneShot       dflags
+              , fps_leaveLNE       = gopt Opt_LLF_LeaveLNE      dflags
+              }
     late_dmd_anal = gopt Opt_LateDmdAnal                  dflags
     static_args   = gopt Opt_StaticArgumentTransformation dflags
     rules_on      = gopt Opt_EnableRewriteRules           dflags
@@ -231,7 +253,8 @@ getCoreToDo dflags
                                  floatOutLambdas   = Just 0,
                                  floatOutConstants = True,
                                  floatOutOverSatApps = False,
-                                 floatJoinsOnlyToTop = joins_to_top_only },
+                                 floatJoinsOnlyToTop = joins_to_top_only,
+                                 finalPass_        = Nothing },
                 -- Was: gentleFloatOutSwitches
                 --
                 -- I have no idea why, but not floating constants to
@@ -283,7 +306,8 @@ getCoreToDo dflags
                                  floatOutLambdas     = floatLamArgs dflags,
                                  floatOutConstants   = True,
                                  floatOutOverSatApps = True,
-                                 floatJoinsOnlyToTop = gopt Opt_FloatJoinsOnlyToTop dflags },
+                                 floatJoinsOnlyToTop = gopt Opt_FloatJoinsOnlyToTop dflags,
+                                 finalPass_        = Nothing},
                 -- nofib/spectral/hartel/wang doubles in speed if you
                 -- do full laziness late in the day.  It only happens
                 -- after fusion and other stuff, so the early pass doesn't
@@ -315,6 +339,24 @@ getCoreToDo dflags
 
         -- Final clean-up simplification:
         simpl_phase 0 ["final"] max_iter,
+
+        runMaybe late_lambda_float $ \ (nonrec, fps) -> CoreDoPasses
+          [ CoreDoFloatOutwards $ FloatOutSwitches
+              { floatOutLambdas             = nonrec
+              , floatOutConstants           = False
+              , floatOutPartialApplications = False
+              , floatJoinsOnlyToTop         = joins_to_top_only
+              , finalPass_                  = Just fps
+              }
+          , runWhen (gopt Opt_LLF_Simpl dflags) $ simpl_phase 0 ["post-late-float-lam"] max_iter
+          ],
+        -- TODO this is an experimental FloatOut pass. The intention
+        -- is to use extra space on the stack (for passing arguments)
+        -- and in the TEXT section in order to avoid dynamic
+        -- allocations of lambda-forms.
+
+        -- TODO look into the comment about nofib/spectral/hartel/wang
+        -- on the previous floatOut pass
 
         runWhen late_dmd_anal $ CoreDoPasses (
             strictness_pass ++

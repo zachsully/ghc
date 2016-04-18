@@ -16,7 +16,7 @@ module VarEnv (
         delVarEnvList, delVarEnv, delVarEnv_Directly,
         minusVarEnv, intersectsVarEnv,
         lookupVarEnv, lookupVarEnv_NF, lookupWithDefaultVarEnv,
-        mapVarEnv, zipVarEnv,
+        mapVarEnv, mapMaybeVarEnv, zipVarEnv,
         modifyVarEnv, modifyVarEnv_Directly,
         isEmptyVarEnv, foldVarEnv, foldVarEnv_Directly,
         elemVarEnvByKey, lookupVarEnv_Directly,
@@ -423,6 +423,7 @@ intersectsVarEnv  :: VarEnv a -> VarEnv a -> Bool
 plusVarEnv_C      :: (a -> a -> a) -> VarEnv a -> VarEnv a -> VarEnv a
 plusVarEnv_CD     :: (a -> a -> a) -> VarEnv a -> a -> VarEnv a -> a -> VarEnv a
 mapVarEnv         :: (a -> b) -> VarEnv a -> VarEnv b
+mapMaybeVarEnv    :: (a -> Maybe b) -> VarEnv a -> VarEnv b
 modifyVarEnv      :: (a -> a) -> VarEnv a -> Var -> VarEnv a
 varEnvElts        :: VarEnv a -> [a]
 varEnvKeys        :: VarEnv a -> [Unique]
@@ -457,6 +458,7 @@ lookupVarEnv     = lookupUFM
 filterVarEnv     = filterUFM
 lookupWithDefaultVarEnv = lookupWithDefaultUFM
 mapVarEnv        = mapUFM
+mapMaybeVarEnv   = mapMaybeUFM
 mkVarEnv         = listToUFM
 mkVarEnv_Directly= listToUFM_Directly
 emptyVarEnv      = emptyUFM
