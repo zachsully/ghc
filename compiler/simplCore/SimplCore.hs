@@ -344,7 +344,7 @@ getCoreToDo dflags
           [ CoreDoFloatOutwards $ FloatOutSwitches
               { floatOutLambdas             = nonrec
               , floatOutConstants           = False
-              , floatOutPartialApplications = False
+              , floatOutOverSatApps         = True
               , floatJoinsOnlyToTop         = joins_to_top_only
               , finalPass_                  = Just fps
               }

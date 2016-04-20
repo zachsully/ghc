@@ -29,8 +29,13 @@ module VarEnv (
         -- ** Manipulating these environments
         emptyDVarEnv,
         extendDVarEnv,
+        dVarEnvElts,
+        plusDVarEnv, plusDVarEnv_C,
+        delDVarEnvList, delDVarEnv,
+        minusDVarEnv,
         lookupDVarEnv,
         foldDVarEnv,
+        mapDVarEnv,
 
         -- * The InScopeSet type
         InScopeSet,
@@ -511,8 +516,29 @@ emptyDVarEnv = emptyUDFM
 extendDVarEnv :: DVarEnv a -> Var -> a -> DVarEnv a
 extendDVarEnv = addToUDFM
 
+dVarEnvElts :: DVarEnv a -> [a]
+dVarEnvElts = eltsUDFM
+
+plusDVarEnv :: DVarEnv a -> DVarEnv a -> DVarEnv a
+plusDVarEnv = plusUDFM
+
+plusDVarEnv_C :: (a -> a -> a) -> DVarEnv a -> DVarEnv a -> DVarEnv a
+plusDVarEnv_C = plusUDFM_C
+
+delDVarEnvList :: DVarEnv a -> [Var] -> DVarEnv a
+delDVarEnvList = delListFromUDFM
+
+delDVarEnv :: DVarEnv a -> Var -> DVarEnv a
+delDVarEnv = delFromUDFM
+
+minusDVarEnv :: DVarEnv a -> DVarEnv a' -> DVarEnv a
+minusDVarEnv = minusUDFM
+
 lookupDVarEnv :: DVarEnv a -> Var -> Maybe a
 lookupDVarEnv = lookupUDFM
 
 foldDVarEnv :: (a -> b -> b) -> b -> DVarEnv a -> b
 foldDVarEnv = foldUDFM
+
+mapDVarEnv :: (a -> b) -> DVarEnv a -> DVarEnv b
+mapDVarEnv = mapUDFM

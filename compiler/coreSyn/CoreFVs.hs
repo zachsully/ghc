@@ -27,7 +27,7 @@ module CoreFVs (
         idUnfoldingVars, idFreeVars, dIdFreeVars,
         idRuleAndUnfoldingVars, idRuleAndUnfoldingVarsDSet,
         idFreeVarsAcc,
-        bndrRuleAndUnfoldingVars,
+        bndrRuleAndUnfoldingVarsAcc,
         idRuleVars, idRuleRhsVars, stableUnfoldingVars,
         ruleRhsFreeVars, ruleFreeVars, rulesFreeVars,
         rulesFreeVarsDSet,

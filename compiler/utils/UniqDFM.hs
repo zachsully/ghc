@@ -33,6 +33,7 @@ module UniqDFM (
         alterUDFM,
         mapUDFM,
         plusUDFM,
+        plusUDFM_C,
         lookupUDFM,
         elemUDFM,
         foldUDFM,
@@ -146,6 +147,17 @@ addToUDFM_Directly (UDFM m i) u v =
 addListToUDFM_Directly :: UniqDFM elt -> [(Unique,elt)] -> UniqDFM elt
 addListToUDFM_Directly = foldl (\m (k, v) -> addToUDFM_Directly m k v)
 
+addToUDFM_Directly_C :: (elt -> elt -> elt)
+                     -> UniqDFM elt -> Unique -> elt -> UniqDFM elt
+addToUDFM_Directly_C f (UDFM m i) u v =
+  UDFM (M.insertWith f' (getKey u) (TaggedVal v i) m) (i + 1)
+  where
+  f' (TaggedVal v1 i1) (TaggedVal v2 i2) = TaggedVal (f v1 v2) (min i1 i2)
+
+addListToUDFM_Directly_C :: (elt -> elt -> elt)
+                         -> UniqDFM elt -> [(Unique,elt)] -> UniqDFM elt
+addListToUDFM_Directly_C f = foldl (\m (k, v) -> addToUDFM_Directly_C f m k v)
+
 delFromUDFM :: Uniquable key => UniqDFM elt -> key -> UniqDFM elt
 delFromUDFM (UDFM m i) k = UDFM (M.delete (getKey $ getUnique k) m) i
 
@@ -191,6 +203,16 @@ plusUDFM udfml@(UDFM _ i) udfmr@(UDFM _ j)
 
 insertUDFMIntoLeft :: UniqDFM elt -> UniqDFM elt -> UniqDFM elt
 insertUDFMIntoLeft udfml udfmr = addListToUDFM_Directly udfml $ udfmToList udfmr
+
+plusUDFM_C :: (elt -> elt -> elt) -> UniqDFM elt -> UniqDFM elt -> UniqDFM elt
+plusUDFM_C f udfml@(UDFM _ i) udfmr@(UDFM _ j)
+  | i > j = insertUDFMIntoLeft_C f udfml udfmr
+  | otherwise = insertUDFMIntoLeft_C f udfmr udfml
+
+insertUDFMIntoLeft_C :: (elt -> elt -> elt)
+                     -> UniqDFM elt -> UniqDFM elt -> UniqDFM elt
+insertUDFMIntoLeft_C f udfml udfmr
+  = addListToUDFM_Directly_C f udfml $ udfmToList udfmr
 
 lookupUDFM :: Uniquable key => UniqDFM elt -> key -> Maybe elt
 lookupUDFM (UDFM m _i) k = taggedFst `fmap` M.lookup (getKey $ getUnique k) m
