@@ -1416,8 +1416,8 @@ cloneLetVars is_rec
 add_id :: VarEnv (OutVar, [OutVar]) -> (InVar, Var) -> VarEnv (OutVar, [OutVar])
 add_id id_env (TB v _, v1)
   | isTyVar v = delVarEnv    id_env v
-  | otherwise = ASSERT(not (isCoVar v1))
-                extendVarEnv id_env v (v1,[])
+  | isCoVar v = delVarEnv    id_env v
+  | otherwise = extendVarEnv id_env v (v1,[])
 
 zap_demand_info :: Var -> Var
 zap_demand_info v
