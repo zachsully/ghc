@@ -750,30 +750,6 @@ The binding stuff works for top level too.
 unTag :: TaggedBndr b -> CoreBndr
 unTag (TB b _) = b
 
-unTagAnnAlt :: (AltCon, [TaggedBndr b], AnnExpr (TaggedBndr b) annot) ->
-               (AltCon, [  CoreBndr  ], AnnExpr (TaggedBndr b) annot)
-unTagAnnAlt (con, args, rhs) = (con, map unTag args, rhs)
-
-class DeTag sort where
-  deTag :: sort (TaggedBndr t) -> sort CoreBndr
-
-instance DeTag Expr where
-  deTag (Var var) = Var var
-  deTag (Lit lit) = Lit lit
-  deTag (App fun arg) = App (deTag fun) (deTag arg)
-  deTag (Lam (TB b _) e) = Lam b (deTag e)
-  deTag (Let bind body) = Let (deTag bind) (deTag body)
-  deTag (Case scrut (TB b _) ty alts) = Case (deTag scrut) b ty (map deTag_alt alts)
-    where deTag_alt (con, args, rhs) = (con, map unTag args, deTag rhs)
-  deTag (Cast e co) = Cast (deTag e) co
-  deTag (Tick tick e) = Tick tick (deTag e)
-  deTag (Type ty) = Type ty
-  deTag (Coercion co) = Coercion co
-
-instance DeTag Bind where
-  deTag (NonRec (TB bndr _) rhs) = NonRec bndr (deTag rhs)
-  deTag (Rec pairs) = Rec $ map (\(bndr, rhs) -> (unTag bndr, deTag rhs)) pairs
-
 lvlBind :: LevelEnv
         -> CoreBindWithBoth
         -> LvlM (LevelledBind, LevelEnv)
@@ -785,7 +761,7 @@ lvlBind env binding@(AnnNonRec tagged_bndr@(TB bndr (sort, _)) rhs)
                     -- so we will ignore this case for now
   = doNotFloat
   | otherwise
-  = case decideBindFloat env (exprIsBottom $ deTag $ deAnnotate rhs) binding of
+  = case decideBindFloat env (exprIsBottom $ unwrapBndrsInExpr $ deAnnotate rhs) binding of
       Nothing -> doNotFloat
       Just p  -> uncurry perhapsFloat p
   where
@@ -904,7 +880,7 @@ decideBindFloat init_env is_bot binding =
         , case bsilt of
             BoringB -> emptySilt
             CloB scope -> scope
-        , isFunctionAnn rhs
+        , isFunction (deAnnotate rhs)
         , fvsOf rhs `unionDVarSet` dIdFreeVars bndr   ,   siltFIIs rhs_silt
         , [(bndr, rhs_silt)]
         , is_OneShot rhs
@@ -918,7 +894,7 @@ decideBindFloat init_env is_bot binding =
         , case bsilt of
             BoringB -> emptySilt
             CloB scope -> scope
-        , all isFunctionAnn rhss
+        , all (isFunction . deAnnotate) rhss
         , delBindersFVs tbs rhss_fvs   ,   siltFIIs $ delBindersSilt tbs rhss_silt
         , rhs_silt_s
         , all is_OneShot rhss
@@ -931,7 +907,7 @@ decideBindFloat init_env is_bot binding =
       _ -> panic "decideBindFloat"
 
     isLNE = (sort == JoinBndr)
-    is_OneShot e = case collectBinders $ deTag $ deAnnotate e of
+    is_OneShot e = case collectBinders $ unwrapBndrsInExpr $ deAnnotate e of
       (bs,_) -> all (\b -> isId b && isOneShotBndr b) bs
 
 decideLateLambdaFloat ::
@@ -1178,16 +1154,8 @@ destLevel env fvs _is_function is_bot
   | otherwise = maxFvLevel isId env fvs  -- Max over Ids only; the tyvars
                                          -- will be abstracted
 
-class HasVar b where
-  getVar :: b -> Var
-instance HasVar Var where getVar = id
-instance HasVar (TaggedBndr tag) where getVar (TB id _) = getVar id
-
-isFunctionAnn :: HasVar b => AnnExpr b annot -> Bool
-isFunctionAnn = isFunction . deAnnotate
-
-isFunction :: HasVar b => Expr b -> Bool
-isFunction (Lam b e) | isId (getVar b)    = True
+isFunction :: WrappedBndr b => Expr b -> Bool
+isFunction (Lam b e) | isId (unwrapBndr b) = True
                      | otherwise = isFunction e
 -- isFunction (_, AnnTick _ e)          = isFunction e  -- dubious
 isFunction _                           = False
@@ -1409,7 +1377,7 @@ newLvlVar lvld_rhs is_bot
                       -- flag just tells us when we don't need to do so
        | is_bot    = annotateBotStr var (exprBotStrictness_maybe de_tagged_rhs)
        | otherwise = var
-    de_tagged_rhs = deTagExpr lvld_rhs
+    de_tagged_rhs = unwrapBndrsInExpr lvld_rhs
     rhs_ty = exprType de_tagged_rhs
     mk_name uniq = mkSystemVarName uniq (mkFastString "lvl")
 
@@ -1925,7 +1893,7 @@ letBoundEnv bndr rhs env =
    env { fve_letBoundVars = extendVarEnv_C (\_ new -> new)
            (fve_letBoundVars env)
            (unwrapBndr bndr)
-           (isFunction (unwrapBndrsInExpr rhs)) }
+           (isFunction rhs) }
 
 letBoundsEnv :: [(SortedBndr, ExprWithJoins)] -> FVEnv -> FVEnv
 letBoundsEnv binds env = foldl (\e (id, rhs) -> letBoundEnv id rhs e) env binds
