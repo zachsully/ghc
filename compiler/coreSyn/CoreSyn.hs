@@ -46,7 +46,7 @@ module CoreSyn (
         tickishContains,
 
         -- ** Mapping over binders
-        WrappedBndr(..), mapExpr,
+        WrappedBndr(..), mapExpr, mapBind, mapAlt,
         
         -- * Unfolding data types
         Unfolding(..),  UnfoldingGuidance(..), UnfoldingSource(..),
@@ -1450,14 +1450,24 @@ class WrappedBndr b where
   unwrapBndrs       :: [b]    -> [CoreBndr]
   -- | Remove all wrappers from all binders in an expression.
   unwrapBndrsInExpr :: Expr b -> CoreExpr
+  -- | Remove all wrappens from all binders in a binding.
+  unwrapBndrsInBind :: Bind b -> CoreBind
+  -- | Remove all wrappens from all binders in a binding.
+  unwrapBndrsInAlt  :: Alt  b -> CoreAlt
   
   unwrapBndrs       = map     unwrapBndr
   unwrapBndrsInExpr = mapExpr unwrapBndr
+  unwrapBndrsInBind = mapBind unwrapBndr
+  unwrapBndrsInAlt  = mapAlt  unwrapBndr
 
+-- | Trivial instance of 'WrappedBndr' for plain binders. All "unwrapping"
+-- functions are identities.
 instance WrappedBndr Var where
   unwrapBndr  b  = b
   unwrapBndrs bs = bs
   unwrapBndrsInExpr expr = expr
+  unwrapBndrsInBind bind = bind
+  unwrapBndrsInAlt  alt  = alt
 
 {-
 ************************************************************************

@@ -20,6 +20,8 @@ import Control.Monad
 
 data BndrSort   = ValBndr | JoinBndr deriving (Eq)
 data SortedBndr = SB CoreBndr BndrSort
+  -- Could be TaggedBndr, but shouldn't think of the sort as a tag but as
+  -- essential information
 
 instance WrappedBndr SortedBndr where
   unwrapBndr (SB bndr _) = bndr
@@ -48,25 +50,7 @@ findJoinsInExpr expr = initFJ $ do (expr', anal) <- fjExpr expr
                                    return expr'
 
 eraseJoins :: ProgramWithJoins -> CoreProgram
-eraseJoins = map doBind
-  where
-    doBind (NonRec (SB bndr _) expr) = NonRec bndr (doExpr expr)
-    doBind (Rec pairs) = Rec [(bndr, doExpr expr) | (SB bndr _, expr) <- pairs]
-    
-    doExpr (Var v)         = Var v
-    doExpr (Lit l)         = Lit l
-    doExpr (App e1 e2)     = App (doExpr e1) (doExpr e2)
-    doExpr (Lam (SB bndr _) expr)
-                           = Lam bndr (doExpr expr)
-    doExpr (Let bind body) = Let (doBind bind) (doExpr body)
-    doExpr (Case scrut (SB bndr _) ty alts)
-                           = Case (doExpr scrut) bndr ty (map doAlt alts)
-    doExpr (Cast expr co)  = Cast (doExpr expr) co
-    doExpr (Tick ti expr)  = Tick ti (doExpr expr)
-    doExpr (Type ty)       = Type ty
-    doExpr (Coercion co)   = Coercion co
-    
-    doAlt (con, bndrs, rhs) = (con, [bndr | SB bndr _ <- bndrs], doExpr rhs)
+eraseJoins = map unwrapBndrsInBind -- use WrappedBndr instance
 
 lintJoinsInCoreBindings :: ProgramWithJoins -> ()
 lintJoinsInCoreBindings pgm
