@@ -111,7 +111,6 @@ import MonadUtils       ( mapAndUnzipM )
 import Data.Maybe       ( mapMaybe )
 import qualified Data.List
 
-import Control.Applicative ( Applicative(..) )
 import qualified Control.Monad
 
 {-
@@ -308,10 +307,6 @@ top level -- but then they must be applied to a constant dictionary and
 will almost certainly be optimised away anyway.
 -}
 
-type InExpr = CoreExprWithBoth
-type InBind = CoreBindWithBoth
-type InAlt  = CoreAltWithBoth
-
 lvlExpr :: LevelEnv             -- Context
         -> CoreExprWithBoth     -- Input expression
         -> LvlM LevelledExpr    -- Result expression
@@ -418,7 +413,7 @@ lvlCase :: LevelEnv             -- Level of in-scope names/tyvars
         -> DVarSet              -- Free vars of input scrutinee
         -> LevelledExpr         -- Processed scrutinee
         -> InVar -> Type        -- Case binder and result type
-        -> [InAlt]              -- Input alternatives
+        -> [CoreAltWithBoth]    -- Input alternatives
         -> LvlM LevelledExpr    -- Result expression
 lvlCase env scrut_fvs scrut' case_bndr ty alts
   | [(con@(DataAlt {}), bs, body)] <- alts
@@ -754,70 +749,53 @@ lvlBind :: LevelEnv
         -> CoreBindWithBoth
         -> LvlM (LevelledBind, LevelEnv)
 
-lvlBind env binding@(AnnNonRec tagged_bndr@(TB bndr (sort, _)) rhs)
-  | isTyVar bndr    -- Don't do anything for TyVar binders
-                    --   (simplifier gets rid of them pronto)
-  || isCoVar bndr   -- Difficult to fix up CoVar occurrences (see extendPolyLvlEnv)
-                    -- so we will ignore this case for now
-  = doNotFloat
-  | otherwise
+lvlBind env binding@(AnnNonRec bndr rhs)
   = case decideBindFloat env (exprIsBottom $ unwrapBndrsInExpr $ deAnnotate rhs) binding of
-      Nothing -> doNotFloat
-      Just p  -> uncurry perhapsFloat p
+      Nothing -> do
+        { rhs' <- lvlExpr env rhs
+        ; let  bind_lvl        = incMinorLvl (le_ctxt_lvl env)
+               (env', [bndr']) = substAndLvlBndrs NonRecursive env bind_lvl [bndr]
+        ; return (NonRec bndr' rhs', env') }
+
+      Just (dest_lvl, abs_vars)
+        | null abs_vars
+        -> do {  -- No type abstraction; clone existing binder
+                rhs' <- lvlExpr (setCtxtLvl env dest_lvl) rhs
+              ; (env', [bndr']) <- cloneLetVars NonRecursive env dest_lvl [bndr]
+              ; return (NonRec (TB bndr' (FloatMe dest_lvl)) rhs', env') }
+        | otherwise
+        -> do {  -- Yes, type abstraction; create a new binder, extend substitution, etc
+                rhs' <- lvlFloatRhs abs_vars dest_lvl env rhs
+              ; (env', [bndr']) <- newPolyBndrs dest_lvl env abs_vars [bndr]
+              ; return (NonRec (TB bndr' (FloatMe dest_lvl)) rhs', env') }
+
+lvlBind env binding@(AnnRec pairs)
+  = case decideBindFloat env False binding of
+      Nothing -> do -- decided to not float
+        { let bind_lvl = incMinorLvl (le_ctxt_lvl env)
+              (env', bndrs') = substAndLvlBndrs Recursive env bind_lvl bndrs
+        ; rhss' <- mapM (lvlExpr env') rhss
+        ; return (Rec (bndrs' `zip` rhss'), env')
+        }
+
+      Just (dest_lvl, abs_vars) -- decided to float
+        | null abs_vars -> do
+        { (new_env, new_bndrs) <- cloneLetVars Recursive env dest_lvl bndrs
+        ; new_rhss <- mapM (lvlExpr (setCtxtLvl new_env dest_lvl)) rhss
+        ; return ( Rec ([TB b (FloatMe dest_lvl) | b <- new_bndrs] `zip` new_rhss)
+                 , new_env
+                 )
+        }
+
+        | otherwise -> do  -- Non-null abs_vars
+        { (new_env, new_bndrs) <- newPolyBndrs dest_lvl env abs_vars bndrs
+        ; new_rhss <- mapM (lvlFloatRhs abs_vars dest_lvl new_env) rhss
+        ; return ( Rec ([TB b (FloatMe dest_lvl) | b <- new_bndrs] `zip` new_rhss)
+                 , new_env
+          )
+        }
   where
-    doNotFloat = do
-      { rhs' <- lvlExpr env rhs
-      ; let  bind_lvl        = incMinorLvl (le_ctxt_lvl env)
-             (env', [bndr']) = substAndLvlBndrs NonRecursive env bind_lvl [tagged_bndr]
-      ; return (NonRec bndr' rhs', env') }
-
-    perhapsFloat dest_lvl abs_vars
-      | (isTopLvl dest_lvl && isUnliftedType (idType bndr))
-          -- We can't float an unlifted binding to top level, so we don't
-          -- float it at all.  It's a bit brutal, but unlifted bindings
-          -- aren't expensive either
-      || (not (isTopLvl dest_lvl) && sort == JoinBndr &&
-                                   floatJoinsOnlyToTop (le_switches env))
-      = doNotFloat
-      -- Otherwise we are going to float
-      | null abs_vars
-      = do {  -- No type abstraction; clone existing binder
-             rhs' <- lvlExpr (setCtxtLvl env dest_lvl) rhs
-           ; (env', [bndr']) <- cloneLetVars NonRecursive env dest_lvl [tagged_bndr]
-           ; return (NonRec (TB bndr' (FloatMe dest_lvl)) rhs', env') }
-      | otherwise
-      = do {  -- Yes, type abstraction; create a new binder, extend substitution, etc
-             rhs' <- lvlFloatRhs abs_vars dest_lvl env rhs
-           ; (env', [bndr']) <- newPolyBndrs dest_lvl env abs_vars [tagged_bndr]
-           ; return (NonRec (TB bndr' (FloatMe dest_lvl)) rhs', env') }
-
-lvlBind env binding@(AnnRec pairs) = let
-  bndrs = map fst pairs
-  rhss = map snd pairs
-  in case decideBindFloat env False binding of
-    Nothing -> do -- decided to not float
-      { let bind_lvl = incMinorLvl (le_ctxt_lvl env)
-            (env', bndrs') = substAndLvlBndrs Recursive env bind_lvl bndrs
-      ; rhss' <- mapM (lvlExpr env') rhss
-      ; return (Rec (bndrs' `zip` rhss'), env')
-      }
-
-    Just (dest_lvl, abs_vars) -- decided to float
-      | null abs_vars -> do
-      { (new_env, new_bndrs) <- cloneLetVars Recursive env dest_lvl bndrs
-      ; new_rhss <- mapM (lvlExpr (setCtxtLvl new_env dest_lvl)) rhss
-      ; return ( Rec ([TB b (FloatMe dest_lvl) | b <- new_bndrs] `zip` new_rhss)
-               , new_env
-               )
-      }
-
-      | otherwise -> do  -- Non-null abs_vars
-      { (new_env, new_bndrs) <- newPolyBndrs dest_lvl env abs_vars bndrs
-      ; new_rhss <- mapM (lvlFloatRhs abs_vars dest_lvl new_env) rhss
-      ; return ( Rec ([TB b (FloatMe dest_lvl) | b <- new_bndrs] `zip` new_rhss)
-               , new_env
-        )
-      }
+    (bndrs, rhss) = unzip pairs
 
 decideBindFloat ::
   LevelEnv ->
@@ -827,22 +805,49 @@ decideBindFloat ::
                       --
                       -- Just (lvl, vs) <=> float to lvl using vs as
                       -- the abs_vars
+decideBindFloat _ _ (AnnNonRec (TB bndr _) _)
+  | isTyVar bndr    -- Don't do anything for TyVar binders
+                    --   (simplifier gets rid of them pronto)
+  || isCoVar bndr   -- Difficult to fix up CoVar occurrences (see extendPolyLvlEnv)
+                    -- so we will ignore this case for now
+  = Nothing
+
 decideBindFloat init_env is_bot binding =
   maybe conventionalFloatOut lateLambdaLift (finalPass env)
   where
-    env | isLNE     = lneLvlEnv init_env ids
-        | otherwise = init_env
+    env = lneLvlEnv init_env ids
 
-    conventionalFloatOut | isProfitableFloat = Just (dest_lvl, abs_vars)
+    conventionalFloatOut | is_forbidden_float  = Nothing
+                         | is_profitable_float = Just (dest_lvl, abs_vars)
                          | otherwise         = Nothing
       where
-        dest_lvl = destLevel env bindings_fvs all_funs is_bot 
+        dest_lvl = destLevel env bindings_fvs all_funs is_bot
 
         abs_vars = abstractVars dest_lvl env bindings_fvs
 
-        isProfitableFloat =
+        is_forbidden_float =
+             (isTopLvl dest_lvl && is_unlifted_binding)
+               -- We can't float an unlifted binding to top level, so we don't
+               -- float it at all.  It's a bit brutal, but unlifted bindings
+               -- aren't expensive either
+          || (not (isTopLvl dest_lvl) && careful_with_joins &&
+                has_unfloatable_join_binding)
+
+        is_profitable_float =
              (dest_lvl `ltMajLvl` le_ctxt_lvl init_env) -- Escapes a value lambda
           || isTopLvl dest_lvl -- Going all the way to top level
+          
+        is_unlifted_binding
+          = case binding of
+              AnnNonRec (TB bndr _) _ -> isUnliftedType (idType bndr)
+              _                       -> False
+        
+        careful_with_joins = floatJoinsOnlyToTop (le_switches init_env)
+        
+        has_unfloatable_join_binding =
+          any (\(TB _ (sort, _), rhs) -> sort == JoinBndr && isFunction (deAnnotate rhs)) pairs
+            -- We're fine with floating a nullary join point - it's no longer a
+            -- join point but it *is* now shared. Hence we consult isFunction.
 
     lateLambdaLift fps
       | all_funs || (fps_floatLNE0 fps && isLNE)
@@ -865,47 +870,29 @@ decideBindFloat init_env is_bot binding =
                   $$ text "le_env env:" <+> ppr (le_env env)
                   $$ text "abs_vars:"   <+> ppr abs_vars
 
-    rhs_silt_s :: [(CoreBndr, FISilt)]
-    (   isRec , ids
-      , sort
-      , scope_silt
-      , all_funs
-      , bindings_fvs , bindings_fiis
-      , rhs_silt_s
-      , all_one_shot
-      ) = case binding of
-      AnnNonRec (TB bndr (sort,bsilt)) rhs ->
-        ( False , [bndr]
-        , sort
-        , case bsilt of
-            BoringB -> emptySilt
-            CloB scope -> scope
-        , isFunction (deAnnotate rhs)
-        , fvsOf rhs `unionDVarSet` dIdFreeVars bndr   ,   siltFIIs rhs_silt
-        , [(bndr, rhs_silt)]
-        , is_OneShot rhs
-        )
-        where rhs_silt = siltOf rhs
-      AnnRec pairs@((TB _ (sort,bsilt),_):_) ->
-                 -- the LNE property and the scope silt are the same
-                 -- for each
-        ( True , bndrs
-        , sort
-        , case bsilt of
-            BoringB -> emptySilt
-            CloB scope -> scope
-        , all (isFunction . deAnnotate) rhss
-        , delBindersFVs tbs rhss_fvs   ,   siltFIIs $ delBindersSilt tbs rhss_silt
-        , rhs_silt_s
-        , all is_OneShot rhss
-        )
-        where (tbs,rhss) = unzip pairs
-              bndrs = map unTag tbs
-              rhs_silt_s = map (\(b,rhs) -> (unTag b,siltOf rhs)) pairs
-              rhss_silt = foldr bothSilt emptySilt (map snd rhs_silt_s)
-              rhss_fvs  = computeRecRHSsFVs bndrs (map fvsOf rhss)
-      _ -> panic "decideBindFloat"
-
+    isRec        = case binding of AnnNonRec {} -> False
+                                   AnnRec {}    -> True
+    pairs        = case binding of AnnNonRec id rhs -> [(id, rhs)]
+                                   AnnRec pairs     -> pairs
+    (ids, rhss)  = unzip pairs
+    rhs_silt_s   = [(unTag id, siltOf rhs) | (id, rhs) <- pairs]
+    TB _ (sort, bsilt) = head ids
+      -- in a recursive group, the binder sort and the scope silt are the same
+      -- for each
+    scope_silt   = case bsilt of BoringB -> emptySilt
+                                 CloB scope -> scope
+    all_funs     = all (isFunction . deAnnotate) rhss
+    all_one_shot = all is_OneShot rhss
+    (bindings_fvs, bindings_fiis)
+      = case binding of
+          AnnNonRec (TB bndr _) rhs ->
+            (fvsOf rhs `unionDVarSet` dIdFreeVars bndr, siltFIIs (siltOf rhs))
+          AnnRec _ ->
+            (delBindersFVs ids rhss_fvs, siltFIIs $ delBindersSilt ids rhss_silt)
+            where
+              rhss_silt = foldr bothSilt emptySilt (map siltOf rhss)
+              rhss_fvs  = computeRecRHSsFVs (map unTag ids) (map fvsOf rhss)
+    
     isLNE = (sort == JoinBndr)
     is_OneShot e = case collectBinders $ unwrapBndrsInExpr $ deAnnotate e of
       (bs,_) -> all (\b -> isId b && isOneShotBndr b) bs
@@ -917,7 +904,7 @@ decideLateLambdaFloat ::
   Bool ->
   DIdSet ->
   DIdSet -> [(Bool, WordOff, WordOff, WordOff)] ->
-  [Id] -> SDoc ->
+  [InId] -> SDoc ->
   FinalPassSwitches ->
   Maybe DVarSet -- Nothing <=> float to tOP_LEVEL
                 --
@@ -967,7 +954,7 @@ decideLateLambdaFloat env isRec isLNE all_one_shot abs_ids_set badTime spaceInfo
       -- allocating these bindings' closures, since the closure could
       -- be allocated many more times than these bindings are.
 
-    msg_sdoc = vcat (zipWith space ids spaceInfo) where
+    msg_sdoc = vcat (zipWith space (map unTag ids) spaceInfo) where
       abs_ids = dVarSetElems abs_ids_set
       space v (badPAP, closureSize, cg, cgil) = vcat
        [ ppr v <+> if isLNE then parens (text "LNE") else empty
@@ -1241,8 +1228,10 @@ floatConsts le = floatOutConstants (le_switches le)
 floatOverSat :: LevelEnv -> Bool
 floatOverSat le = floatOutOverSatApps (le_switches le)
 
-lneLvlEnv :: LevelEnv -> [Id] -> LevelEnv
-lneLvlEnv env lnes = env { le_joins = extendVarSetList (le_joins env) lnes }
+lneLvlEnv :: LevelEnv -> [InId] -> LevelEnv
+lneLvlEnv env bndrs = env { le_joins = extendVarSetList (le_joins env) joins }
+  where
+    joins = [ bndr | TB bndr (JoinBndr, _) <- bndrs ]
 
 setCtxtLvl :: LevelEnv -> Level -> LevelEnv
 setCtxtLvl env lvl = env { le_ctxt_lvl = lvl }
