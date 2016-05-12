@@ -49,7 +49,7 @@ module Id (
         globaliseId, localiseId,
         setIdInfo, lazySetIdInfo, modifyIdInfo, maybeModifyIdInfo,
         zapLamIdInfo, zapIdDemandInfo, zapIdUsageInfo, zapFragileIdInfo,
-        zapIdStrictness,
+        zapIdStrictness, zapIdJoinPointInfo,
         transferPolyIdInfo,
 
         -- ** Predicates on Ids
@@ -87,6 +87,8 @@ module Id (
         idCafInfo,
         idOneShotInfo,
         idOccInfo,
+        idJoinPointInfo,
+        isJoinBndr,
 
         -- ** Writing 'IdInfo' fields
         setIdUnfoldingLazily,
@@ -97,6 +99,7 @@ module Id (
         setIdSpecialisation,
         setIdCafInfo,
         setIdOccInfo, zapIdOccInfo,
+        setIdJoinPointInfo,
 
         setIdDemandInfo,
         setIdStrictness,
@@ -665,6 +668,21 @@ setIdOccInfo id occ_info = modifyIdInfo (`setOccInfo` occ_info) id
 
 zapIdOccInfo :: Id -> Id
 zapIdOccInfo b = b `setIdOccInfo` NoOccInfo
+
+        ---------------------------------
+        -- JOIN POINTS
+        
+idJoinPointInfo :: Id -> JoinPointInfo
+idJoinPointInfo id = joinPointInfo (idInfo id)
+
+setIdJoinPointInfo :: Id -> JoinPointInfo -> Id
+setIdJoinPointInfo id jp_info = modifyIdInfo (`setJoinPointInfo` jp_info) id
+
+zapIdJoinPointInfo :: Id -> Id
+zapIdJoinPointInfo b = b `setIdJoinPointInfo` noJoinPointInfo
+
+isJoinBndr :: Id -> Bool
+isJoinBndr id = idJoinPointInfo id == JoinPoint
 
 {-
         ---------------------------------

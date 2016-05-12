@@ -37,6 +37,11 @@ module IdInfo (
         strictnessInfo, setStrictnessInfo,
         demandInfo, setDemandInfo, pprStrictness,
 
+        -- ** Join point flag
+        JoinPointInfo(..),
+        joinPointInfo, setJoinPointInfo,
+        noJoinPointInfo, ppJoinPointInfo,
+
         -- ** Unfolding Info
         unfoldingInfo, setUnfoldingInfo, setUnfoldingInfoLazily,
 
@@ -193,9 +198,10 @@ pprIdDetails other     = brackets (pp other)
 -- 'Unique' (and are hence the same 'Id'); for example, one might lack
 -- the properties attached to the other.
 --
--- Most of the 'IdInfo' gives information about the value, or definition, of
+-- Much of the 'IdInfo' gives information about the value, or definition, of
 -- the 'Id', independent of its usage. Exceptions to this
--- are 'demandInfo', 'occInfo', 'oneShotInfo' and 'callArityInfo'.
+-- are 'demandInfo', 'occInfo', 'oneShotInfo', 'callArityInfo' and
+-- 'joinPointInfo'.
 data IdInfo
   = IdInfo {
         arityInfo       :: !ArityInfo,          -- ^ 'Id' arity
@@ -210,8 +216,9 @@ data IdInfo
         strictnessInfo  :: StrictSig,      --  ^ A strictness signature
 
         demandInfo      :: Demand,       -- ^ ID demand information
-        callArityInfo :: !ArityInfo    -- ^ How this is called.
+        callArityInfo   :: !ArityInfo,   -- ^ How this is called.
                                          -- n <=> all calls have at least n arguments
+        joinPointInfo   :: JoinPointInfo -- ^ Is the 'Id' a join point?
     }
 
 -- Setters
@@ -253,6 +260,9 @@ setDemandInfo info dd = dd `seq` info { demandInfo = dd }
 setStrictnessInfo :: IdInfo -> StrictSig -> IdInfo
 setStrictnessInfo info dd = dd `seq` info { strictnessInfo = dd }
 
+setJoinPointInfo :: IdInfo -> JoinPointInfo -> IdInfo
+setJoinPointInfo info jp = jp `seq` info { joinPointInfo = jp }
+
 -- | Basic 'IdInfo' that carries no useful information whatsoever
 vanillaIdInfo :: IdInfo
 vanillaIdInfo
@@ -266,7 +276,8 @@ vanillaIdInfo
             occInfo             = NoOccInfo,
             demandInfo          = topDmd,
             strictnessInfo      = nopSig,
-            callArityInfo     = unknownArity
+            callArityInfo       = unknownArity,
+            joinPointInfo       = noJoinPointInfo
            }
 
 -- | More informative 'IdInfo' we can use when we know the 'Id' has no CAF references
@@ -303,6 +314,61 @@ unknownArity = 0 :: Arity
 ppArityInfo :: Int -> SDoc
 ppArityInfo 0 = empty
 ppArityInfo n = hsep [text "Arity", int n]
+
+{-
+************************************************************************
+*                                                                      *
+\subsection[joinPoint-IdInfo]{Join point flag on @Id@}
+*                                                                      *
+************************************************************************
+
+In Core, a *join point* is a function whose only occurrences are
+saturated tail calls. A *tail call* is an invocation in a *tail
+context*, which is a context conforming to the following grammar:
+
+  T ::= []
+     |  let ... in T
+     |  let <join> k = T; ... in ...
+     |  case ... of P -> T; ...
+
+The invariant on a join point, then, is that given an expression
+
+  let join k = ... in E,
+  
+any occurrence of k "factors" E into T[k E1 ... En], where T is a tail
+context and n is k's arity. (Recursive invocations are also okay, subject to
+the same restriction.) Only local variables can be join points.
+
+Note from the above grammar that one join point can invoke another from an
+outer scope, but a non-join-point cannot:
+
+  let <join> k = \n m -> ...
+      <join> h = \n -> k n n -- GOOD
+             f = \n -> k n n -- BAD
+  in case b of True  -> h 3
+               False -> 1 + f 4
+
+Here f is not a join point since it has a non-tail call in the False branch;
+thus it should not invoke k.
+
+Join points are very special: At runtime, they exist only as blocks of code, so
+they are never allocated and invoking them is very fast (little more than a
+jump). Thus we would like to maintain their status as join points when possible.
+However, it is always safe to set the join point flag to False.
+-}
+
+-- | Whether an 'Id' is a *join point,* as determined by its occurrences. A
+-- join point only occurs as a saturated tail call, such that no closure is
+-- needed and invocation can be "by goto."
+data JoinPointInfo = JoinPoint | NotJoinPoint deriving (Eq)
+
+-- | It is always safe to assume that a function is not a join point
+noJoinPointInfo :: JoinPointInfo
+noJoinPointInfo = NotJoinPoint
+
+ppJoinPointInfo :: JoinPointInfo -> SDoc
+ppJoinPointInfo NotJoinPoint = empty
+ppJoinPointInfo JoinPoint = text "Join"
 
 {-
 ************************************************************************

@@ -1,11 +1,13 @@
 {-# LANGUAGE CPP #-}
 
-module CoreJoins (findJoinsInPgm, findJoinsInExpr,
-  eraseJoins, lintJoinsInCoreBindings,
-  SortedBndr(..), BndrSort(..), isJoinBndr, isValBndr, sbSort, sbBndr,
-  ExprWithJoins, BindWithJoins, AltWithJoins, ProgramWithJoins) where
+module CoreJoins (
+  findJoinsInPgm, findJoinsInExpr, eraseJoins,
+  lintJoinsInCoreBindings,
+) where
 
 import CoreSyn
+import Id
+import IdInfo
 import MonadUtils
 import Outputable
 import PprCore ()
@@ -18,62 +20,64 @@ import Control.Monad
 
 #include "HsVersions.h"
 
-data BndrSort   = ValBndr | JoinBndr deriving (Eq)
-data SortedBndr = SB CoreBndr BndrSort
-  -- Could be TaggedBndr, but shouldn't think of the sort as a tag but as
-  -- essential information
-
-instance WrappedBndr SortedBndr where
-  unwrapBndr (SB bndr _) = bndr
-
-isJoinBndr, isValBndr :: SortedBndr -> Bool
-isJoinBndr = (== JoinBndr) . sbSort
-isValBndr  = (== ValBndr)  . sbSort
-
-sbSort :: SortedBndr -> BndrSort
-sbSort (SB _bndr sort) = sort
-
-sbBndr :: SortedBndr -> CoreBndr
-sbBndr (SB bndr _sort) = bndr
-
-type ExprWithJoins    = Expr SortedBndr
-type BindWithJoins    = Bind SortedBndr
-type AltWithJoins     = Alt SortedBndr
-type ProgramWithJoins = [Bind SortedBndr]
-
-findJoinsInPgm :: CoreProgram -> ProgramWithJoins
+findJoinsInPgm :: CoreProgram -> CoreProgram
 findJoinsInPgm pgm = map (\bind -> initFJ $ fjTopBind bind) pgm
 
-findJoinsInExpr :: CoreExpr -> ExprWithJoins
+findJoinsInExpr :: CoreExpr -> CoreExpr
 findJoinsInExpr expr = initFJ $ do (expr', anal) <- fjExpr expr
                                    MASSERT(isEmptyJoinAnal anal)
                                    return expr'
 
-eraseJoins :: ProgramWithJoins -> CoreProgram
-eraseJoins = map unwrapBndrsInBind -- use WrappedBndr instance
+eraseJoins :: CoreProgram -> CoreProgram
+eraseJoins = map doBind
+  where
+    doBind (NonRec bndr rhs) = NonRec (zapBndrSort bndr) (doExpr rhs)
+    doBind (Rec pairs) = Rec [ (zapBndrSort bndr, doExpr rhs)
+                             | (bndr, rhs) <- pairs ]
+  
+    doExpr (App fun arg)   = App (doExpr fun) (doExpr arg)
+    doExpr (Lam bndr body) = Lam (zapBndrSort bndr) (doExpr body)
+    doExpr (Let bind body) = Let (doBind bind) (doExpr body)
+    doExpr (Case scrut bndr ty alts)
+      = Case (doExpr scrut) (zapBndrSort bndr) ty
+             [ (con, map zapBndrSort bndrs, doExpr rhs)
+             | (con, bndrs, rhs) <- alts ]
+    doExpr (Cast expr co)  = Cast (doExpr expr) co
+    doExpr (Tick ti expr)  = Tick ti (doExpr expr)
+    doExpr other = other
 
-lintJoinsInCoreBindings :: ProgramWithJoins -> ()
+lintJoinsInCoreBindings :: CoreProgram -> ()
 lintJoinsInCoreBindings pgm
   = runLintJM $ do mapM_ (lintJBind emptyJoinVarSets) pgm
                    return ()
+
+type BndrSort = JoinPointInfo
+
+setBndrSort :: Var -> BndrSort -> Var
+setBndrSort b sort | isId b    = setIdJoinPointInfo b sort
+                   | otherwise = b
+
+zapBndrSort :: Var -> Var
+zapBndrSort b | isId b    = zapIdJoinPointInfo b
+              | otherwise = b
 
 -------------------------
 -- Finding join points --
 -------------------------
 
-fjTopBind :: CoreBind -> FJM BindWithJoins 
+fjTopBind :: CoreBind -> FJM CoreBind 
 fjTopBind (NonRec bndr expr)
   = do (bndr', expr') <- fjTopPair (bndr, expr)
        return $ NonRec bndr' expr'
 fjTopBind (Rec pairs)
   = Rec <$> (mapM fjTopPair pairs)
 
-fjTopPair :: (CoreBndr, CoreExpr) -> FJM (SortedBndr, ExprWithJoins)
+fjTopPair :: (CoreBndr, CoreExpr) -> FJM (CoreBndr, CoreExpr)
 fjTopPair (bndr, expr)
   = do (expr', _) <- fjExpr expr
-       return (SB bndr ValBndr, expr') -- can't have top-level join
+       return (zapBndrSort bndr, expr') -- can't have top-level join
 
-fjExpr :: CoreExpr -> FJM (ExprWithJoins, JoinAnal)
+fjExpr :: CoreExpr -> FJM (CoreExpr, JoinAnal)
 fjExpr (Lit l)       = return (Lit l, emptyJoinAnal)
 fjExpr (Coercion co) = return (Coercion co, emptyJoinAnal)
 fjExpr (Type ty)     = return (Type ty, emptyJoinAnal)
@@ -93,7 +97,7 @@ fjExpr expr@(App {})
 fjExpr expr@(Lam {})
   = do let (bndrs, body) = collectBinders expr
        (body', anal) <- withoutCandidatesFJ bndrs $ fjExpr body
-       return (mkLams [ SB bndr ValBndr | bndr <- bndrs ] body', markAllVarsBad anal)
+       return (mkLams [ zapBndrSort bndr | bndr <- bndrs ] body', markAllVarsBad anal)
 fjExpr (Let bind body)
   = do (expr', anal, _)
          <- mfix $ \ ~(_, _, sort) ->
@@ -103,7 +107,7 @@ fjExpr (Case scrut bndr ty alts)
   = do (scrut', scrut_anal) <- fjExpr scrut
        (alts', alt_anals) <- withoutCandidatesFJ [bndr] $ mapAndUnzipM fjAlt alts
        let anal = combineManyJoinAnals (markAllVarsBad scrut_anal : alt_anals)
-       return (Case scrut' (SB bndr ValBndr) ty alts', anal)
+       return (Case scrut' (zapBndrSort bndr) ty alts', anal)
 fjExpr (Cast expr co)
   = do (expr', anal) <- fjExpr expr
        return (Cast expr' co, markAllVarsBad anal)
@@ -111,7 +115,7 @@ fjExpr (Tick ti expr)
   = do (expr', anal) <- fjExpr expr
        return (Tick ti expr', markAllVarsBad anal)
 
-fjApp :: Id -> [CoreArg] -> FJM (ExprWithJoins, JoinAnal)
+fjApp :: Id -> [CoreArg] -> FJM (CoreExpr, JoinAnal)
 fjApp v args
   = do (args', arg_anals) <- mapAndUnzipM fjExpr args
        m_total_arity <- lookupCandidateFJ v
@@ -124,7 +128,7 @@ fjApp v args
       | n_args == total_arity = oneGoodId v
       | otherwise             = oneBadId v
 
-fjLet :: BndrSort -> CoreBind -> CoreExpr -> FJM (ExprWithJoins, JoinAnal, BndrSort)
+fjLet :: BndrSort -> CoreBind -> CoreExpr -> FJM (CoreExpr, JoinAnal, BndrSort)
 fjLet rec_sort bind body
   = do (bind', bind_anal, body', body_anal)
          <- do (bind', bind_anal, env_ext)
@@ -136,8 +140,8 @@ fjLet rec_sort bind body
                  return (bind', bind_anal, body', body_anal)
        let new_let = Let bind' body'
            
-           real_bind_anal | rec_sort == JoinBndr = bind_anal
-                          | otherwise            = markAllVarsBad bind_anal
+           real_bind_anal | rec_sort == JoinPoint = bind_anal
+                          | otherwise             = markAllVarsBad bind_anal
                               -- Everything escapes which is free in the bindings
            
            real_bind_anal_wo_binders
@@ -151,9 +155,9 @@ fjLet rec_sort bind body
                     | otherwise = body_anal                                 -- this let(rec)
 
            sort | binders `allInGoodSet` all_anal
-                = JoinBndr
+                = JoinPoint
                 | otherwise
-                = ValBndr
+                = NotJoinPoint
 
        return (
            new_let,
@@ -167,9 +171,9 @@ fjLet rec_sort bind body
     mk_binding binder rhs
         = (binder, lambdaCount rhs)
 
-    vars_bind :: BndrSort                   -- Whether binding is join point
+    vars_bind :: BndrSort                  -- Whether binding is join point
               -> CoreBind
-              -> FJM (BindWithJoins,
+              -> FJM (CoreBind,
                       JoinAnal,            -- free vars; good vars
                       [(Id, TotalArity)])  -- extension to environment
 
@@ -178,7 +182,7 @@ fjLet rec_sort bind body
         let
             env_ext_item = mk_binding binder rhs
 
-        return (NonRec (SB binder sort) rhs',
+        return (NonRec (setBndrSort binder sort) rhs',
                 bind_anal, [env_ext_item])
 
 
@@ -194,18 +198,18 @@ fjLet rec_sort bind body
           let
             anal = combineManyJoinAnals anals
 
-          return (Rec ([ SB bndr sort | bndr <- binders] `zip` rhss'),
+          return (Rec ([ setBndrSort bndr sort | bndr <- binders] `zip` rhss'),
                   anal, env_ext)
 
-fjRhs :: CoreExpr -> FJM (ExprWithJoins, JoinAnal)
+fjRhs :: CoreExpr -> FJM (CoreExpr, JoinAnal)
 fjRhs expr = do let (bndrs, body) = collectBinders expr
                 (body', anal) <- withoutCandidatesFJ bndrs $ fjExpr body
-                return (mkLams [ SB bndr ValBndr | bndr <- bndrs ] body', anal)
+                return (mkLams [ zapBndrSort bndr | bndr <- bndrs ] body', anal)
 
-fjAlt :: CoreAlt -> FJM (AltWithJoins, JoinAnal)
+fjAlt :: CoreAlt -> FJM (CoreAlt, JoinAnal)
 fjAlt (con, bndrs, rhs)
   = do (rhs', anal) <- withoutCandidatesFJ bndrs $ fjExpr rhs
-       return ((con, [ SB bndr ValBndr | bndr <- bndrs ], rhs'), anal)
+       return ((con, [ zapBndrSort bndr | bndr <- bndrs ], rhs'), anal)
 
 -- ---------------------------------------------------------------------------
 -- Monad
@@ -344,10 +348,11 @@ addBndrs bndrs (ins, outs)
 markAllOut :: JoinVarSets -> JoinVarSets
 markAllOut (ins, outs) = (emptyVarEnv, ins `plusVarEnv` outs)
 
-lintJBind :: JoinVarSets -> BindWithJoins -> LintJM JoinVarSets
-lintJBind joins (NonRec (SB _ ValBndr) rhs)
+lintJBind :: JoinVarSets -> CoreBind -> LintJM JoinVarSets
+lintJBind joins (NonRec bndr rhs)
+  | not (isJoinBndr bndr)
   = lintJExpr (markAllOut joins) rhs >> return joins
-lintJBind joins (NonRec (SB bndr JoinBndr) rhs)
+  | otherwise
   = lintJExpr joins rhsBody >> return bodyJoins
   where
     (argBndrs, rhsBody) = collectBinders rhs
@@ -356,14 +361,14 @@ lintJBind joins (Rec pairs)
   = mapM_ doPair pairs >> return joins'
   where
     joins' = addBndrs [ (bndr, lambdaCount rhs)
-                      | (SB bndr JoinBndr, rhs) <- pairs ] joins
+                      | (bndr, rhs) <- pairs, isJoinBndr bndr ] joins
       
     doPair (bndr, rhs) | isJoinBndr bndr = lintJExpr joins' (skip_lambdas rhs)
                        | otherwise = lintJExpr (markAllOut joins') rhs
     
     skip_lambdas expr = snd $ collectBinders expr
 
-lintJExpr :: JoinVarSets -> ExprWithJoins -> LintJM ()
+lintJExpr :: JoinVarSets -> CoreExpr -> LintJM ()
 lintJExpr joins (Var v) = lintJApp joins v []
 lintJExpr _ (Lit _) = return ()
 lintJExpr joins expr@(App {})
@@ -387,12 +392,12 @@ lintJExpr joins (Tick _ expr) = lintJExpr (markAllOut joins) expr
 lintJExpr _ (Type _) = return ()
 lintJExpr _ (Coercion _) = return ()
 
-lintJAlt :: JoinVarSets -> AltWithJoins -> LintJM ()
+lintJAlt :: JoinVarSets -> CoreAlt -> LintJM ()
 lintJAlt joins (_con, bndrs, rhs)
   = do mapM_ lintJArgBndr bndrs
        lintJExpr joins rhs
 
-lintJApp :: JoinVarSets -> Var -> [ExprWithJoins] -> LintJM ()
+lintJApp :: JoinVarSets -> Var -> [CoreExpr] -> LintJM ()
 lintJApp joins@(ins, outs) v args
   | v `elemVarEnv` outs
   = pprPanic "lintJApp" $
@@ -408,8 +413,9 @@ lintJApp joins@(ins, outs) v args
   | otherwise
   = mapM_ (lintJExpr (markAllOut joins)) args
 
-lintJArgBndr :: SortedBndr -> LintJM ()
-lintJArgBndr (SB bndr JoinBndr)
+lintJArgBndr :: CoreBndr -> LintJM ()
+lintJArgBndr bndr
+  | isJoinBndr bndr
   = pprPanic "lintJArgBndr" $ text "Unexpected join binder:" <+> ppr bndr
 lintJArgBndr _
   = return ()
@@ -427,21 +433,3 @@ lambdaCount :: Expr a -> TotalArity
 --   *not* skipping casts and *counting* type lambdas. We just need to knew
 --   whether a given application is total (*including* all type arguments)
 lambdaCount expr = length bndrs where (bndrs, _) = collectBinders expr
-
-instance Outputable BndrSort where
-  ppr ValBndr  = text "val"
-  ppr JoinBndr = text "join"
-
-instance Outputable SortedBndr where
-  ppr (SB bndr sort)
-    | isTyVar bndr = ppr bndr
-    | otherwise    = ppr sort <+> ppr bndr
-
-instance OutputableBndr SortedBndr where
-  pprBndr LetBind (SB bndr sort)
-    | isTyVar bndr             = pprBndr LetBind bndr
-    | otherwise                = ppr sort <+> pprBndr LetBind bndr
-  pprBndr site (SB bndr _sort) = pprBndr site bndr
-  
-  pprInfixOcc (SB bndr _) = pprInfixOcc bndr
-  pprPrefixOcc (SB bndr _) = pprInfixOcc bndr

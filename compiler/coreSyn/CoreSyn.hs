@@ -45,9 +45,6 @@ module CoreSyn (
         tickishIsCode, tickishPlace,
         tickishContains,
 
-        -- ** Mapping over binders
-        WrappedBndr(..), mapExpr, mapBind, mapAlt,
-        
         -- * Unfolding data types
         Unfolding(..),  UnfoldingGuidance(..), UnfoldingSource(..),
 
@@ -1403,75 +1400,6 @@ type CoreAlt  = Alt  CoreBndr
 {-
 ************************************************************************
 *                                                                      *
-\subsection{Mapping over binders}
-*                                                                      *
-************************************************************************
--}
-
--- | Map function over binders in an expression
-mapExpr :: (b -> b') -> Expr b -> Expr b'
-mapExpr _ (Var v)            = Var v
-mapExpr _ (Lit l)            = Lit l
-mapExpr _ (Type ty)          = Type ty
-mapExpr _ (Coercion co)      = Coercion co
-mapExpr f (App e1 e2)        = App (mapExpr f e1) (mapExpr f e2)
-mapExpr f (Lam b e)          = Lam (f b) (mapExpr f e)
-mapExpr f (Let bind body)    = Let (mapBind f bind) (mapExpr f body)
-mapExpr f (Case e b ty alts) = Case (mapExpr f e) (f b) ty (map (mapAlt f) alts)
-mapExpr f (Tick t e)         = Tick t (mapExpr f e)
-mapExpr f (Cast e co)        = Cast (mapExpr f e) co
-
--- | Map function over binders in a binding
-mapBind :: (b -> b') -> Bind b -> Bind b'
-mapBind f (NonRec b rhs) = NonRec (f b) (mapExpr f rhs)
-mapBind f (Rec prs)      = Rec [(f b, mapExpr f rhs) | (b, rhs) <- prs]
-
--- | Map function over binders in an alternative
-mapAlt :: (b -> b') -> Alt b -> Alt b'
-mapAlt f (con, bndrs, rhs) = (con, map f bndrs, mapExpr f rhs)
-
-{-
-************************************************************************
-*                                                                      *
-\subsection{WrappedBndr class}
-*                                                                      *
-************************************************************************
--}
-
--- | Class of types that act as wrappers over 'CoreBndr'. Allows for
--- polymorphism over AST binder annotations. 'CoreBndr' itself is trivially
--- a member, with specialized implementations of unwrapping functions as
--- (more efficient) identity functions.
-class WrappedBndr b where
-  -- | Remove the wrapper around a binder.
-  unwrapBndr :: b -> CoreBndr
-  
-  -- | Remove the wrapper around all binders in a list.
-  unwrapBndrs       :: [b]    -> [CoreBndr]
-  -- | Remove all wrappers from all binders in an expression.
-  unwrapBndrsInExpr :: Expr b -> CoreExpr
-  -- | Remove all wrappens from all binders in a binding.
-  unwrapBndrsInBind :: Bind b -> CoreBind
-  -- | Remove all wrappens from all binders in a binding.
-  unwrapBndrsInAlt  :: Alt  b -> CoreAlt
-  
-  unwrapBndrs       = map     unwrapBndr
-  unwrapBndrsInExpr = mapExpr unwrapBndr
-  unwrapBndrsInBind = mapBind unwrapBndr
-  unwrapBndrsInAlt  = mapAlt  unwrapBndr
-
--- | Trivial instance of 'WrappedBndr' for plain binders. All "unwrapping"
--- functions are identities.
-instance WrappedBndr Var where
-  unwrapBndr  b  = b
-  unwrapBndrs bs = bs
-  unwrapBndrsInExpr expr = expr
-  unwrapBndrsInBind bind = bind
-  unwrapBndrsInAlt  alt  = alt
-
-{-
-************************************************************************
-*                                                                      *
 \subsection{Tagging}
 *                                                                      *
 ************************************************************************
@@ -1485,9 +1413,6 @@ type TaggedExpr t = Expr (TaggedBndr t)
 type TaggedArg  t = Arg  (TaggedBndr t)
 type TaggedAlt  t = Alt  (TaggedBndr t)
 
-instance WrappedBndr (TaggedBndr t) where
-  unwrapBndr (TB t _) = t
-
 instance Outputable b => Outputable (TaggedBndr b) where
   ppr (TB b l) = char '<' <> ppr b <> comma <> ppr l <> char '>'
 
@@ -1497,7 +1422,23 @@ instance Outputable b => OutputableBndr (TaggedBndr b) where
   pprPrefixOcc b = ppr b
 
 deTagExpr :: TaggedExpr t -> CoreExpr
-deTagExpr = unwrapBndrsInExpr
+deTagExpr (Var v)                   = Var v
+deTagExpr (Lit l)                   = Lit l
+deTagExpr (Type ty)                 = Type ty
+deTagExpr (Coercion co)             = Coercion co
+deTagExpr (App e1 e2)               = App (deTagExpr e1) (deTagExpr e2)
+deTagExpr (Lam (TB b _) e)          = Lam b (deTagExpr e)
+deTagExpr (Let bind body)           = Let (deTagBind bind) (deTagExpr body)
+deTagExpr (Case e (TB b _) ty alts) = Case (deTagExpr e) b ty (map deTagAlt alts)
+deTagExpr (Tick t e)                = Tick t (deTagExpr e)
+deTagExpr (Cast e co)               = Cast (deTagExpr e) co
+
+deTagBind :: TaggedBind t -> CoreBind
+deTagBind (NonRec (TB b _) rhs) = NonRec b (deTagExpr rhs)
+deTagBind (Rec prs)             = Rec [(b, deTagExpr rhs) | (TB b _, rhs) <- prs]
+
+deTagAlt :: TaggedAlt t -> CoreAlt
+deTagAlt (con, bndrs, rhs) = (con, [b | TB b _ <- bndrs], deTagExpr rhs)
 
 {-
 ************************************************************************
