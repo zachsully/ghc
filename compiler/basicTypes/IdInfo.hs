@@ -40,7 +40,7 @@ module IdInfo (
         -- ** Join point flag
         JoinPointInfo(..),
         joinPointInfo, setJoinPointInfo,
-        noJoinPointInfo, ppJoinPointInfo,
+        noJoinPointInfo, isJoinPoint, ppJoinPointInfo,
 
         -- ** Unfolding Info
         unfoldingInfo, setUnfoldingInfo, setUnfoldingInfoLazily,
@@ -357,18 +357,30 @@ jump). Thus we would like to maintain their status as join points when possible.
 However, it is always safe to set the join point flag to False.
 -}
 
--- | Whether an 'Id' is a *join point,* as determined by its occurrences. A
--- join point only occurs as a saturated tail call, such that no closure is
--- needed and invocation can be "by goto."
-data JoinPointInfo = JoinPoint | NotJoinPoint deriving (Eq)
+-- | The arity of a join point. This counts both type *and* value arguments.
+type JoinArity = Int
+
+-- | Whether an 'Id' is a *join point,* as determined by its occurrences, and
+-- with what arity. A join point only occurs as a saturated tail call, such that
+-- no closure is needed and invocation can be "by goto." The arity, which counts
+-- both type and value arguments, determines whether a call is considered
+-- saturated.
+data JoinPointInfo = JoinPoint JoinArity | NotJoinPoint deriving (Eq)
 
 -- | It is always safe to assume that a function is not a join point
 noJoinPointInfo :: JoinPointInfo
 noJoinPointInfo = NotJoinPoint
 
+isJoinPoint :: JoinPointInfo -> Bool
+isJoinPoint NotJoinPoint  = False
+isJoinPoint (JoinPoint _) = True
+
 ppJoinPointInfo :: JoinPointInfo -> SDoc
 ppJoinPointInfo NotJoinPoint = empty
-ppJoinPointInfo JoinPoint = text "Join"
+ppJoinPointInfo (JoinPoint arity) = text "Join[" <> int arity <> char ']'
+
+instance Outputable JoinPointInfo where
+  ppr = ppJoinPointInfo
 
 {-
 ************************************************************************

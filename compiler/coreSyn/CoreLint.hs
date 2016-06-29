@@ -36,6 +36,7 @@ import VarEnv
 import VarSet
 import Name
 import Id
+import IdInfo
 import PprCore
 import ErrUtils
 import Coercion
@@ -377,7 +378,8 @@ lintCoreBindings dflags pass local_in_scope binds
        ; mapM lint_bind binds }
   where
     flags = LF { lf_check_global_ids = check_globals
-               , lf_check_inline_loop_breakers = check_lbs }
+               , lf_check_inline_loop_breakers = check_lbs
+               , lf_check_join_points = check_joins }
 
     -- See Note [Checking for global Ids]
     check_globals = case pass of
@@ -390,6 +392,12 @@ lintCoreBindings dflags pass local_in_scope binds
                       CoreDesugar    -> False
                       CoreDesugarOpt -> False
                       _              -> True
+    
+    -- See Note [Checking join points]
+    check_joins = case pass of
+                      CoreDoSimplify {}      -> True
+                      CoreDoFloatOutwards {} -> True
+                      _                      -> False
 
     binders = bindersOfBinds binds
     (_, dups) = removeDups compare binders
@@ -467,7 +475,7 @@ lintSingleBinding :: TopLevelFlag -> RecFlag -> (Id, CoreExpr) -> LintM ()
 lintSingleBinding top_lvl_flag rec_flag (binder,rhs)
   = addLoc (RhsOf binder) $
          -- Check the rhs
-    do { ty <- lintCoreExpr rhs
+    do { ty <- lintRhs binder rhs
        ; lintBinder binder -- Check match to RHS type
        ; binder_ty <- applySubstTy (idType binder)
        ; ensureEqTys binder_ty ty (mkRhsMsg binder (text "RHS") ty)
@@ -492,6 +500,12 @@ lintSingleBinding top_lvl_flag rec_flag (binder,rhs)
            (mkNonTopExternalNameMsg binder)
 
        ; flags <- getLintFlags
+           
+        -- Check that if the binder is top-level, it's not a join point
+       ; checkL (not (lf_check_join_points flags && isJoinBndr binder
+                                                 && isTopLevel top_lvl_flag))
+           (mkTopJoinMsg binder)
+
        ; when (lf_check_inline_loop_breakers flags
                && isStrongLoopBreaker (idOccInfo binder)
                && isInlinePragma (idInlinePragma binder))
@@ -526,7 +540,7 @@ lintSingleBinding top_lvl_flag rec_flag (binder,rhs)
                ppr binder)
            _ -> return ()
 
-       ; mapM_ (lintCoreRule binder_ty) (idCoreRules binder)
+       ; mapM_ (lintCoreRule binder binder_ty) (idCoreRules binder)
        ; lintIdUnfolding binder binder_ty (idUnfolding binder) }
 
         -- We should check the unfolding, if any, but this is tricky because
@@ -537,10 +551,28 @@ lintSingleBinding top_lvl_flag rec_flag (binder,rhs)
     lintBinder var | isId var  = lintIdBndr var $ \_ -> (return ())
                    | otherwise = return ()
 
+lintRhs :: Id -> CoreExpr -> LintM Type
+lintRhs bndr rhs
+  = do { flags <- getLintFlags 
+       ; case idJoinPointInfo bndr of
+           JoinPoint arity | lf_check_join_points flags
+                          -> lint_join_lams arity arity rhs 
+           _              -> markAllJoinsBad $ lintCoreExpr rhs }
+  where
+    lint_join_lams 0 _ rhs
+      = lintCoreExpr rhs
+    lint_join_lams n tot (Lam var expr)
+      = addLoc (LambdaBodyOf var) $
+        lintBinder var $ \ var' ->
+        do { body_ty <- lint_join_lams (n-1) tot expr
+           ; return $ mkPiType var' body_ty }
+    lint_join_lams n tot _other
+      = failWithL $ mkBadJoinArityMsg bndr tot (tot-n)
+
 lintIdUnfolding :: Id -> Type -> Unfolding -> LintM ()
 lintIdUnfolding bndr bndr_ty (CoreUnfolding { uf_tmpl = rhs, uf_src = src })
   | isStableSource src
-  = do { ty <- lintCoreExpr rhs
+  = do { ty <- lintRhs bndr rhs
        ; ensureEqTys bndr_ty ty (mkRhsMsg bndr (text "unfolding") ty) }
 lintIdUnfolding  _ _ _
   = return ()       -- Do not Lint unstable unfoldings, because that leads
@@ -591,18 +623,13 @@ lintCoreExpr :: CoreExpr -> LintM OutType
 -- If you edit this function, you may need to update the GHC formalism
 -- See Note [GHC Formalism]
 lintCoreExpr (Var var)
-  = do  { checkL (isId var && not (isCoVar var))
-                 (text "Non term variable" <+> ppr var)
-
-        ; checkDeadIdOcc var
-        ; var' <- lookupIdInScope var
-        ; return (idType var') }
+  = lintCoreApp var []
 
 lintCoreExpr (Lit lit)
   = return (literalType lit)
 
 lintCoreExpr (Cast expr co)
-  = do { expr_ty <- lintCoreExpr expr
+  = do { expr_ty <- markAllJoinsBad $ lintCoreExpr expr
        ; co' <- applySubstCo co
        ; (_, k2, from_ty, to_ty, r) <- lintCoercion co'
        ; lintL (classifiesTypeWithValues k2)
@@ -615,10 +642,10 @@ lintCoreExpr (Tick (Breakpoint _ ids) expr)
   = do forM_ ids $ \id -> do
          checkDeadIdOcc id
          lookupIdInScope id
-       lintCoreExpr expr
+       markAllJoinsBad $ lintCoreExpr expr
 
 lintCoreExpr (Tick _other_tickish expr)
-  = lintCoreExpr expr
+  = markAllJoinsBad $ lintCoreExpr expr
 
 lintCoreExpr (Let (NonRec tv (Type ty)) body)
   | isTyVar tv
@@ -651,20 +678,22 @@ lintCoreExpr (Let (Rec pairs) body)
     (_, dups) = removeDups compare bndrs
 
 lintCoreExpr e@(App _ _)
-    = do { fun_ty <- lintCoreExpr fun
+    = do { fun_ty <- case fun of Var f -> lintCoreApp f args
+                                 _     -> markAllJoinsBad $ lintCoreExpr fun
          ; addLoc (AnExpr e) $ foldM lintCoreArg fun_ty args }
   where
     (fun, args) = collectArgs e
 
 lintCoreExpr (Lam var expr)
   = addLoc (LambdaBodyOf var) $
+    markAllJoinsBad $
     lintBinder var $ \ var' ->
     do { body_ty <- lintCoreExpr expr
        ; return $ mkPiType var' body_ty }
 
 lintCoreExpr e@(Case scrut var alt_ty alts) =
        -- Check the scrutinee
-  do { scrut_ty <- lintCoreExpr scrut
+  do { scrut_ty <- markAllJoinsBad $ lintCoreExpr scrut
      ; (alt_ty, _) <- lintInTy alt_ty
      ; (var_ty, _) <- lintInTy (idType var)
 
@@ -716,6 +745,26 @@ lintCoreExpr (Coercion co)
   = do { (k1, k2, ty1, ty2, role) <- lintInCo co
        ; return (mkHeteroCoercionType role k1 k2 ty1 ty2) }
 
+lintCoreApp :: Var -> [CoreExpr] -> LintM Type -- returns type of the *function*
+-- Checks that this function can be applied to this many arguments, *not* the
+-- arguments themselves
+lintCoreApp var args 
+  = do  { checkL (isId var && not (isCoVar var))
+                 (text "Non term variable" <+> ppr var)
+
+        ; checkDeadIdOcc var
+        ; var' <- lookupIdInScope var
+        ; flags <- getLintFlags
+        ; when (lf_check_join_points flags) $
+          case idJoinPointInfo var' of
+            JoinPoint join_arity ->
+              do  { bad <- isBadJoin var'
+                  ; checkL (not bad) $ mkJoinOutOfScopeMsg var'
+                  ; checkL (length args == join_arity) $
+                      mkBadJoinCallMsg var' join_arity (length args) }
+            NotJoinPoint -> return ()
+        ; return (idType var') }
+
 {-
 Note [No alternatives lint check]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -756,7 +805,7 @@ lintCoreArg fun_ty (Type arg_ty)
        ; lintTyApp fun_ty arg_ty' }
 
 lintCoreArg fun_ty arg
-  = do { arg_ty <- lintCoreExpr arg
+  = do { arg_ty <- markAllJoinsBad $ lintCoreExpr arg
        ; checkL (not (isUnliftedType arg_ty) || exprOkForSpeculation arg)
                 (mkLetAppMsg arg)
        ; lintValApp arg fun_ty arg_ty }
@@ -1163,15 +1212,15 @@ lint_app doc kfn kas
 *                                                                      *
 ********************************************************************* -}
 
-lintCoreRule :: OutType -> CoreRule -> LintM ()
-lintCoreRule _ (BuiltinRule {})
+lintCoreRule :: OutVar -> OutType -> CoreRule -> LintM ()
+lintCoreRule _ _ (BuiltinRule {})
   = return ()  -- Don't bother
 
-lintCoreRule fun_ty (Rule { ru_name = name, ru_bndrs = bndrs
-                          , ru_args = args, ru_rhs = rhs })
+lintCoreRule fun fun_ty (Rule { ru_name = name, ru_bndrs = bndrs
+                              , ru_args = args, ru_rhs = rhs })
   = lintBinders bndrs $ \ _ ->
     do { lhs_ty <- foldM lintCoreArg fun_ty args
-       ; rhs_ty <- lintCoreExpr rhs
+       ; rhs_ty <- markAllJoinsBadUnlessJoin fun $ lintCoreExpr rhs
        ; ensureEqTys lhs_ty rhs_ty $
          (rule_doc <+> vcat [ text "lhs type:" <+> ppr lhs_ty
                             , text "rhs type:" <+> ppr rhs_ty ])
@@ -1551,17 +1600,20 @@ data LintEnv
        , le_subst :: TCvSubst        -- Current type substitution; we also use this
                                      -- to keep track of all the variables in scope,
                                      -- both Ids and TyVars
+       , le_bad_joins :: IdSet       -- Join points that have left scope
        , le_dynflags :: DynFlags     -- DynamicFlags
        }
 
 data LintFlags
   = LF { lf_check_global_ids           :: Bool -- See Note [Checking for global Ids]
        , lf_check_inline_loop_breakers :: Bool -- See Note [Checking for INLINE loop breakers]
+       , lf_check_join_points          :: Bool -- See Note [Checking join points]
     }
 
 defaultLintFlags :: LintFlags
 defaultLintFlags = LF { lf_check_global_ids = False
-                      , lf_check_inline_loop_breakers = True }
+                      , lf_check_inline_loop_breakers = True
+                      , lf_check_join_points = False }
 
 newtype LintM a =
    LintM { unLintM ::
@@ -1575,6 +1627,14 @@ type WarnsAndErrs = (Bag MsgDoc, Bag MsgDoc)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Before CoreTidy, all locally-bound Ids must be LocalIds, even
 top-level ones. See Note [Exported LocalIds] and Trac #9857.
+
+Note [Checking join points]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Most passes are currently unaware of join points and treat them as functions
+(which is not wrong, so long as it's done consistently). The ones that *are*
+aware should be checked, however; in particular, the simplifier could wreak
+havoc if it's not careful.
 
 Note [Type substitution]
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1631,7 +1691,8 @@ initL dflags flags m
   = case unLintM m env (emptyBag, emptyBag) of
       (_, errs) -> errs
   where
-    env = LE { le_flags = flags, le_subst = emptyTCvSubst, le_loc = [], le_dynflags = dflags }
+    env = LE { le_flags = flags, le_subst = emptyTCvSubst, le_loc = []
+             , le_dynflags = dflags, le_bad_joins = emptyVarSet }
 
 getLintFlags :: LintM LintFlags
 getLintFlags = LintM $ \ env errs -> (Just (le_flags env), errs)
@@ -1688,13 +1749,21 @@ inCasePat = LintM $ \ env errs -> (Just (is_case_pat env), errs)
 addInScopeVars :: [Var] -> LintM a -> LintM a
 addInScopeVars vars m
   = LintM $ \ env errs ->
-    unLintM m (env { le_subst = extendTCvInScopeList (le_subst env) vars })
+    unLintM m (env { le_subst     = extendTCvInScopeList (le_subst env) vars
+                   , le_bad_joins = bad_joins' env })
               errs
+  where
+    bad_joins' env = delVarSetList (le_bad_joins env)
+                                   (filter (\v -> isId v && isJoinBndr v) vars)
 
 addInScopeVar :: Var -> LintM a -> LintM a
 addInScopeVar var m
   = LintM $ \ env errs ->
-    unLintM m (env { le_subst = extendTCvInScope (le_subst env) var }) errs
+    unLintM m (env { le_subst     = extendTCvInScope (le_subst env) var
+                   , le_bad_joins = bad_joins' env }) errs
+  where
+    bad_joins' env | isId var && isJoinBndr var = delVarSet (le_bad_joins env) var
+                   | otherwise                  = le_bad_joins env
 
 extendSubstL :: TyVar -> Type -> LintM a -> LintM a
 extendSubstL tv ty m
@@ -1704,6 +1773,20 @@ extendSubstL tv ty m
 updateTCvSubst :: TCvSubst -> LintM a -> LintM a
 updateTCvSubst subst' m
   = LintM $ \ env errs -> unLintM m (env { le_subst = subst' }) errs
+
+markAllJoinsBad :: LintM a -> LintM a
+markAllJoinsBad m
+  = LintM $ \ env errs -> unLintM m (marked env) errs
+  where
+    marked env = env { le_bad_joins = filterVarSet is_join in_set }
+      where
+        is_join bndr = isId bndr && isJoinBndr bndr
+        in_set = getInScopeVars (getTCvInScope (le_subst env))
+
+markAllJoinsBadUnlessJoin :: Var -> LintM a -> LintM a
+markAllJoinsBadUnlessJoin bndr m
+  | isJoinBndr bndr = m
+  | otherwise       = markAllJoinsBad m
 
 getTCvSubst :: LintM TCvSubst
 getTCvSubst = LintM (\ env errs -> (Just (le_subst env), errs))
@@ -1729,6 +1812,9 @@ lookupIdInScope id
                               ; return id } }
   where
     out_of_scope = pprBndr LetBind id <+> text "is out of scope"
+
+isBadJoin :: Id -> LintM Bool
+isBadJoin id = LintM $ \env errs -> (Just (id `elemVarSet` le_bad_joins env), errs)
 
 lintTyCoVarInScope :: Var -> LintM ()
 lintTyCoVarInScope v = lintInScope (text "is out of scope") v
@@ -1980,6 +2066,32 @@ mkBadTyVarMsg :: Var -> SDoc
 mkBadTyVarMsg tv
   = text "Non-tyvar used in TyVarTy:"
       <+> ppr tv <+> dcolon <+> ppr (varType tv)
+
+mkTopJoinMsg :: Var -> SDoc
+mkTopJoinMsg var
+  = text "Join point at top level:" <+> ppr var
+
+mkBadJoinArityMsg :: Var -> Int -> Int -> SDoc
+mkBadJoinArityMsg var ar nlams
+  = vcat [ text "Join point has too few lambdas",
+           text "Join var:" <+> ppr var,
+           text "Arity:" <+> ppr ar,
+           text "Number of lambdas:" <+> ppr nlams ]
+
+mkJoinOutOfScopeMsg :: Var -> SDoc
+mkJoinOutOfScopeMsg var
+  = text "Join variable no longer in scope:" <+> ppr var
+
+mkBadJoinCallMsg :: Var -> Int -> Int -> SDoc
+mkBadJoinCallMsg var ar 0
+  = vcat [ text "Join point occurs unapplied",
+           text "Join var:" <+> ppr var,
+           text "Arity:" <+> ppr ar ]
+mkBadJoinCallMsg var ar nargs
+  = vcat [ text "Join point invoked with wrong number of arguments",
+           text "Join var:" <+> ppr var,
+           text "Arity:" <+> ppr ar,
+           text "Number of arguments:" <+> int nargs ]
 
 pprLeftOrRight :: LeftOrRight -> MsgDoc
 pprLeftOrRight CLeft  = text "left"

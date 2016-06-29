@@ -183,6 +183,8 @@ data SimplifierMode             -- See comments in SimplMonad
         , sm_inline     :: Bool     -- Whether inlining is enabled
         , sm_case_case  :: Bool     -- Whether case-of-case is enabled
         , sm_eta_expand :: Bool     -- Whether eta-expansion is enabled
+        , sm_preserve_joins :: Bool -- Whether join points are kept from floating too far
+        , sm_context_subst :: Bool  -- Whether context substitution is enabled
         }
 
 instance Outputable SimplifierMode where

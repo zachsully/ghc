@@ -437,6 +437,7 @@ data GeneralFlag
    | Opt_CprAnal
    | Opt_WorkerWrapper
    | Opt_FloatJoinsOnlyToTop
+   | Opt_ContextSubstitution            -- Copy a join point's context into it
 
    | Opt_ProtectLastValArg
    | Opt_IgnoreRealWorld
@@ -3446,6 +3447,7 @@ fFlagsDeps = [
   flagSpec "worker-wrapper"                   Opt_WorkerWrapper,
   flagSpec "show-warning-groups"              Opt_ShowWarnGroups,
   flagSpec "float-joins-only-to-top"          Opt_FloatJoinsOnlyToTop,
+  flagSpec "context-substitution"             Opt_ContextSubstitution,
   flagSpec "no-LNE"                           Opt_NoLNE,
 
   flagSpec "llf"                              Opt_LLF,

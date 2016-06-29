@@ -24,6 +24,7 @@ import Demand
 import Var
 import VarEnv
 import Id
+import IdInfo   ( JoinPointInfo(..) )
 import Type
 import TyCon    ( initRecTc, checkRecTc )
 import Coercion
@@ -941,10 +942,16 @@ etaInfoApp subst (Case e b ty alts) eis
 etaInfoApp subst (Let b e) eis
   = Let b' (etaInfoApp subst' e eis)
   where
-    (subst', b') = subst_bind subst b
+    (subst', b') = etaInfoAppBind subst b eis -- subst_bind subst b
 
 etaInfoApp subst (Tick t e) eis
   = Tick (substTickish subst t) (etaInfoApp subst e eis)
+
+etaInfoApp subst expr@(App {}) _
+  | (Var fun, _) <- collectArgs expr
+  , Var fun' <- lookupIdSubst (text "etaInfoApp" <+> ppr fun) subst fun
+  , isJoinBndr fun'
+  = subst_expr subst expr
 
 etaInfoApp subst e eis
   = go (subst_expr subst e) eis
@@ -952,6 +959,39 @@ etaInfoApp subst e eis
     go e []                  = e
     go e (EtaVar v    : eis) = go (App e (varToCoreExpr v)) eis
     go e (EtaCo co    : eis) = go (Cast e co) eis
+
+--------------
+etaInfoAppBind :: Subst -> CoreBind -> [EtaInfo] -> (Subst, CoreBind)
+etaInfoAppBind subst (NonRec bndr rhs) eis
+  = (subst', NonRec bndr'' rhs')
+  where
+    (subst', bndr') = substBndr subst bndr
+    rhs'            = etaInfoAppRhs subst' bndr' rhs eis
+    bndr''          = setIdType bndr' (exprType rhs')
+etaInfoAppBind subst (Rec pairs) eis
+  = (subst', Rec (zipWith fix_type bndrs' rhss'))
+  where
+    (bndrs, rhss)     = unzip pairs
+    (subst', bndrs')  = substRecBndrs subst bndrs
+    rhss'             = zipWith process bndrs' rhss
+    process bndr' rhs = etaInfoAppRhs subst' bndr' rhs eis
+    fix_type bndr rhs = (bndr `setIdType` exprType rhs, rhs)
+
+--------------
+etaInfoAppRhs :: Subst -> CoreBndr -> CoreExpr -> [EtaInfo] -> CoreExpr
+etaInfoAppRhs subst bndr expr eis
+  | JoinPoint arity <- idJoinPointInfo bndr
+  = do_join_point arity
+  | otherwise
+  = subst_expr subst expr
+  where
+    do_join_point arity = mkLams join_bndrs' join_body'
+      where
+        (bndrs, body) = collectBinders expr
+        (join_bndrs, extra_bndrs) = splitAt arity bndrs
+        join_body = foldr Lam body extra_bndrs
+        (subst', join_bndrs') = substBndrs subst join_bndrs
+        join_body' = etaInfoApp subst' join_body eis
 
 --------------
 mkEtaWW :: Arity -> CoreExpr -> InScopeSet -> Type
@@ -1003,9 +1043,6 @@ mkEtaWW orig_n orig_expr in_scope orig_ty
 
 subst_expr :: Subst -> CoreExpr -> CoreExpr
 subst_expr = substExprSC (text "CoreArity:substExpr")
-
-subst_bind :: Subst -> CoreBind -> (Subst, CoreBind)
-subst_bind = substBindSC
 
 
 --------------

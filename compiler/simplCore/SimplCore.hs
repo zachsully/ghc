@@ -21,6 +21,7 @@ import OccurAnal        ( occurAnalysePgm, occurAnalyseExpr )
 import IdInfo
 import CoreStats        ( coreBindsSize, coreBindsStats, exprSize )
 import CoreUtils        ( mkTicks, stripTicksTop )
+import CoreJoins        ( findJoinsInPgm )
 import CoreLint         ( showPass, endPass, lintPassResult, dumpPassResult,
                           lintAnnots )
 import Simplify         ( simplTopBinds, simplExpr, simplRules )
@@ -150,6 +151,7 @@ getCoreToDo dflags
     eta_expand_on = gopt Opt_DoLambdaEtaExpansion         dflags
     ww_on         = gopt Opt_WorkerWrapper                dflags
     joins_to_top_only = gopt Opt_FloatJoinsOnlyToTop      dflags
+    context_subst = gopt Opt_ContextSubstitution          dflags
 
     maybe_rule_check phase = runMaybe rule_check (CoreDoRuleCheck phase)
 
@@ -161,7 +163,9 @@ getCoreToDo dflags
                           , sm_rules      = rules_on
                           , sm_eta_expand = eta_expand_on
                           , sm_inline     = True
-                          , sm_case_case  = True }
+                          , sm_case_case  = True
+                          , sm_preserve_joins = joins_to_top_only
+                          , sm_context_subst  = context_subst }
 
     simpl_phase phase names iter
       = CoreDoPasses
@@ -688,9 +692,11 @@ simplifyPgmIO pass@(CoreDoSimplify max_iterations mode)
                    = case sm_phase mode of
                        InitialPhase -> (mg_vect_decls guts, vectVars)
                        _            -> ([], vectVars)
-               ; tagged_binds = {-# SCC "OccAnal" #-}
+               ; occ_binds = {-# SCC "OccAnal" #-}
                      occurAnalysePgm this_mod active_rule rules
                                      maybeVects maybeVectVars binds
+               ; tagged_binds = {-# SCC "FindJoins" #-}
+                     findJoinsInPgm occ_binds
                } ;
            Err.dumpIfSet_dyn dflags Opt_D_dump_occur_anal "Occurrence analysis"
                      (pprCoreBindings tagged_binds);

@@ -894,7 +894,7 @@ decideBindFloat init_env is_bot binding =
               rhss_silt = foldr bothSilt emptySilt (map siltOf rhss)
               rhss_fvs  = computeRecRHSsFVs (map unTag ids) (map fvsOf rhss)
     
-    isLNE = (sort == JoinPoint)
+    isLNE = isJoinPoint sort
     is_OneShot e = case collectBinders $ deTagExpr $ deAnnotate e of
       (bs,_) -> all (\b -> isId b && isOneShotBndr b) bs
 
@@ -1411,7 +1411,7 @@ add_id id_env (TB v _, v1)
 
 zap_demand_info :: Var -> Var
 zap_demand_info v
-  | isId v    = zapIdDemandInfo v
+  | isId v    = zapIdDemandInfo (zapIdJoinPointInfo v)
   | otherwise = v
 
 {-
@@ -1454,6 +1454,9 @@ binding site.  Eg
    f :: Int -> Int
    f x = let v = 3*4 in v+x
 Here v is strict; but if we float v to top level, it isn't any more.
+
+Similarly, if we're floating a join point, it won't be one anymore, so we zap
+join point information as well.
 
 Note [The Reason SetLevels Does Substitution]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1828,7 +1831,7 @@ floatFVUp env mb_id use_case rhs up =
             Just id -> (m,unitDVarSet id)
 
           -- treat LNEs like cases; see Note [recognizing LNE]
-          sk' | use_case || (fve_ignoreLNEClo env && sort == JoinPoint) = sk
+          sk' | use_case || (fve_ignoreLNEClo env && isJoinPoint sort) = sk
               | otherwise = CloSk mb_id fids' sk
 
                 where fids' = bndrs_floating_out `unionDVarSet` mapDVarEnv fii_var fids

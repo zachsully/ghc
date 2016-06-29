@@ -35,6 +35,7 @@ module SimplEnv (
         -- * Floats
         Floats, emptyFloats, isEmptyFloats, addNonRec, addFloats, extendFloats,
         wrapFloats, setFloats, zapFloats, addRecFloats, mapFloats,
+        wrapJoinFloats, zapJoinFloats, promoteJoinFloats,
         doFloatFromRhs, getFloatBinds
     ) where
 
@@ -49,6 +50,7 @@ import VarEnv
 import VarSet
 import OrdList
 import Id
+import IdInfo
 import MkCore                   ( mkWildValBinder )
 import TysWiredIn
 import qualified Type
@@ -361,7 +363,9 @@ Can't happen:
   NonRec x# (f y)       -- Might diverge; does not satisfy let/app
 -}
 
-data Floats = Floats (OrdList OutBind) FloatFlag
+type OutValBind  = OutBind
+type OutJoinBind = OutBind
+data Floats = Floats (OrdList OutValBind) (OrdList OutJoinBind) FloatFlag
         -- See Note [Simplifier floats]
 
 data FloatFlag
@@ -381,7 +385,7 @@ data FloatFlag
                 --      Do not float these bindings out of a lazy let
 
 instance Outputable Floats where
-  ppr (Floats binds ff) = ppr ff $$ ppr (fromOL binds)
+  ppr (Floats vbinds jbinds ff) = ppr ff $$ ppr (fromOL vbinds) $$ ppr (fromOL jbinds)
 
 instance Outputable FloatFlag where
   ppr FltLifted = text "FltLifted"
@@ -394,12 +398,16 @@ andFF FltOkSpec  FltCareful = FltCareful
 andFF FltOkSpec  _          = FltOkSpec
 andFF FltLifted  flt        = flt
 
-doFloatFromRhs :: TopLevelFlag -> RecFlag -> Bool -> OutExpr -> SimplEnv -> Bool
+doFloatFromRhs :: TopLevelFlag -> RecFlag -> JoinPointInfo -> Bool -> OutExpr -> SimplEnv -> Bool
 -- If you change this function look also at FloatIn.noFloatFromRhs
-doFloatFromRhs lvl rec str rhs (SimplEnv {seFloats = Floats fs ff})
-  =  not (isNilOL fs) && want_to_float && can_float
+doFloatFromRhs lvl rec jpi str rhs env@(SimplEnv {seFloats = Floats vfs jfs ff})
+  =  not (isNilOL vfs && isNilOL jfs) && want_to_float && can_float
   where
-     want_to_float = isTopLevel lvl || exprIsCheap rhs || exprIsExpandable rhs
+     want_to_float
+       | sm_preserve_joins (getMode env) && jpi == NotJoinPoint && not (isNilOL jfs)
+                   = False
+                     -- See Note [doFloatFromRhs and preserving joins]
+       | otherwise = isTopLevel lvl || exprIsCheap rhs || exprIsExpandable rhs
                      -- See Note [Float when cheap or expandable]
      can_float = case ff of
                    FltLifted  -> True
@@ -416,15 +424,38 @@ But there are
   - cheap things that are not expandable (eg \x. expensive)
   - expandable things that are not cheap (eg (f b) where b is CONLIKE)
 so we must take the 'or' of the two.
+
+Note [doFloatFromRhs and preserving joins]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+If we're preserving join points and there are join points to preserve, then we
+want to wrap the RHS in the join bindings, at which point the RHS will certainly
+be neither cheap nor expandable. Hence we don't float at all in this case.
 -}
 
 emptyFloats :: Floats
-emptyFloats = Floats nilOL FltLifted
+emptyFloats = Floats nilOL nilOL FltLifted
 
 unitFloat :: OutBind -> Floats
 -- This key function constructs a singleton float with the right form
-unitFloat bind = Floats (unitOL bind) (flag bind)
+unitFloat bind = Floats vbinds jbinds (flag bind)
   where
+    (vbinds, jbinds) = split_bind bind
+    
+    split_bind bind@(NonRec bndr _)
+      | isJoinBndr bndr              = (nilOL, unitOL bind)
+      | otherwise                    = (unitOL bind, nilOL)
+    split_bind bind@(Rec pairs)
+      | all isJoinBndr bndrs         = (nilOL, unitOL bind)
+      | all (not . isJoinBndr) bndrs = (unitOL bind, nilOL)
+      | otherwise                    = (unitOL (Rec vpairs), unitOL (Rec jpairs))
+      where
+        bndrs = map fst pairs
+        (vpairs, jpairs) = partition (isJoinBndr . fst) pairs
+    -- If any given values and join points are purportedly mutually recursive,
+    -- they are vacuously so - values cannot have free occurrences of join
+    -- points. But this invariant is more trouble than it's worth to enforce,
+    -- so we tolerate mixed recursive groups.
+    
     flag (Rec {})                = FltLifted
     flag (NonRec bndr rhs)
       | not (isStrictId bndr)    = FltLifted
@@ -461,41 +492,64 @@ addFloats env1 env2
           seInScope = seInScope env2 }
 
 addFlts :: Floats -> Floats -> Floats
-addFlts (Floats bs1 l1) (Floats bs2 l2)
-  = Floats (bs1 `appOL` bs2) (l1 `andFF` l2)
+addFlts (Floats vbs1 jbs1 l1) (Floats vbs2 jbs2 l2)
+  = Floats (vbs1 `appOL` vbs2) (jbs1 `appOL` jbs2) (l1 `andFF` l2)
 
 zapFloats :: SimplEnv -> SimplEnv
 zapFloats env = env { seFloats = emptyFloats }
+
+zapJoinFloats :: SimplEnv -> SimplEnv
+zapJoinFloats env@(SimplEnv {seFloats = Floats vbs _ ff})
+  = env {seFloats = Floats vbs nilOL ff}
 
 addRecFloats :: SimplEnv -> SimplEnv -> SimplEnv
 -- Flattens the floats from env2 into a single Rec group,
 -- prepends the floats from env1, and puts the result back in env2
 -- This is all very specific to the way recursive bindings are
 -- handled; see Simplify.simplRecBind
-addRecFloats env1 env2@(SimplEnv {seFloats = Floats bs ff})
-  = ASSERT2( case ff of { FltLifted -> True; _ -> False }, ppr (fromOL bs) )
-    env2 {seFloats = seFloats env1 `addFlts` unitFloat (Rec (flattenBinds (fromOL bs)))}
+addRecFloats env1 env2@(SimplEnv {seFloats = Floats vbs jbs ff})
+  = ASSERT2( case ff of { FltLifted -> True; _ -> False }, ppr (fromOL vbs) )
+    env2 {seFloats = seFloats env1 `addFlts`
+                       unitFloat (Rec (flattenBinds (fromOL vbs ++ fromOL jbs)))}
 
 wrapFloats :: SimplEnv -> OutExpr -> OutExpr
 -- Wrap the floats around the expression; they should all
 -- satisfy the let/app invariant, so mkLets should do the job just fine
-wrapFloats (SimplEnv {seFloats = Floats bs _}) body
-  = foldrOL Let body bs
+wrapFloats (SimplEnv {seFloats = Floats vbs jbs _}) body
+  = foldrOL Let body (vbs `appOL` jbs)
+  
+wrapJoinFloats :: SimplEnv -> OutExpr -> OutExpr
+-- Wrap the floating join points are the expression
+wrapJoinFloats (SimplEnv {seFloats = Floats _ jbs _}) body
+  = foldrOL Let body jbs
 
 getFloatBinds :: SimplEnv -> [CoreBind]
-getFloatBinds (SimplEnv {seFloats = Floats bs _})
-  = fromOL bs
+getFloatBinds (SimplEnv {seFloats = Floats vbs jbs _})
+  = fromOL (vbs `appOL` jbs)
 
 isEmptyFloats :: SimplEnv -> Bool
-isEmptyFloats (SimplEnv {seFloats = Floats bs _})
-  = isNilOL bs
+isEmptyFloats (SimplEnv {seFloats = Floats vbs jbs _})
+  = isNilOL vbs && isNilOL jbs
 
 mapFloats :: SimplEnv -> ((Id,CoreExpr) -> (Id,CoreExpr)) -> SimplEnv
-mapFloats env@SimplEnv { seFloats = Floats fs ff } fun
-   = env { seFloats = Floats (mapOL app fs) ff }
+mapFloats env@SimplEnv { seFloats = Floats vbs jbs ff } fun
+   = env { seFloats = Floats (mapOL app vbs) (mapOL app jbs) ff }
    where
     app (NonRec b e) = case fun (b,e) of (b',e') -> NonRec b' e'
     app (Rec bs)     = Rec (map fun bs)
+
+promoteJoinFloats :: SimplEnv -> SimplEnv
+promoteJoinFloats env@(SimplEnv {seFloats = Floats vbs jbs ff, seInScope = ins})
+  = env {seFloats = Floats (vbs `appOL` mapOL zap jbs) nilOL ff, seInScope = ins'}
+  where
+    zap (NonRec b e) = NonRec (zapIdJoinPointInfo b) e
+    zap (Rec bs)     = Rec [(zapIdJoinPointInfo b, e) | (b, e) <- bs]
+    
+    ins' :: InScopeSet
+    ins' = foldrOL (\jb ins -> zap_in_scope ins (bindersOf jb)) ins jbs
+    zap_in_scope :: InScopeSet -> [Var] -> InScopeSet
+    zap_in_scope ins ids
+      = foldr (\bndr ins -> extendInScopeSet ins (zapIdJoinPointInfo bndr)) ins ids
 
 {-
 ************************************************************************

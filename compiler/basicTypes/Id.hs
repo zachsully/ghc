@@ -682,7 +682,7 @@ zapIdJoinPointInfo :: Id -> Id
 zapIdJoinPointInfo b = b `setIdJoinPointInfo` noJoinPointInfo
 
 isJoinBndr :: Id -> Bool
-isJoinBndr id = idJoinPointInfo id == JoinPoint
+isJoinBndr id = isJoinPoint (idJoinPointInfo id)
 
 {-
         ---------------------------------

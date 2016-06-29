@@ -11,8 +11,8 @@ import IdInfo
 import MonadUtils
 import Outputable
 import PprCore ()
+import Rules
 import Util
-import Var
 import VarEnv
 import VarSet
 
@@ -51,11 +51,12 @@ lintJoinsInCoreBindings pgm
   = runLintJM $ do mapM_ (lintJBind emptyJoinVarSets) pgm
                    return ()
 
-type BndrSort = JoinPointInfo
+data BndrSort = JoinBndr | ValBndr deriving (Eq)
 
-setBndrSort :: Var -> BndrSort -> Var
-setBndrSort b sort | isId b    = setIdJoinPointInfo b sort
-                   | otherwise = b
+setBndrSort :: Var -> BndrSort -> Int -> Var
+setBndrSort b sort ar | not (isId b) = b
+                      | sort == JoinBndr = setIdJoinPointInfo b (JoinPoint ar)
+                      | otherwise        = setIdJoinPointInfo b NotJoinPoint
 
 zapBndrSort :: Var -> Var
 zapBndrSort b | isId b    = zapIdJoinPointInfo b
@@ -140,7 +141,7 @@ fjLet rec_sort bind body
                  return (bind', bind_anal, body', body_anal)
        let new_let = Let bind' body'
            
-           real_bind_anal | rec_sort == JoinPoint = bind_anal
+           real_bind_anal | rec_sort == JoinBndr  = bind_anal
                           | otherwise             = markAllVarsBad bind_anal
                               -- Everything escapes which is free in the bindings
            
@@ -155,9 +156,9 @@ fjLet rec_sort bind body
                     | otherwise = body_anal                                 -- this let(rec)
 
            sort | binders `allInGoodSet` all_anal
-                = JoinPoint
+                = JoinBndr
                 | otherwise
-                = NotJoinPoint
+                = ValBndr
 
        return (
            new_let,
@@ -168,10 +169,7 @@ fjLet rec_sort bind body
     binders        = bindersOf bind
     is_rec         = case bind of NonRec {} -> False; _ -> True
 
-    mk_binding binder rhs
-        = (binder, lambdaCount rhs)
-
-    vars_bind :: BndrSort                  -- Whether binding is join point
+    vars_bind :: BndrSort                  -- Join points or values?
               -> CoreBind
               -> FJM (CoreBind,
                       JoinAnal,            -- free vars; good vars
@@ -179,26 +177,30 @@ fjLet rec_sort bind body
 
     vars_bind sort (NonRec binder rhs) = do
         (rhs', bind_anal) <- fjRhs rhs
+        (bndr', bndr_anal) <- fjBndr binder
         let
-            env_ext_item = mk_binding binder rhs
+            join_arity = lambdaCount rhs
 
-        return (NonRec (setBndrSort binder sort) rhs',
-                bind_anal, [env_ext_item])
+        return (NonRec (setBndrSort bndr' sort join_arity) rhs',
+                bind_anal `combineJoinAnals` bndr_anal, [(bndr', join_arity)])
 
 
     vars_bind sort (Rec pairs)
       = let
           (binders, rhss) = unzip pairs
-          env_ext = [ mk_binding b rhs
+          env_ext = [ (b, lambdaCount rhs)
                     | (b,rhs) <- pairs ]
         in
         withCandidatesFJ env_ext $ do
-          (rhss', anals)
+          (bndrs', bndr_anals) <- mapAndUnzipM fjBndr binders
+          (rhss', rhs_anals)
             <- mapAndUnzipM fjRhs rhss
           let
-            anal = combineManyJoinAnals anals
+            anal = combineManyJoinAnals (bndr_anals ++ rhs_anals)
+            bndrs'' = [ setBndrSort bndr' sort ar
+                      | (bndr', (_, ar)) <- bndrs' `zip` env_ext ]
 
-          return (Rec ([ setBndrSort bndr sort | bndr <- binders] `zip` rhss'),
+          return (Rec (bndrs'' `zip` rhss'),
                   anal, env_ext)
 
 fjRhs :: CoreExpr -> FJM (CoreExpr, JoinAnal)
@@ -210,6 +212,75 @@ fjAlt :: CoreAlt -> FJM (CoreAlt, JoinAnal)
 fjAlt (con, bndrs, rhs)
   = do (rhs', anal) <- withoutCandidatesFJ bndrs $ fjExpr rhs
        return ((con, [ zapBndrSort bndr | bndr <- bndrs ], rhs'), anal)
+
+fjBndr :: CoreBndr -> FJM (CoreBndr, JoinAnal)
+fjBndr bndr
+  | not (isId bndr)
+  = return (bndr, emptyJoinAnal)
+  | otherwise
+  = do (rules', anals) <- mapAndUnzipM fjRule (idCoreRules bndr)
+       (unf', unf_anal) <- fjUnfolding (realIdUnfolding bndr)
+       let bndr' = bndr `setIdSpecialisation` (mkRuleInfo rules')
+                        `setIdUnfolding` unf'
+           anal  = combineManyJoinAnals (unf_anal : anals)
+       return (bndr', anal)
+
+-- FIXME Right now we just brazenly go in and tweak the expressions stored in
+-- rules and unfoldings. Surely we should be more careful than that. - LVWM 
+
+fjRule :: CoreRule -> FJM (CoreRule, JoinAnal)
+fjRule rule@(BuiltinRule {})
+  = return (rule, emptyJoinAnal)
+fjRule rule@(Rule { ru_bndrs = bndrs, ru_rhs = rhs })
+  = do (rhs', anal) <- withoutCandidatesFJ bndrs $ fjRhs rhs
+         -- See Note [Rules]
+       return (rule { ru_rhs = rhs' }, anal)
+
+fjUnfolding :: Unfolding -> FJM (Unfolding, JoinAnal)
+fjUnfolding unf@(CoreUnfolding { uf_src = src, uf_tmpl = rhs })
+  | isStableSource src
+  = do (rhs', anal) <- fjRhs rhs
+       return (unf { uf_tmpl = rhs' }, anal)
+  | otherwise
+  = return (unf, emptyJoinAnal)
+      -- Should be the same as the RHS, and we don't want exponential behavior
+      -- (see CoreFVs.idUnfoldingVars). Downside: We don't find joins inside.
+fjUnfolding unf@(DFunUnfolding { df_bndrs = bndrs, df_args = args })
+  = do (args', anals) <- withoutCandidatesFJ bndrs $ mapAndUnzipM fjExpr args
+       return (unf { df_args = args' }, combineManyJoinAnals anals)
+fjUnfolding unf
+  = return (unf, emptyJoinAnal)
+
+{-
+Note [Rules]
+~~~~~~~~~~~~
+
+Right now, we do the obvious thing with rules, which is to treat each rule RHS
+as an alternate RHS for the binder. This is wrong, but should (!) only be wrong
+in the safe direction.
+
+The difficulty is with arity. Suppose we have:
+
+  let j :: Int -> Int
+      j y = 2 * y
+      k :: Int -> Int -> Int
+      {-# RULES "SPEC k 0" k 0 = j #-}
+      k x y = x + 2 * y
+  in ...
+  
+(By "arity" here we mean arity counting type args, as usual with join points.)
+Now suppose that both j and k appear only as saturated tail calls in the body.
+Thus we would like to make them both join points. The rule complicates matters,
+though, as its RHS has an unapplied occurrence of j. *However*, any application
+of k will be saturated (since k is a join point), so if the rule fires, it still
+results in a valid tail call:
+
+  k 0 q ==> j q
+
+Detecting this situation seems difficult, however, so for the moment we sadly
+forbid j as a join point. 
+
+-}
 
 -- ---------------------------------------------------------------------------
 -- Monad
@@ -433,3 +504,23 @@ lambdaCount :: Expr a -> TotalArity
 --   *not* skipping casts and *counting* type lambdas. We just need to knew
 --   whether a given application is total (*including* all type arguments)
 lambdaCount expr = length bndrs where (bndrs, _) = collectBinders expr
+
+{-
+hasConsistentLambdaCount :: Id -> TotalArity -> Bool
+-- ^ Does the given binder have the given lambda count according to all its
+--   rules and its unfolding, if any?
+hasConsistentLambdaCount bndr arity
+  = all check_rule (idCoreRules bndr) && check_unf (realIdUnfolding bndr)
+  where
+    check_rule (BuiltinRule {})
+      = False -- no way to know, but why are we checking this anyway??
+    check_rule (Rule { ru_nargs = nargs, ru_rhs = rhs })
+      = nargs + lambdaCount rhs == arity
+    
+    check_unf (CoreUnfolding { unf_template = rhs })
+      = lambdaCount rhs == arity
+    check_unf (DFunUnfolding { df_bndrs = bndrs })
+      = length bndrs
+    check_unf _
+      = True
+-}

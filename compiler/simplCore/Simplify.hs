@@ -120,6 +120,11 @@ simplNonRecX:   [given a *simplified* RHS, but an *unsimplified* binder]
   - simplify binder
   - completeNonRecX
 
+simplStrictBindX:   [given a *simplified* RHS, but an *unsimplified* binder]
+  Used for: Creating strict bindings using the StrictBind continuation
+  - decide whether to float out join points
+  - simplNonRecX
+
         ------------------------------
 simplLazyBind:  [binder already simplified, RHS not]
   Used for: recursive bindings (top level and nested)
@@ -221,7 +226,7 @@ simplTopBinds env0 binds0
         ; env1 <- simplRecBndrs env0 (bindersOfBinds binds0)
         ; env2 <- simpl_binds env1 binds0
         ; freeTick SimplifierDone
-        ; return env2 }
+        ; return $ promoteJoinFloats env2 } -- no join points at top level
   where
         -- We need to track the zapped top-level binders, because
         -- they should have their fragile IdInfo zapped (notably occurrence info)
@@ -232,9 +237,9 @@ simplTopBinds env0 binds0
     simpl_binds env (bind:binds) = do { env' <- simpl_bind env bind
                                       ; simpl_binds env' binds }
 
-    simpl_bind env (Rec pairs)  = simplRecBind      env  TopLevel pairs
+    simpl_bind env (Rec pairs)  = simplRecBind      env  TopLevel Nothing pairs
     simpl_bind env (NonRec b r) = do { (env', b') <- addBndrRules env b (lookupRecBndr env b)
-                                     ; simplRecOrTopPair env' TopLevel NonRecursive b b' r }
+                                     ; simplRecOrTopPair env' TopLevel NonRecursive Nothing b b' r }
 
 {-
 ************************************************************************
@@ -248,9 +253,10 @@ simplRecBind is used for
 -}
 
 simplRecBind :: SimplEnv -> TopLevelFlag
+             -> Maybe SimplCont
              -> [(InId, InExpr)]
              -> SimplM SimplEnv
-simplRecBind env0 top_lvl pairs0
+simplRecBind env0 top_lvl cont_mb pairs0
   = do  { (env_with_info, triples) <- mapAccumLM add_rules env0 pairs0
         ; env1 <- go (zapFloats env_with_info) triples
         ; return (env0 `addRecFloats` env1) }
@@ -266,7 +272,7 @@ simplRecBind env0 top_lvl pairs0
     go env [] = return env
 
     go env ((old_bndr, new_bndr, rhs) : pairs)
-        = do { env' <- simplRecOrTopPair env top_lvl Recursive old_bndr new_bndr rhs
+        = do { env' <- simplRecOrTopPair env top_lvl Recursive cont_mb old_bndr new_bndr rhs
              ; go env' pairs }
 
 {-
@@ -279,17 +285,18 @@ It assumes the binder has already been simplified, but not its IdInfo.
 
 simplRecOrTopPair :: SimplEnv
                   -> TopLevelFlag -> RecFlag
+                  -> Maybe SimplCont
                   -> InId -> OutBndr -> InExpr  -- Binder and rhs
                   -> SimplM SimplEnv    -- Returns an env that includes the binding
 
-simplRecOrTopPair env top_lvl is_rec old_bndr new_bndr rhs
+simplRecOrTopPair env top_lvl is_rec cont_mb old_bndr new_bndr rhs
   = do { dflags <- getDynFlags
        ; trace_bind dflags $
            if preInlineUnconditionally dflags env top_lvl old_bndr rhs
                     -- Check for unconditional inline
            then do tick (PreInlineUnconditionally old_bndr)
                    return (extendIdSubst env old_bndr (mkContEx env rhs))
-           else simplLazyBind env top_lvl is_rec old_bndr new_bndr rhs env }
+           else simplLazyBind env top_lvl is_rec cont_mb old_bndr new_bndr rhs env }
   where
     trace_bind dflags thing_inside
       | not (dopt Opt_D_verbose_core2core dflags)
@@ -312,17 +319,21 @@ Nota bene:
     2. It assumes that the binder type is lifted.
 
     3. It does not check for pre-inline-unconditionally;
-       that should have been done already.
+       that should have been done already
+  
+    4. It assumes that, if the binder is a join point (and context substitution
+       is active), a context is given and it is small enough to be duplicated.
 -}
 
 simplLazyBind :: SimplEnv
               -> TopLevelFlag -> RecFlag
+              -> Maybe SimplCont        -- Outer context, if this may be a join point
               -> InId -> OutId          -- Binder, both pre-and post simpl
                                         -- The OutId has IdInfo, except arity, unfolding
               -> InExpr -> SimplEnv     -- The RHS and its environment
               -> SimplM SimplEnv
 -- Precondition: rhs obeys the let/app invariant
-simplLazyBind env top_lvl is_rec bndr bndr1 rhs rhs_se
+simplLazyBind env top_lvl is_rec cont_mb bndr bndr1 rhs rhs_se
   = -- pprTrace "simplLazyBind" ((ppr bndr <+> ppr bndr1) $$ ppr rhs $$ ppr (seIdSubst rhs_se)) $
     do  { let   rhs_env     = rhs_se `setInScope` env
                 (tvs, body) = case collectTyAndValBinders rhs of
@@ -346,28 +357,60 @@ simplLazyBind env top_lvl is_rec bndr bndr1 rhs rhs_se
 
         -- Simplify the RHS
         ; let   rhs_cont = mkRhsStop (substTy body_env (exprType body))
-        ; (body_env1, body1) <- simplExprF body_env body rhs_cont
+        ; (body_env1, body1) <- simplRhsF body_env bndr body cont_mb
         -- ANF-ise a constructor or PAP rhs
         ; (body_env2, body2) <- prepareRhs top_lvl body_env1 bndr1 body1
 
         ; (env', rhs')
-            <-  if not (doFloatFromRhs top_lvl is_rec False body2 body_env2)
+            <-  if not (doFloatFromRhs top_lvl is_rec (idJoinPointInfo bndr) False body2 body_env2)
                 then                            -- No floating, revert to body1
                      do { rhs' <- mkLam tvs' (wrapFloats body_env1 body1) rhs_cont
                         ; return (env, rhs') }
 
                 else if null tvs then           -- Simple floating
                      do { tick LetFloatFromLet
-                        ; return (addFloats env body_env2, body2) }
+                        ; return (addFloats env (reconsider_joins body_env2), body2) }
+                          -- Any join points we float past here are no longer
+                          -- join points (see doFloatFromRhs)
 
                 else                            -- Do type-abstraction first
                      do { tick LetFloatFromLet
                         ; (poly_binds, body3) <- abstractFloats tvs' body_env2 body2
                         ; rhs' <- mkLam tvs' body3 rhs_cont
                         ; env' <- foldlM (addPolyBind top_lvl) env poly_binds
-                        ; return (env', rhs') }
+                        ; return (reconsider_joins env', rhs') }
 
-        ; completeBind env' top_lvl bndr bndr1 rhs' }
+        ; let bndr2 | isJoinBndr bndr = setIdType bndr1 (exprType rhs')
+                    | otherwise       = bndr1
+            -- type of join point may have changed
+        ; completeBind env' top_lvl bndr bndr2 rhs' }
+  where
+    reconsider_joins env' | isJoinBndr bndr = env'
+                          | otherwise       = promoteJoinFloats env'
+      -- joins floating from non-joins become non-joins
+
+{-
+A specialised variant of simplNonRec used when the RHS is already simplified,
+notably in rebuild's StrictBind case. Normally we let everything float out of
+a strict binding, but:
+  - If we're preserving join points, we don't let them float out
+  - If we're *not* preserving join points, those that *do* float out get
+    promoted to values
+-}
+
+simplStrictBindX :: SimplEnv
+                 -> InId
+                 -> OutExpr
+                 -> SimplM SimplEnv
+simplStrictBindX env bndr rhs
+  | isJoinBndr bndr
+  = WARN(True, text "simplStrictBindX on join bndr:" <+> ppr bndr)
+      -- Not sure why a join point would be StrictBound
+    simplNonRecX env bndr rhs
+  | sm_preserve_joins (getMode env)
+  = simplNonRecX (zapJoinFloats env) bndr (wrapJoinFloats env rhs)
+  | otherwise
+  = simplNonRecX (promoteJoinFloats env) bndr rhs
 
 {-
 A specialised variant of simplNonRec used when the RHS is already simplified,
@@ -404,7 +447,7 @@ completeNonRecX :: TopLevelFlag -> SimplEnv
 completeNonRecX top_lvl env is_strict old_bndr new_bndr new_rhs
   = do  { (env1, rhs1) <- prepareRhs top_lvl (zapFloats env) new_bndr new_rhs
         ; (env2, rhs2) <-
-                if doFloatFromRhs NotTopLevel NonRecursive is_strict rhs1 env1
+                if doFloatFromRhs NotTopLevel NonRecursive (idJoinPointInfo new_bndr) is_strict rhs1 env1
                 then do { tick LetFloatFromLet
                         ; return (addFloats env env1, rhs1) }   -- Add the floats to the main env
                 else return (env, wrapFloats env1 rhs1)         -- Wrap the floats around the RHS
@@ -707,8 +750,17 @@ completeBind env top_lvl old_bndr new_bndr new_rhs
                   = zapDemandInfo info2 `orElse` info2
                   | otherwise
                   = info2
+            
+              -- If number of lambdas changes, it's no longer a join point
+            info4 | JoinPoint old_join_arity <- joinPointInfo old_info
+                  , let (bndrs, _) = collectBinders final_rhs
+                  , let new_join_arity = length bndrs -- count types *and* values
+                  , new_join_arity /= old_join_arity
+                  = info3 `setJoinPointInfo` NotJoinPoint
+                  | otherwise
+                  = info3
 
-            final_id = new_bndr `setIdInfo` info3
+            final_id = new_bndr `setIdInfo` info4
 
       ; -- pprTrace "Binding" (ppr final_id <+> ppr new_unfolding) $
         return (addNonRec env final_id final_rhs) } }
@@ -907,15 +959,59 @@ simplExprF1 env (Case scrut bndr _ alts) cont
                                  , sc_env = env, sc_cont = cont })
 
 simplExprF1 env (Let (Rec pairs) body) cont
-  = do  { env' <- simplRecBndrs env (map fst pairs)
-                -- NB: bndrs' don't have unfoldings or rules
-                -- We add them as we go down
-
-        ; env'' <- simplRecBind env' NotTopLevel pairs
-        ; simplExprF env'' body cont }
+  = simplRecE env pairs body cont
 
 simplExprF1 env (Let (NonRec bndr rhs) body) cont
   = simplNonRecE env bndr (rhs, env) ([], body) cont
+
+---------------------------------
+
+simplExprFV :: SimplEnv -> InExpr -> SimplCont -> SimplM (SimplEnv, OutExpr)
+        -- Simplify, letting value bindings but not join bindings float out
+simplExprFV env expr cont
+  | sm_preserve_joins (getMode env)
+    -- Put the joins here
+  = do { (env', expr') <- simplExprF (zapJoinFloats env) expr cont
+       ; return (zapJoinFloats env', wrapJoinFloats env' expr') }
+  | otherwise
+    -- Let the joins float out but flag them as values
+  = do { (env', expr') <- simplExprF (zapFloats env) expr cont
+       ; return (env `addFloats` promoteJoinFloats env', expr')}
+
+---------------------------------
+
+-- Simplify the right-hand side, adding a context if this is a join point.
+-- Context goes *inside* the lambdas. IOW, if the join point has arity n, we do:
+--   \x1 .. xn -> e => \x1 .. xn -> E[e]
+-- Note that we need the arity of the join point, since e may be a lambda
+-- (though this is unlikely).
+simplRhsF :: SimplEnv -> InId -> InExpr -> Maybe SimplCont -> SimplM (SimplEnv, OutExpr)
+simplRhsF env bndr expr cont_mb
+  | JoinPoint arity <- idJoinPointInfo bndr
+  = simpl_join_lams arity
+  | otherwise
+  = simplExprF env expr rhs_cont
+  where
+    rhs_cont = mkRhsStop (substTy env (exprType expr))
+    join_cont = case cont_mb of Just cont -> cont
+                                Nothing   -> pprPanic "simplRhsF" $
+                                             text "no context for join:" <+> ppr bndr
+    
+    simpl_join_lams arity
+      | arity > length bndrs
+      = pprPanic "simplRhsF" $ text "not enough lambdas for join point:" <+> ppr bndr $$
+                               text "expected:" <+> int arity <+>
+                               text "found:" <+> int (length bndrs)
+      | otherwise
+      = do { (env', join_bndrs') <- simplLamBndrs env join_bndrs
+           ; join_body' <- simplExprC env' join_body join_cont
+           ; new_join <- mkLam join_bndrs' join_body' rhs_cont
+                           -- mkLam wants continuation for let RHS, not lambda body
+           ; return (env', new_join) }
+      where
+        (bndrs, body) = collectBinders expr
+        (join_bndrs, extra_bndrs) = splitAt arity bndrs
+        join_body = foldr Lam body extra_bndrs
 
 ---------------------------------
 simplType :: SimplEnv -> InType -> SimplM OutType
@@ -971,7 +1067,8 @@ simplTick env tickish expr cont
   -- application context, allowing the normal case and application
   -- optimisations to fire.
   | tickish `tickishScopesLike` SoftScope
-  = do { (env', expr') <- simplExprF env expr cont
+  = do { (env', expr') <- simplExprFV env expr cont
+                            -- don't let joins float from tick
        ; return (env', mkTick tickish expr')
        }
 
@@ -1109,7 +1206,7 @@ rebuild env expr cont
         -> rebuildCase (se `setFloats` env) expr bndr alts cont
 
       StrictArg info _ cont         -> rebuildCall env (info `addValArgTo` expr) cont
-      StrictBind b bs body se cont  -> do { env' <- simplNonRecX (se `setFloats` env) b expr
+      StrictBind b bs body se cont  -> do { env' <- simplStrictBindX (se `setFloats` env) b expr
                                                -- expr satisfies let/app since it started life
                                                -- in a call to simplNonRecE
                                           ; simplLam env' bs body cont }
@@ -1339,8 +1436,29 @@ simplNonRecE env bndr (rhs, rhs_se) (bndrs, body) cont
            -> ASSERT( not (isTyVar bndr) )
               do { (env1, bndr1) <- simplNonRecBndr env bndr
                  ; (env2, bndr2) <- addBndrRules env1 bndr bndr1
-                 ; env3 <- simplLazyBind env2 NotTopLevel NonRecursive bndr bndr2 rhs rhs_se
-                 ; simplLam env3 bndrs body cont }
+                 ; (env3, cont_dup, cont_nodup) <- prepareLetCont env2 [bndr] cont
+                 ; env4 <- simplLazyBind env3 NotTopLevel NonRecursive (Just cont_dup) bndr bndr2 rhs rhs_se
+                 ; (env5, expr)  <- simplLam env4 bndrs body cont_dup
+                 ; rebuild env5 expr cont_nodup }
+
+------------------
+simplRecE :: SimplEnv
+          -> [(InId, InExpr)]
+          -> InExpr
+          -> SimplCont
+          -> SimplM (SimplEnv, OutExpr)
+          
+-- simplRecE is used for
+--  * non-top-level recursive lets in expressions
+simplRecE env pairs body cont
+  = do  { let bndrs = map fst pairs
+        ; env1 <- simplRecBndrs env bndrs
+                -- NB: bndrs' don't have unfoldings or rules
+                -- We add them as we go down
+        ; (env2, cont_dup, cont_nodup) <- prepareLetCont env1 bndrs cont
+        ; env3 <- simplRecBind env2 NotTopLevel (Just cont_dup) pairs
+        ; (env4, expr) <- simplExprF env3 body cont_dup
+        ; rebuild env4 expr cont_nodup }
 
 {-
 ************************************************************************
@@ -1435,6 +1553,16 @@ rebuildCall env (ArgInfo { ai_fun = fun, ai_args = rev_args, ai_strs = [] }) con
   where                                       -- again and again!
     res     = argInfoExpr fun rev_args
     cont_ty = contResultType cont
+
+rebuildCall env (ArgInfo { ai_fun = fun, ai_args = rev_args }) _cont
+  -- Also discard the context around a join point invocation. Since it's a join
+  -- point, this was definitely a tail call originally, so this continuation
+  -- must come from an outer context, which must have been substituted into the
+  -- join point.
+  | sm_context_subst (getMode env)
+  , JoinPoint arity <- idJoinPointInfo fun
+  , length (argInfoAppArgs rev_args) == arity
+  = return (env, argInfoExpr fun rev_args)
 
 rebuildCall env info (CastIt co cont)
   = rebuildCall env (addCastTo info co) cont
@@ -2350,6 +2478,26 @@ prepareCaseCont env alts cont
       | otherwise      = not (all is_bot_alt alts)
 
     is_bot_alt (_,_,rhs) = exprIsBottom rhs
+
+prepareLetCont :: SimplEnv
+               -> [InBndr] -> SimplCont
+               -> SimplM (SimplEnv,
+                          SimplCont,   -- Dupable part
+                          SimplCont)   -- Non-dupable part
+
+-- Similar to prepareCaseCont, only for
+--     K[let { j1 = r1; ...; jn -> rn } in _]
+-- where the js are join points. This will turn into
+--     Knodup[let { j1 = Kdup[r1]; ...; jn = Kdup[rn] } in Kdup[_]]
+-- if context substitution is on.
+--
+-- When context substitution is off, let the entire continuation be dupable
+-- (since it won't actually be duplicated).
+
+prepareLetCont env bndrs cont
+  | not (sm_context_subst (getMode env)) 
+    || not (any isJoinBndr bndrs)        = return (env, cont, mkBoringStop (contResultType cont))
+  | otherwise                            = mkDupableCont env cont
 
 {-
 Note [Bottom alternatives]
