@@ -400,11 +400,11 @@ andFF FltLifted  flt        = flt
 
 doFloatFromRhs :: TopLevelFlag -> RecFlag -> JoinPointInfo -> Bool -> OutExpr -> SimplEnv -> Bool
 -- If you change this function look also at FloatIn.noFloatFromRhs
-doFloatFromRhs lvl rec jpi str rhs env@(SimplEnv {seFloats = Floats vfs jfs ff})
+doFloatFromRhs lvl rec jpi str rhs (SimplEnv {seFloats = Floats vfs jfs ff})
   =  not (isNilOL vfs && isNilOL jfs) && want_to_float && can_float
   where
      want_to_float
-       | sm_preserve_joins (getMode env) && jpi == NotJoinPoint && not (isNilOL jfs)
+       | jpi == NotJoinPoint && not (isNilOL jfs)
                    = False
                      -- See Note [doFloatFromRhs and preserving joins]
        | otherwise = isTopLevel lvl || exprIsCheap rhs || exprIsExpandable rhs
@@ -425,11 +425,11 @@ But there are
   - expandable things that are not cheap (eg (f b) where b is CONLIKE)
 so we must take the 'or' of the two.
 
-Note [doFloatFromRhs and preserving joins]
+Note [doFloatFromRhs and joins]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-If we're preserving join points and there are join points to preserve, then we
-want to wrap the RHS in the join bindings, at which point the RHS will certainly
-be neither cheap nor expandable. Hence we don't float at all in this case.
+If there are join points, then we want to wrap the RHS in the join bindings, at
+which point the RHS will certainly be neither cheap nor expandable. Hence we
+don't float at all in this case.
 -}
 
 emptyFloats :: Floats
@@ -538,6 +538,8 @@ mapFloats env@SimplEnv { seFloats = Floats vbs jbs ff } fun
     app (NonRec b e) = case fun (b,e) of (b',e') -> NonRec b' e'
     app (Rec bs)     = Rec (map fun bs)
 
+-- Only safe to do when floating to top level, since turning a join point into a function is
+-- invalid if it has a free reference to a join point
 promoteJoinFloats :: SimplEnv -> SimplEnv
 promoteJoinFloats env@(SimplEnv {seFloats = Floats vbs jbs ff, seInScope = ins})
   = env {seFloats = Floats (vbs `appOL` mapOL zap jbs) nilOL ff, seInScope = ins'}

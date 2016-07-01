@@ -369,25 +369,19 @@ simplLazyBind env top_lvl is_rec cont_mb bndr bndr1 rhs rhs_se
 
                 else if null tvs then           -- Simple floating
                      do { tick LetFloatFromLet
-                        ; return (addFloats env (reconsider_joins body_env2), body2) }
-                          -- Any join points we float past here are no longer
-                          -- join points (see doFloatFromRhs)
+                        ; return (addFloats env body_env2, body2) }
 
                 else                            -- Do type-abstraction first
                      do { tick LetFloatFromLet
                         ; (poly_binds, body3) <- abstractFloats tvs' body_env2 body2
                         ; rhs' <- mkLam tvs' body3 rhs_cont
                         ; env' <- foldlM (addPolyBind top_lvl) env poly_binds
-                        ; return (reconsider_joins env', rhs') }
+                        ; return (env', rhs') }
 
         ; let bndr2 | isJoinBndr bndr = setIdType bndr1 (exprType rhs')
                     | otherwise       = bndr1
             -- type of join point may have changed
         ; completeBind env' top_lvl bndr bndr2 rhs' }
-  where
-    reconsider_joins env' | isJoinBndr bndr = env'
-                          | otherwise       = promoteJoinFloats env'
-      -- joins floating from non-joins become non-joins
 
 {-
 A specialised variant of simplNonRec used when the RHS is already simplified,
@@ -407,10 +401,8 @@ simplStrictBindX env bndr rhs
   = WARN(True, text "simplStrictBindX on join bndr:" <+> ppr bndr)
       -- Not sure why a join point would be StrictBound
     simplNonRecX env bndr rhs
-  | sm_preserve_joins (getMode env)
-  = simplNonRecX (zapJoinFloats env) bndr (wrapJoinFloats env rhs)
   | otherwise
-  = simplNonRecX (promoteJoinFloats env) bndr rhs
+  = simplNonRecX (zapJoinFloats env) bndr (wrapJoinFloats env rhs)
 
 {-
 A specialised variant of simplNonRec used when the RHS is already simplified,
@@ -969,14 +961,8 @@ simplExprF1 env (Let (NonRec bndr rhs) body) cont
 simplExprFV :: SimplEnv -> InExpr -> SimplCont -> SimplM (SimplEnv, OutExpr)
         -- Simplify, letting value bindings but not join bindings float out
 simplExprFV env expr cont
-  | sm_preserve_joins (getMode env)
-    -- Put the joins here
   = do { (env', expr') <- simplExprF (zapJoinFloats env) expr cont
        ; return (zapJoinFloats env', wrapJoinFloats env' expr') }
-  | otherwise
-    -- Let the joins float out but flag them as values
-  = do { (env', expr') <- simplExprF (zapFloats env) expr cont
-       ; return (env `addFloats` promoteJoinFloats env', expr')}
 
 ---------------------------------
 
@@ -1559,8 +1545,7 @@ rebuildCall env (ArgInfo { ai_fun = fun, ai_args = rev_args }) _cont
   -- point, this was definitely a tail call originally, so this continuation
   -- must come from an outer context, which must have been substituted into the
   -- join point.
-  | sm_context_subst (getMode env)
-  , JoinPoint arity <- idJoinPointInfo fun
+  | JoinPoint arity <- idJoinPointInfo fun
   , length (argInfoAppArgs rev_args) == arity
   = return (env, argInfoExpr fun rev_args)
 
@@ -2488,15 +2473,10 @@ prepareLetCont :: SimplEnv
 -- Similar to prepareCaseCont, only for
 --     K[let { j1 = r1; ...; jn -> rn } in _]
 -- where the js are join points. This will turn into
---     Knodup[let { j1 = Kdup[r1]; ...; jn = Kdup[rn] } in Kdup[_]]
--- if context substitution is on.
---
--- When context substitution is off, let the entire continuation be dupable
--- (since it won't actually be duplicated).
+--     Knodup[let { j1 = Kdup[r1]; ...; jn = Kdup[rn] } in Kdup[_]].
 
 prepareLetCont env bndrs cont
-  | not (sm_context_subst (getMode env)) 
-    || not (any isJoinBndr bndrs)        = return (env, cont, mkBoringStop (contResultType cont))
+  | not (any isJoinBndr bndrs)           = return (env, cont, mkBoringStop (contResultType cont))
   | otherwise                            = mkDupableCont env cont
 
 {-

@@ -684,12 +684,10 @@ simplEnvForGHCi dflags
                            , sm_inline = False
                            , sm_eta_expand = eta_expand_on
                            , sm_case_case = True
-                           , sm_preserve_joins = preserve_joins
                            , sm_context_subst = context_subst }
   where
     rules_on      = gopt Opt_EnableRewriteRules   dflags
     eta_expand_on = gopt Opt_DoLambdaEtaExpansion dflags
-    preserve_joins = gopt Opt_FloatJoinsOnlyToTop dflags
     context_subst  = gopt Opt_ContextSubstitution dflags
    -- Do not do any inlining, in case we expose some unboxed
    -- tuple stuff that confuses the bytecode interpreter

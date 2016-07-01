@@ -21,7 +21,7 @@ import OccurAnal        ( occurAnalysePgm, occurAnalyseExpr )
 import IdInfo
 import CoreStats        ( coreBindsSize, coreBindsStats, exprSize )
 import CoreUtils        ( mkTicks, stripTicksTop )
-import CoreJoins        ( findJoinsInPgm )
+import CoreJoins        ( eraseJoins, findJoinsInPgm )
 import CoreLint         ( showPass, endPass, lintPassResult, dumpPassResult,
                           lintAnnots )
 import Simplify         ( simplTopBinds, simplExpr, simplRules )
@@ -164,7 +164,6 @@ getCoreToDo dflags
                           , sm_eta_expand = eta_expand_on
                           , sm_inline     = True
                           , sm_case_case  = True
-                          , sm_preserve_joins = joins_to_top_only
                           , sm_context_subst  = context_subst }
 
     simpl_phase phase names iter
@@ -696,7 +695,8 @@ simplifyPgmIO pass@(CoreDoSimplify max_iterations mode)
                      occurAnalysePgm this_mod active_rule rules
                                      maybeVects maybeVectVars binds
                ; tagged_binds = {-# SCC "FindJoins" #-}
-                     findJoinsInPgm occ_binds
+                     if sm_context_subst mode then findJoinsInPgm occ_binds
+                                              else eraseJoins occ_binds
                } ;
            Err.dumpIfSet_dyn dflags Opt_D_dump_occur_anal "Occurrence analysis"
                      (pprCoreBindings tagged_binds);
