@@ -427,12 +427,8 @@ simplStrictBindX :: SimplEnv
                  -> OutExpr
                  -> SimplM SimplEnv
 simplStrictBindX env bndr rhs
-  | isJoinBndr bndr
-  = WARN(True, text "simplStrictBindX on join bndr:" <+> ppr bndr)
-      -- Not sure why a join point would be StrictBound
-    simplNonRecX env bndr rhs
-  | otherwise
-  = simplNonRecX (zapJoinFloats env) bndr (wrapJoinFloats env rhs)
+  = ASSERT(not (isJoinBndr bndr))
+    simplNonRecX (zapJoinFloats env) bndr (wrapJoinFloats env rhs)
 
 {-
 A specialised variant of simplNonRec used when the RHS is already simplified,
@@ -1462,6 +1458,7 @@ simplNonRecE env bndr (rhs, rhs_se) (bndrs, body) cont
                   simplLam (extendIdSubst env bndr (mkContEx rhs_se rhs)) bndrs body cont }
 
            | isStrictId bndr          -- Includes coercions
+           , not (isJoinBndr bndr)
            -> simplExprF (rhs_se `setFloats` env) rhs
                          (StrictBind bndr bndrs body env cont)
 
