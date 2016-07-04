@@ -12,6 +12,7 @@ import MonadUtils
 import Outputable
 import PprCore ()
 import Rules
+import Type
 import Util
 import VarEnv
 import VarSet
@@ -155,7 +156,8 @@ fjLet rec_sort bind body
            all_anal | is_rec    = bind_anal `combineJoinAnals` body_anal    -- Still includes binders of
                     | otherwise = body_anal                                 -- this let(rec)
 
-           sort | binders `allInGoodSet` all_anal
+           sort | couldBeJoinBind bind
+                , binders `allInGoodSet` all_anal
                 = JoinBndr
                 | otherwise
                 = ValBndr
@@ -505,22 +507,20 @@ lambdaCount :: Expr a -> TotalArity
 --   whether a given application is total (*including* all type arguments)
 lambdaCount expr = length bndrs where (bndrs, _) = collectBinders expr
 
-{-
-hasConsistentLambdaCount :: Id -> TotalArity -> Bool
--- ^ Does the given binder have the given lambda count according to all its
---   rules and its unfolding, if any?
-hasConsistentLambdaCount bndr arity
-  = all check_rule (idCoreRules bndr) && check_unf (realIdUnfolding bndr)
+couldBeJoinBind :: CoreBind -> Bool
+-- ^ Checks whether each binding is elegible to be a join point. A join point
+--   cannot be polymorphic in its return type, since its context is fixed and
+--   thus its type cannot vary.
+couldBeJoinBind bind
+  = case bind of NonRec bndr rhs -> good (bndr, rhs)
+                 Rec pairs       -> all good pairs
   where
-    check_rule (BuiltinRule {})
-      = False -- no way to know, but why are we checking this anyway??
-    check_rule (Rule { ru_nargs = nargs, ru_rhs = rhs })
-      = nargs + lambdaCount rhs == arity
-    
-    check_unf (CoreUnfolding { unf_template = rhs })
-      = lambdaCount rhs == arity
-    check_unf (DFunUnfolding { df_bndrs = bndrs })
-      = length bndrs
-    check_unf _
-      = True
--}
+    good (bndr, rhs) = go emptyVarSet (idType bndr) rhs
+      where
+        go tvs ty (Lam _ body)
+          | Just (t, ty') <- splitForAllTy_maybe ty
+          = go (extendVarSet tvs t) ty' body
+          | otherwise
+          = go tvs (funResultTy ty) body
+        go tvs ty _
+          = isEmptyVarSet (tvs `intersectVarSet` tyCoVarsOfType ty)
