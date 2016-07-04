@@ -208,6 +208,39 @@ we should eta expand wherever we find a (value) lambda?  Then the eta
 expansion at a let RHS can concentrate solely on the PAP case.
 
 
+Case-of-case and join points
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When we perform the case-of-case transform (or otherwise push continuations
+inward), we want to treat join points specially. Since they're always
+tail-called and we want to maintain this invariant, we can do this:
+
+  E[let <join> j = e
+    in case ... of
+         A -> j 1
+         B -> j 2
+         C -> f 3]
+    
+    -->
+  
+  let <join> j = E[e]
+  in case ... of
+       A -> j 1
+       B -> j 2
+       C -> E[f 3]
+
+The flag to enable this is called -fcontext-substitution because, through the
+lens of the sequent calculus (or CPS), this is precisely a substitution for a
+continuation variable ("join point" being a funny spelling of "continuation").
+
+As is evident from the example, there are two components to this behavior:
+
+  1. When entering the RHS of a join point, copy the context inside.
+  2. When a join point is invoked, discard the outer context.
+
+Clearly we need to be very careful here to remain consistent---neither part is
+optional!
+
 ************************************************************************
 *                                                                      *
 \subsection{Bindings}
@@ -979,7 +1012,7 @@ simplExprFV env expr cont
 -- Context goes *inside* the lambdas. IOW, if the join point has arity n, we do:
 --   \x1 .. xn -> e => \x1 .. xn -> E[e]
 -- Note that we need the arity of the join point, since e may be a lambda
--- (though this is unlikely).
+-- (though this is unlikely). See Note [Case-of-case and join points].
 simplRhs :: SimplEnv -> Maybe SimplCont -> InId -> InExpr -> SimplM OutExpr
 simplRhs env cont_mb bndr expr
   = do { (env', expr') <- simplRhsF (zapFloats env) cont_mb bndr expr
@@ -1500,6 +1533,26 @@ simplIdF env var cont
 
 completeCall :: SimplEnv -> OutId -> SimplCont -> SimplM (SimplEnv, OutExpr)
 completeCall env var cont
+  | JoinPoint arity <- idJoinPointInfo var
+  = completeTrimmedCall env var (trim_cont arity cont)
+      -- Note [Case-of-case and join points]
+  | otherwise
+  = completeTrimmedCall env var cont
+  where
+    -- Need to separate the invocation of the join point from the outer context
+    trim_cont 0 cont@(Stop {})
+      = cont
+    trim_cont 0 cont
+      = mkBoringStop (contHoleType cont)
+    trim_cont n cont@(ApplyToVal { sc_cont = k })
+      = cont { sc_cont = trim_cont (n-1) k }
+    trim_cont n cont@(ApplyToTy { sc_cont = k })
+      = cont { sc_cont = trim_cont (n-1) k } -- join arity counts types!
+    trim_cont _ cont
+      = pprPanic "completeCall" $ ppr var $$ ppr cont
+
+completeTrimmedCall :: SimplEnv -> OutId -> SimplCont -> SimplM (SimplEnv, OutExpr)
+completeTrimmedCall env var cont
   = do  {   ------------- Try inlining ----------------
           dflags <- getDynFlags
         ; let  (lone_variable, arg_infos, call_cont) = contArgs cont
@@ -1553,15 +1606,6 @@ rebuildCall env (ArgInfo { ai_fun = fun, ai_args = rev_args, ai_strs = [] }) con
   where                                       -- again and again!
     res     = argInfoExpr fun rev_args
     cont_ty = contResultType cont
-
-rebuildCall env (ArgInfo { ai_fun = fun, ai_args = rev_args }) _cont
-  -- Also discard the context around a join point invocation. Since it's a join
-  -- point, this was definitely a tail call originally, so this continuation
-  -- must come from an outer context, which must have been substituted into the
-  -- join point.
-  | JoinPoint arity <- idJoinPointInfo fun
-  , length (argInfoAppArgs rev_args) == arity
-  = return (env, argInfoExpr fun rev_args)
 
 rebuildCall env info (CastIt co cont)
   = rebuildCall env (addCastTo info co) cont
