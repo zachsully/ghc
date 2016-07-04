@@ -357,7 +357,7 @@ simplLazyBind env top_lvl is_rec cont_mb bndr bndr1 rhs rhs_se
 
         -- Simplify the RHS
         ; let   rhs_cont = mkRhsStop (substTy body_env (exprType body))
-        ; (body_env1, body1) <- simplRhsF body_env bndr body cont_mb
+        ; (body_env1, body1) <- simplRhsF body_env cont_mb bndr body
         -- ANF-ise a constructor or PAP rhs
         ; (body_env2, body2) <- prepareRhs top_lvl body_env1 bndr1 body1
 
@@ -381,15 +381,12 @@ simplLazyBind env top_lvl is_rec cont_mb bndr bndr1 rhs rhs_se
         ; let bndr2 | isJoinBndr bndr = setIdType bndr1 (exprType rhs')
                     | otherwise       = bndr1
             -- type of join point may have changed
-        ; completeBind env' top_lvl bndr bndr2 rhs' }
+        ; completeBind env' top_lvl cont_mb bndr bndr2 rhs' }
 
 {-
 A specialised variant of simplNonRec used when the RHS is already simplified,
-notably in rebuild's StrictBind case. Normally we let everything float out of
-a strict binding, but:
-  - If we're preserving join points, we don't let them float out
-  - If we're *not* preserving join points, those that *do* float out get
-    promoted to values
+notably in rebuild's StrictBind case. Like simplNonRecX, but doesn't allow
+join points to float out of a value binding.
 -}
 
 simplStrictBindX :: SimplEnv
@@ -443,7 +440,7 @@ completeNonRecX top_lvl env is_strict old_bndr new_bndr new_rhs
                 then do { tick LetFloatFromLet
                         ; return (addFloats env env1, rhs1) }   -- Add the floats to the main env
                 else return (env, wrapFloats env1 rhs1)         -- Wrap the floats around the RHS
-        ; completeBind env2 NotTopLevel old_bndr new_bndr rhs2 }
+        ; completeBind env2 NotTopLevel Nothing old_bndr new_bndr rhs2 }
 
 {-
 {- No, no, no!  Do not try preInlineUnconditionally in completeNonRecX
@@ -689,6 +686,7 @@ Nor does it do the atomic-argument thing
 
 completeBind :: SimplEnv
              -> TopLevelFlag            -- Flag stuck into unfolding
+             -> Maybe SimplCont         -- Context of let binding, if needed
              -> InId                    -- Old binder
              -> OutId -> OutExpr        -- New binder and RHS
              -> SimplM SimplEnv
@@ -697,7 +695,7 @@ completeBind :: SimplEnv
 --      * or by adding to the floats in the envt
 --
 -- Precondition: rhs obeys the let/app invariant
-completeBind env top_lvl old_bndr new_bndr new_rhs
+completeBind env top_lvl cont_mb old_bndr new_bndr new_rhs
  | isCoVar old_bndr
  = case new_rhs of
      Coercion co -> return (extendCvSubst env old_bndr co)
@@ -714,7 +712,7 @@ completeBind env top_lvl old_bndr new_bndr new_rhs
       ; (new_arity, final_rhs) <- tryEtaExpandRhs env new_bndr new_rhs
 
         -- Simplify the unfolding
-      ; new_unfolding <- simplLetUnfolding env top_lvl old_bndr final_rhs old_unf
+      ; new_unfolding <- simplLetUnfolding env top_lvl cont_mb old_bndr final_rhs old_unf
 
       ; dflags <- getDynFlags
       ; if postInlineUnconditionally dflags env top_lvl new_bndr occ_info
@@ -774,7 +772,7 @@ addPolyBind :: TopLevelFlag -> SimplEnv -> OutBind -> SimplM SimplEnv
 -- INVARIANT: the arity is correct on the incoming binders
 
 addPolyBind top_lvl env (NonRec poly_id rhs)
-  = do  { unfolding <- simplLetUnfolding env top_lvl poly_id rhs noUnfolding
+  = do  { unfolding <- simplLetUnfolding env top_lvl Nothing poly_id rhs noUnfolding
                         -- Assumes that poly_id did not have an INLINE prag
                         -- which is perhaps wrong.  ToDo: think about this
         ; let final_id = setIdInfo poly_id $
@@ -810,6 +808,18 @@ which is in the output of Specialise:
 Here opInt has arity 1; but when we apply the rule its arity drops to 0.
 That's why Specialise goes to a little trouble to pin the right arity
 on specialised functions too.
+
+Also, the arity of a join point can decrease due to context substitution:
+
+  (let <join> j x = \y -> x + y in if b then j 1 else j 2) 3
+
+  ==>
+
+  let <join> j x = (\y -> x + y) 3 in if b then j 1 else j 2
+  
+  ==>
+  
+  let <join> j x = x + 3 in if b then j 1 else j 2
 
 Note [Setting the demand info]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -965,14 +975,18 @@ simplExprFV env expr cont
        ; return (zapJoinFloats env', wrapJoinFloats env' expr') }
 
 ---------------------------------
-
--- Simplify the right-hand side, adding a context if this is a join point.
+-- Simplify a right-hand side, adding a context if this is a join point.
 -- Context goes *inside* the lambdas. IOW, if the join point has arity n, we do:
 --   \x1 .. xn -> e => \x1 .. xn -> E[e]
 -- Note that we need the arity of the join point, since e may be a lambda
 -- (though this is unlikely).
-simplRhsF :: SimplEnv -> InId -> InExpr -> Maybe SimplCont -> SimplM (SimplEnv, OutExpr)
-simplRhsF env bndr expr cont_mb
+simplRhs :: SimplEnv -> Maybe SimplCont -> InId -> InExpr -> SimplM OutExpr
+simplRhs env cont_mb bndr expr
+  = do { (env', expr') <- simplRhsF (zapFloats env) cont_mb bndr expr
+       ; return $ wrapFloats env' expr' }
+
+simplRhsF :: SimplEnv -> Maybe SimplCont -> InId -> InExpr -> SimplM (SimplEnv, OutExpr)
+simplRhsF env cont_mb bndr expr
   | JoinPoint arity <- idJoinPointInfo bndr
   = simpl_join_lams arity
   | otherwise
@@ -1366,7 +1380,7 @@ simplLamBndr :: SimplEnv -> Var -> SimplM (SimplEnv, Var)
 simplLamBndr env bndr
   | isId bndr && hasSomeUnfolding old_unf   -- Special case
   = do { (env1, bndr1) <- simplBinder env bndr
-       ; unf'          <- simplUnfolding env1 NotTopLevel bndr old_unf
+       ; unf'          <- simplUnfolding env1 NotTopLevel Nothing bndr old_unf
        ; let bndr2 = bndr1 `setIdUnfolding` unf'
        ; return (modifyInScope env1 bndr2, bndr2) }
 
@@ -2997,12 +3011,13 @@ the outer case is *not* a seq.
 -}
 
 simplLetUnfolding :: SimplEnv-> TopLevelFlag
+                  -> Maybe SimplCont
                   -> InId
                   -> OutExpr
                   -> Unfolding -> SimplM Unfolding
-simplLetUnfolding env top_lvl id new_rhs unf
+simplLetUnfolding env top_lvl cont_mb id new_rhs unf
   | isStableUnfolding unf
-  = simplUnfolding env top_lvl id unf
+  = simplUnfolding env top_lvl cont_mb id unf
   | otherwise
   = bottoming `seq`  -- See Note [Force bottoming field]
     do { dflags <- getDynFlags
@@ -3016,9 +3031,9 @@ simplLetUnfolding env top_lvl id new_rhs unf
   where
     bottoming = isBottomingId id
 
-simplUnfolding :: SimplEnv-> TopLevelFlag -> InId -> Unfolding -> SimplM Unfolding
+simplUnfolding :: SimplEnv-> TopLevelFlag -> Maybe SimplCont -> InId -> Unfolding -> SimplM Unfolding
 -- Note [Setting the new unfolding]
-simplUnfolding env top_lvl id unf
+simplUnfolding env top_lvl cont_mb id unf
   = case unf of
       NoUnfolding -> return unf
       OtherCon {} -> return unf
@@ -3030,7 +3045,7 @@ simplUnfolding env top_lvl id unf
 
       CoreUnfolding { uf_tmpl = expr, uf_src = src, uf_guidance = guide }
         | isStableSource src
-        -> do { expr' <- simplExpr rule_env expr
+        -> do { expr' <- simplRhs rule_env cont_mb id expr
               ; case guide of
                   UnfWhen { ug_arity = arity, ug_unsat_ok = sat_ok }  -- Happens for INLINE things
                      -> let guide' = UnfWhen { ug_arity = arity, ug_unsat_ok = sat_ok
