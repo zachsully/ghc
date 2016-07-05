@@ -2116,7 +2116,7 @@ reallyRebuildCase env scrut case_bndr alts cont
         -- Notice that rebuild gets the in-scope set from env', not alt_env
         -- (which in any case is only build in simplAlts)
         -- The case binder *not* scope over the whole returned case-expression
-        ; rebuild env' case_expr nodup_cont }
+        ; rebuild (zapJoinFloats env') (wrapJoinFloats env' case_expr) nodup_cont }
 
 {-
 simplCaseBinder checks whether the scrutinee is a variable, v.  If so,
