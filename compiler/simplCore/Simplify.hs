@@ -1238,7 +1238,7 @@ rebuild env expr cont
       StrictBind b bs body se cont  -> do { env' <- simplStrictBindX (se `setFloats` env) b expr
                                                -- expr satisfies let/app since it started life
                                                -- in a call to simplNonRecE
-                                          ; simplLam env' bs body cont }
+                                          ; simplLam (env'  `restoreFloats` se) bs body cont }
 
       ApplyToTy  { sc_arg_ty = ty, sc_cont = cont}
         -> rebuild env (App expr (Type ty)) cont
@@ -1459,8 +1459,8 @@ simplNonRecE env bndr (rhs, rhs_se) (bndrs, body) cont
 
            | isStrictId bndr          -- Includes coercions
            , not (isJoinBndr bndr)
-           -> simplExprF (rhs_se `setFloats` env) rhs
-                         (StrictBind bndr bndrs body env cont)
+           -> simplExprF (rhs_se `setFloats` zapJoinFloats env) rhs
+                         (StrictBind bndr bndrs body (zapValueFloats env) cont)
 
            | otherwise
            -> ASSERT( not (isTyVar bndr) )

@@ -34,8 +34,8 @@ module SimplEnv (
 
         -- * Floats
         Floats, emptyFloats, isEmptyFloats, addNonRec, addFloats, extendFloats,
-        wrapFloats, setFloats, zapFloats, addRecFloats, mapFloats,
-        wrapJoinFloats, zapJoinFloats, promoteJoinFloats,
+        wrapFloats, setFloats, zapFloats, addRecFloats, mapFloats, restoreFloats,
+        wrapJoinFloats, zapJoinFloats, zapValueFloats, promoteJoinFloats,
         doFloatFromRhs, getFloatBinds
     ) where
 
@@ -495,12 +495,22 @@ addFlts :: Floats -> Floats -> Floats
 addFlts (Floats vbs1 jbs1 l1) (Floats vbs2 jbs2 l2)
   = Floats (vbs1 `appOL` vbs2) (jbs1 `appOL` jbs2) (l1 `andFF` l2)
 
+restoreFloats :: SimplEnv -> SimplEnv -> SimplEnv
+-- Add the floats for env2 to env1, assuming they were there once before
+-- (so that the in-scope set doesn't need to be adjusted)
+restoreFloats env1 env2
+  = env1 {seFloats = seFloats env1 `addFlts` seFloats env2}
+
 zapFloats :: SimplEnv -> SimplEnv
 zapFloats env = env { seFloats = emptyFloats }
 
 zapJoinFloats :: SimplEnv -> SimplEnv
 zapJoinFloats env@(SimplEnv {seFloats = Floats vbs _ ff})
   = env {seFloats = Floats vbs nilOL ff}
+
+zapValueFloats :: SimplEnv -> SimplEnv
+zapValueFloats env@(SimplEnv {seFloats = Floats _ jbs _})
+  = env {seFloats = Floats nilOL jbs FltLifted} -- only value bindings count against flag
 
 addRecFloats :: SimplEnv -> SimplEnv -> SimplEnv
 -- Flattens the floats from env2 into a single Rec group,
