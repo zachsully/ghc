@@ -2529,9 +2529,18 @@ prepareLetCont :: SimplEnv
 --     K[let { j1 = r1; ...; jn -> rn } in _]
 -- where the js are join points. This will turn into
 --     Knodup[let { j1 = Kdup[r1]; ...; jn = Kdup[rn] } in Kdup[_]].
+--
+-- When case-of-case is off and there are join points, just make the entire continuation
+-- non-dupable. This is necessary because otherwise
+--     case (let j = ... in case e of { A -> j 1; ... }) of { B -> ... }
+-- becomes
+--     let j = case ... of { B -> ... } in
+--     case (case e of { A -> j 1; ... }) of { B -> ... },
+-- and the reference to j is invalid.
 
 prepareLetCont env bndrs cont
   | not (any isJoinBndr bndrs)           = return (env, cont, mkBoringStop (contResultType cont))
+  | not (sm_case_case (getMode env))     = return (env, mkBoringStop (contHoleType cont), cont)
   | otherwise                            = mkDupableCont env cont
 
 {-
