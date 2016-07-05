@@ -146,6 +146,7 @@ infixl  1 `setIdUnfoldingLazily`,
           `setIdArity`,
           `setIdCallArity`,
           `setIdOccInfo`,
+          `setIdJoinPointInfo`,
           `setIdOneShotInfo`,
 
           `setIdSpecialisation`,

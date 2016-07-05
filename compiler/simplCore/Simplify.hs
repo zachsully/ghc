@@ -2712,8 +2712,11 @@ mkDupableAlt env case_bndr (con, bndrs', rhs') = do
                 join_rhs   = mkLams really_final_bndrs rhs'
                 join_arity = exprArity join_rhs
                 join_call  = mkApps (Var join_bndr) final_args
+                final_join_bndr        = join_bndr
+                                           `setIdArity` join_arity
+                                           `setIdJoinPointInfo` JoinPoint (length final_bndrs')
 
-        ; env' <- addPolyBind NotTopLevel env (NonRec (join_bndr `setIdArity` join_arity) join_rhs)
+        ; env' <- addPolyBind NotTopLevel env (NonRec final_join_bndr join_rhs)
         ; return (env', (con, bndrs', join_call)) }
                 -- See Note [Duplicated env]
 
