@@ -34,7 +34,6 @@ import Demand           ( StrictSig(..), dmdTypeDepth, isStrictDmd )
 import PprCore          ( pprCoreExpr )
 import CoreUnfold
 import CoreUtils
-import CoreArity
 --import PrimOp           ( tagToEnumKey ) -- temporalily commented out. See #8326
 import Rules            ( mkRuleInfo, lookupRule, getRules )
 import TysPrim          ( voidPrimTy ) --, intPrimTy ) -- temporalily commented out. See #8326
@@ -2710,7 +2709,7 @@ mkDupableAlt env case_bndr (con, bndrs', rhs') = do
                 one_shot v | isId v    = setOneShotLambda v
                            | otherwise = v
                 join_rhs   = mkLams really_final_bndrs rhs'
-                join_arity = exprArity join_rhs
+                join_arity = length (filter (not . isTyVar) final_bndrs')
                 join_call  = mkApps (Var join_bndr) final_args
                 final_join_bndr        = join_bndr
                                            `setIdArity` join_arity
