@@ -768,17 +768,8 @@ completeBind env top_lvl cont_mb old_bndr new_bndr new_rhs
                   = zapDemandInfo info2 `orElse` info2
                   | otherwise
                   = info2
-            
-              -- If number of lambdas changes, it's no longer a join point
-            info4 | JoinPoint old_join_arity <- joinPointInfo old_info
-                  , let (bndrs, _) = collectBinders final_rhs
-                  , let new_join_arity = length bndrs -- count types *and* values
-                  , new_join_arity /= old_join_arity
-                  = info3 `setJoinPointInfo` NotJoinPoint
-                  | otherwise
-                  = info3
 
-            final_id = new_bndr `setIdInfo` info4
+            final_id = new_bndr `setIdInfo` info3
 
       ; -- pprTrace "Binding" (ppr final_id <+> ppr new_unfolding) $
         return (addNonRec env final_id final_rhs) } }
