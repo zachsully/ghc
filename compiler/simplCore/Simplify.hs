@@ -1288,7 +1288,7 @@ simplCast env body co0 cont0
                 -- This implements the PushT rule from the paper
          | isForAllTy s1s2
          = do { cont' <- addCoerce new_cast tail
-              ; return (cont { sc_cont = cont' }) }
+              ; return (cont { sc_cont = cont', sc_hole_ty = s1s2 }) }
          where
            new_cast = mkInstCo co (mkNomReflCo arg_ty)
 
