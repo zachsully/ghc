@@ -2710,10 +2710,14 @@ mkDupableAlt env case_bndr (con, bndrs', rhs') = do
                            | otherwise = v
                 join_rhs   = mkLams really_final_bndrs rhs'
                 join_arity = length (filter (not . isTyVar) final_bndrs')
+                join_jpi   | sm_context_subst (getMode env)
+                           = JoinPoint (length final_bndrs')
+                           | otherwise
+                           = NotJoinPoint
                 join_call  = mkApps (Var join_bndr) final_args
                 final_join_bndr        = join_bndr
                                            `setIdArity` join_arity
-                                           `setIdJoinPointInfo` JoinPoint (length final_bndrs')
+                                           `setIdJoinPointInfo` join_jpi
 
         ; env' <- addPolyBind NotTopLevel env (NonRec final_join_bndr join_rhs)
         ; return (env', (con, bndrs', join_call)) }
