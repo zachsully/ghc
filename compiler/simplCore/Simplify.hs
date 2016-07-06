@@ -1540,7 +1540,7 @@ completeCall env var cont
     trim_cont 0 cont@(Stop {})
       = cont
     trim_cont 0 cont
-      = mkBoringStop (contHoleType cont)
+      = mkBoringStop (contResultType cont)
     trim_cont n cont@(ApplyToVal { sc_cont = k })
       = cont { sc_cont = trim_cont (n-1) k }
     trim_cont n cont@(ApplyToTy { sc_cont = k })
