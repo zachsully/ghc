@@ -1024,8 +1024,8 @@ simplRhsF env cont_mb bndr expr
       | otherwise
       = do { (env', join_bndrs') <- simplLamBndrs env join_bndrs
            ; join_body' <- simplExprC env' join_body join_cont
-           ; new_join <- mkLam join_bndrs' join_body' rhs_cont
-                           -- mkLam wants continuation for let RHS, not lambda body
+           ; let new_join = mkLams join_bndrs' join_body'
+                              -- NOT mkLam; we don't want to eta-reduce
            ; return (env', new_join) }
       where
         (bndrs, body) = collectBinders expr
