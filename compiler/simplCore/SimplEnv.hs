@@ -184,11 +184,15 @@ isJoinVar :: SimplEnv -> InVar -> Bool
 isJoinVar env var
   = isJust (joinVarArity env var)
 
-joinVarArity :: SimplEnv -> InVar -> Maybe JoinArity
+joinVarArity :: SimplEnv -> InId -> Maybe JoinArity
 joinVarArity (SimplEnv { seInScope = ins, seSubstJoins = joins }) var
   = lookupVarEnv joins var
     <|>
     case idJoinPointInfo real_var of
+      _ | not (isId real_var) -> WARN(True, text "Id becomes non-Id in in-scope set" $$
+                                            pprBndr LetBind var $$ text "  ==>" $$
+                                            pprBndr LetBind real_var)
+                                 Nothing -- FIXME Why does this happen?
       JoinPoint arity -> Just arity
       NotJoinPoint    -> Nothing
   where
