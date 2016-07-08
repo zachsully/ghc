@@ -1260,6 +1260,8 @@ postInlineUnconditionally dflags env top_lvl bndr occ_info rhs unfolding
   | isStableUnfolding unfolding = False -- Note [Stable unfoldings and postInlineUnconditionally]
   | isTopLevel top_lvl          = False -- Note [Top level and postInlineUnconditionally]
   | exprIsTrivial rhs           = True
+  | eta_reducible_join          = True  -- Join points don't get eta-reduced, so
+                                        -- it might be "trivial" after all
   | otherwise
   = case occ_info of
         -- The point of examining occ_info here is that for *non-values*
@@ -1322,6 +1324,14 @@ postInlineUnconditionally dflags env top_lvl bndr occ_info rhs unfolding
   where
     active = isActive (sm_phase (getMode env)) (idInlineActivation bndr)
         -- See Note [pre/postInlineUnconditionally in gentle mode]
+    
+    eta_reducible_join
+      | Just _ <- joinVarArity env bndr
+      , Just _ <- tryEtaReduce bndrs body
+      = True
+      | otherwise
+      = False
+    (bndrs, body) = collectBinders rhs
 
 {-
 Note [Top level and postInlineUnconditionally]
