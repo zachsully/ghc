@@ -38,7 +38,7 @@ module IdInfo (
         demandInfo, setDemandInfo, pprStrictness,
 
         -- ** Join point flag
-        JoinPointInfo(..),
+        JoinPointInfo(..), JoinArity,
         joinPointInfo, setJoinPointInfo,
         noJoinPointInfo, isJoinPoint, ppJoinPointInfo,
 
