@@ -24,7 +24,7 @@ module SimplEnv (
         getSimplRules,
         
         -- * Join variables
-        JoinVarSet, isJoinVar, joinVarArity,
+        isJoinVar, joinVarArity,
 
         -- * Substitution results
         SimplSR(..), mkContEx, substId, lookupRecBndr, refineFromInScope,
@@ -66,7 +66,6 @@ import Outputable
 import Util
 import Maybes
 
-import Control.Applicative      ( (<|>) )
 import Data.List
 
 {-
@@ -118,9 +117,6 @@ data SimplEnv
         seTvSubst   :: TvSubstEnv,      -- InTyVar |--> OutType
         seCvSubst   :: CvSubstEnv,      -- InCoVar |--> OutCoercion
         seIdSubst   :: SimplIdSubst,    -- InId    |--> OutExpr
-
-        -- Which substed variables bind join points?
-        seSubstJoins :: JoinVarSet,     -- InVars only (Note [seSubstJoins])
         
      ----------- Dynamic part of the environment -----------
      -- Dynamic in the sense of describing the setup where
@@ -142,7 +138,6 @@ pprSimplEnv env
   = vcat [text "TvSubst:" <+> ppr (seTvSubst env),
           text "CvSubst:" <+> ppr (seCvSubst env),
           text "IdSubst:" <+> ppr (seIdSubst env),
-          text "SubstJoins:" <+> ppr (seSubstJoins env),
           text "InScope:" <+> vcat (map ppr_one in_scope_vars)
     ]
   where
@@ -150,7 +145,7 @@ pprSimplEnv env
    ppr_one v | isId v = ppr v <+> ppr (idUnfolding v)
              | otherwise = ppr v
 
-type SimplIdSubst = IdEnv SimplSR       -- IdId |--> OutExpr
+type SimplIdSubst = IdEnv (SimplSR, JoinPointInfo) -- IdId |--> OutExpr
         -- See Note [Extending the Subst] in CoreSubst
 
 -- | A substitution result.
@@ -160,53 +155,33 @@ data SimplSR
   | ContEx TvSubstEnv           -- A suspended substitution
            CvSubstEnv
            SimplIdSubst
-           JoinVarSet
            InExpr
 
 instance Outputable SimplSR where
   ppr (DoneEx e) = text "DoneEx" <+> ppr e
   ppr (DoneId v) = text "DoneId" <+> ppr v
-  ppr (ContEx _tv _cv _id _js e) = vcat [text "ContEx" <+> ppr e {-,
-                                   ppr (filter_env tv), ppr (filter_env id) -}]
+  ppr (ContEx _tv _cv _id e) = vcat [text "ContEx" <+> ppr e {-,
+                               ppr (filter_env tv), ppr (filter_env id) -}]
         -- where
         -- fvs = exprFreeVars e
         -- filter_env env = filterVarEnv_Directly keep env
         -- keep uniq _ = uniq `elemUFM_Directly` fvs
-
--- The arity (counting type args) of each join point being substituted
--- Note [seJoins]
-type JoinVarSet = VarEnv JoinArity
-
-emptyJoinVarSet :: JoinVarSet
-emptyJoinVarSet = emptyVarEnv
 
 isJoinVar :: SimplEnv -> InVar -> Bool
 isJoinVar env var
   = isJust (joinVarArity env var)
 
 joinVarArity :: SimplEnv -> InId -> Maybe JoinArity
-joinVarArity (SimplEnv { seInScope = ins, seSubstJoins = joins }) var
-  = lookupVarEnv joins var
-    <|>
-    case idJoinPointInfo real_var of
-      _ | not (isId real_var) -> WARN(True, text "Id becomes non-Id in in-scope set" $$
-                                            pprBndr LetBind var $$ text "  ==>" $$
-                                            pprBndr LetBind real_var)
-                                 Nothing -- FIXME Why does this happen?
+joinVarArity (SimplEnv { seIdSubst = subst, seInScope = ins }) var
+  | Just (_, jpi) <- lookupVarEnv subst var
+  = case jpi of JoinPoint arity -> Just arity
+                NotJoinPoint    -> Nothing
+  | otherwise
+  = case idJoinPointInfo real_var of
       JoinPoint arity -> Just arity
       NotJoinPoint    -> Nothing
   where
     real_var = lookupInScope ins var `orElse` var
-
-recordJoinArity :: JoinVarSet -> InVar -> JoinVarSet
-recordJoinArity joins var
-  | JoinPoint arity <- idJoinPointInfo var
-  = extendVarEnv joins var arity
-  | otherwise
-  = delVarEnv joins var
-
-recordJoinArities :: JoinVarSet -> [InVar] -> JoinVarSet
-recordJoinArities = foldl recordJoinArity
 
 {-
 Note [SimplEnv invariants]
@@ -244,9 +219,6 @@ seIdSubst:
         Of course, the substitution *must* applied! Things in its domain
         simply aren't necessarily bound in the result.
 
-seSubstJoins:
-        A subset of the domain of seIdSubst. See Note [seSubstJoins]
-
 * substId adds a binding (DoneId new_id) to the substitution if
         the Id's unique has changed
 
@@ -276,8 +248,8 @@ seSubstJoins:
         case y of x { ... }
   That's why the "set" is actually a VarEnv Var
 
-Note [seSubstJoins]
-~~~~~~~~~~~~~~
+Note [JoinPointInfo in SimplIdSubst]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 We have to remember which incoming variables are join points (the occurrences
 may not have correct JoinPointInfo). Normally the in-scope set is where we
@@ -294,7 +266,6 @@ mkSimplEnv :: SimplifierMode -> SimplEnv
 mkSimplEnv mode
   = SimplEnv { seMode = mode
              , seInScope = init_in_scope
-             , seSubstJoins = emptyJoinVarSet
              , seFloats = emptyFloats
              , seTvSubst = emptyVarEnv
              , seCvSubst = emptyVarEnv
@@ -336,10 +307,9 @@ updMode upd env = env { seMode = upd (seMode env) }
 
 ---------------------
 extendIdSubst :: SimplEnv -> Id -> SimplSR -> SimplEnv
-extendIdSubst env@(SimplEnv {seIdSubst = subst, seSubstJoins = joins}) var res
+extendIdSubst env@(SimplEnv {seIdSubst = subst}) var res
   = ASSERT2( isId var && not (isCoVar var), ppr var )
-    env { seIdSubst = extendVarEnv subst var res
-        , seSubstJoins = recordJoinArity joins var }
+    env { seIdSubst = extendVarEnv subst var (res, idJoinPointInfo var) }
 
 extendTvSubst :: SimplEnv -> TyVar -> Type -> SimplEnv
 extendTvSubst env@(SimplEnv {seTvSubst = tsubst}) var res
@@ -372,11 +342,9 @@ setFloats env env_with_floats
 
 addNewInScopeIds :: SimplEnv -> [CoreBndr] -> SimplEnv
         -- The new Ids are guaranteed to be freshly allocated
-addNewInScopeIds env@(SimplEnv { seInScope = in_scope, seIdSubst = id_subst
-                               , seSubstJoins = js }) vs
+addNewInScopeIds env@(SimplEnv { seInScope = in_scope, seIdSubst = id_subst }) vs
   = env { seInScope = in_scope `extendInScopeSetList` vs,
-          seIdSubst = id_subst `delVarEnvList` vs,
-          seSubstJoins = js `delVarEnvList` vs }
+          seIdSubst = id_subst `delVarEnvList` vs }
         -- Why delete?  Consider
         --      let x = a*b in (x, \x -> x+3)
         -- We add [x |-> a*b] to the substitution, but we must
@@ -392,16 +360,14 @@ modifyInScope env@(SimplEnv {seInScope = in_scope}) v
 
 ---------------------
 zapSubstEnv :: SimplEnv -> SimplEnv
-zapSubstEnv env = env {seTvSubst = emptyVarEnv, seCvSubst = emptyVarEnv,
-                       seIdSubst = emptyVarEnv, seSubstJoins = emptyJoinVarSet}
+zapSubstEnv env = env {seTvSubst = emptyVarEnv, seCvSubst = emptyVarEnv, seIdSubst = emptyVarEnv}
 
-setSubstEnv :: SimplEnv -> TvSubstEnv -> CvSubstEnv -> SimplIdSubst -> JoinVarSet -> SimplEnv
-setSubstEnv env tvs cvs ids joins = env { seTvSubst = tvs, seCvSubst = cvs
-                                        , seIdSubst = ids, seSubstJoins = joins }
+setSubstEnv :: SimplEnv -> TvSubstEnv -> CvSubstEnv -> SimplIdSubst -> SimplEnv
+setSubstEnv env tvs cvs ids = env { seTvSubst = tvs, seCvSubst = cvs, seIdSubst = ids }
 
 mkContEx :: SimplEnv -> InExpr -> SimplSR
-mkContEx (SimplEnv { seTvSubst = tvs, seCvSubst = cvs, seIdSubst = ids, seSubstJoins = js }) e
-  = ContEx tvs cvs ids js e
+mkContEx (SimplEnv { seTvSubst = tvs, seCvSubst = cvs, seIdSubst = ids }) e
+  = ContEx tvs cvs ids e
 
 {-
 ************************************************************************
@@ -654,10 +620,10 @@ substId :: SimplEnv -> InId -> SimplSR
 -- Returns DoneEx only on a non-Var expression
 substId (SimplEnv { seInScope = in_scope, seIdSubst = ids }) v
   = case lookupVarEnv ids v of  -- Note [Global Ids in the substitution]
-        Nothing               -> DoneId (refineFromInScope in_scope v)
-        Just (DoneId v)       -> DoneId (refineFromInScope in_scope v)
-        Just (DoneEx (Var v)) -> DoneId (refineFromInScope in_scope v)
-        Just res              -> res    -- DoneEx non-var, or ContEx
+        Nothing                  -> DoneId (refineFromInScope in_scope v)
+        Just (DoneId v, _)       -> DoneId (refineFromInScope in_scope v)
+        Just (DoneEx (Var v), _) -> DoneId (refineFromInScope in_scope v)
+        Just (res, _)            -> res    -- DoneEx non-var, or ContEx
 
         -- Get the most up-to-date thing from the in-scope set
         -- Even though it isn't in the substitution, it may be in
@@ -674,7 +640,7 @@ lookupRecBndr :: SimplEnv -> InId -> OutId
 -- but where we have not yet done its RHS
 lookupRecBndr (SimplEnv { seInScope = in_scope, seIdSubst = ids }) v
   = case lookupVarEnv ids v of
-        Just (DoneId v) -> v
+        Just (DoneId v, _) -> v
         Just _ -> pprPanic "lookupRecBndr" (ppr v)
         Nothing -> refineFromInScope in_scope v
 
@@ -748,13 +714,11 @@ substNonCoVarIdBndr
 -- Similar to CoreSubst.substIdBndr, except that
 --      the type of id_subst differs
 --      all fragile info is zapped
-substNonCoVarIdBndr env@(SimplEnv { seInScope = in_scope, seIdSubst = id_subst
-                                  , seSubstJoins = joins })
+substNonCoVarIdBndr env@(SimplEnv { seInScope = in_scope, seIdSubst = id_subst })
                     old_id
   = ASSERT2( not (isCoVar old_id), ppr old_id )
     (env { seInScope = in_scope `extendInScopeSet` new_id,
-           seIdSubst = new_subst,
-           seSubstJoins = new_joins }, new_id)
+           seIdSubst = new_subst }, new_id)
   where
     id1    = uniqAway in_scope old_id
     id2    = substIdType env id1
@@ -765,15 +729,9 @@ substNonCoVarIdBndr env@(SimplEnv { seInScope = in_scope, seIdSubst = id_subst
         -- or there's some useful occurrence information
         -- See the notes with substTyVarBndr for the delSubstEnv
     new_subst | new_id /= old_id
-              = extendVarEnv id_subst old_id (DoneId new_id)
+              = extendVarEnv id_subst old_id (DoneId new_id, idJoinPointInfo old_id)
               | otherwise
               = delVarEnv id_subst old_id
-              
-    -- Keep invariant that seSubstJoins is a subset of the domain of the substitution
-    new_joins | new_id /= old_id
-              = recordJoinArity joins old_id
-              | otherwise
-              = delVarEnv joins old_id
 
 ------------------------------------
 seqTyVar :: TyVar -> ()

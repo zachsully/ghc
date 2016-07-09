@@ -1496,18 +1496,18 @@ simplVar env var
   | isCoVar var = return (Coercion (substCoVar env var))
   | otherwise
   = case substId env var of
-        DoneId var1             -> return (Var var1)
-        DoneEx e                -> return e
-        ContEx tvs cvs ids js e -> simplExpr (setSubstEnv env tvs cvs ids js) e
+        DoneId var1          -> return (Var var1)
+        DoneEx e             -> return e
+        ContEx tvs cvs ids e -> simplExpr (setSubstEnv env tvs cvs ids) e
 
 simplIdF :: SimplEnv -> InId -> SimplCont -> SimplM (SimplEnv, OutExpr)
 simplIdF env var cont
   = case substId env var of
-        DoneEx e                -> simplExprF (zapSubstEnv env) e cont'
-        ContEx tvs cvs ids js e -> simplExprF (setSubstEnv env tvs cvs ids js) e cont
-                                     -- Don't trim; haven't already simplified
-                                     -- the join, so the cont was never copied
-        DoneId var1             -> completeCall env var1 cont'
+        DoneEx e             -> simplExprF (zapSubstEnv env) e cont'
+        ContEx tvs cvs ids e -> simplExprF (setSubstEnv env tvs cvs ids) e cont
+                                  -- Don't trim; haven't already simplified
+                                  -- the join, so the cont was never copied
+        DoneId var1          -> completeCall env var1 cont'
                 -- Note [zapSubstEnv]
                 -- The template is already simplified, so don't re-substitute.
                 -- This is VITAL.  Consider

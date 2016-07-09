@@ -654,9 +654,9 @@ interestingArg env e = go env 0 e
        | SimplEnv { seIdSubst = ids, seInScope = in_scope } <- env
        = case lookupVarEnv ids v of
            Nothing                        -> go_var n (refineFromInScope in_scope v)
-           Just (DoneId v')               -> go_var n (refineFromInScope in_scope v')
-           Just (DoneEx e)                -> go (zapSubstEnv env)                n e
-           Just (ContEx tvs cvs ids js e) -> go (setSubstEnv env tvs cvs ids js) n e
+           Just (DoneId v', _)            -> go_var n (refineFromInScope in_scope v')
+           Just (DoneEx e, _)             -> go (zapSubstEnv env)             n e
+           Just (ContEx tvs cvs ids e, _) -> go (setSubstEnv env tvs cvs ids) n e
 
     go _   _ (Lit {})          = ValueArg
     go _   _ (Type _)          = TrivArg
