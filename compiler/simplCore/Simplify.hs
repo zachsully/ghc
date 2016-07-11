@@ -945,7 +945,7 @@ simplExprF1 env (Type ty)      cont = ASSERT( contIsRhsOrArg cont )
                                       rebuild env (Type (substTy env ty)) cont
 
 simplExprF1 env (App fun arg) cont
-  = simplExprF env fun $
+  = simplExprFV env fun $
     case arg of
       Type ty -> ApplyToTy  { sc_arg_ty  = substTy env ty
                             , sc_hole_ty = substTy env (exprType fun)
@@ -976,9 +976,9 @@ simplExprF1 env expr@(Lam {}) cont
           | otherwise = zapLamIdInfo b
 
 simplExprF1 env (Case scrut bndr _ alts) cont
-  = simplExprF env scrut (Select { sc_dup = NoDup, sc_bndr = bndr
-                                 , sc_alts = alts
-                                 , sc_env = env, sc_cont = cont })
+  = simplExprFV env scrut (Select { sc_dup = NoDup, sc_bndr = bndr
+                                  , sc_alts = alts
+                                  , sc_env = env, sc_cont = cont })
 
 simplExprF1 env (Let (Rec pairs) body) cont
   = simplRecE env pairs body cont
@@ -992,7 +992,9 @@ simplExprFV :: SimplEnv -> InExpr -> SimplCont -> SimplM (SimplEnv, OutExpr)
         -- Simplify, letting value bindings but not join bindings float out
 simplExprFV env expr cont
   = do { (env', expr') <- simplExprF (zapJoinFloats env) expr cont
-       ; return (zapJoinFloats env', wrapJoinFloats env' expr') }
+       ; let env'' = restoreJoinFloats (zapJoinFloats env') env
+           -- Drop the new join floats and pick the old ones back up
+       ; return (env'', wrapJoinFloats env' expr') }
 
 ---------------------------------
 -- Simplify a right-hand side, adding a context if this is a join point.
