@@ -36,9 +36,9 @@ module SimplEnv (
         substCo, substCoVar,
 
         -- * Floats
-        Floats, emptyFloats, isEmptyFloats, addNonRec, addFloats, extendFloats,
+        Floats, emptyFloats, isEmptyFloats, isEmptyJoinFloats,
+        addNonRec, addFloats, extendFloats,
         wrapFloats, setFloats, zapFloats, addRecFloats, mapFloats,
-        restoreFloats, restoreJoinFloats,
         wrapJoinFloats, zapJoinFloats, zapValueFloats, promoteJoinFloats,
         doFloatFromRhs, getFloatBinds
     ) where
@@ -530,21 +530,6 @@ addFlts :: Floats -> Floats -> Floats
 addFlts (Floats vbs1 jbs1 l1) (Floats vbs2 jbs2 l2)
   = Floats (vbs1 `appOL` vbs2) (jbs1 `appOL` jbs2) (l1 `andFF` l2)
 
-addJoinFlts :: Floats -> Floats -> Floats
-addJoinFlts (Floats vbs1 jbs1 l1) (Floats _ jbs2 l2)
-  = Floats vbs1 (jbs1 `appOL` jbs2) l2
-
-restoreFloats :: SimplEnv -> SimplEnv -> SimplEnv
--- Add the floats for env2 to env1, assuming they were there once before
--- (so that the in-scope set doesn't need to be adjusted)
-restoreFloats env1 env2
-  = env1 {seFloats = seFloats env1 `addFlts` seFloats env2}
-
-restoreJoinFloats :: SimplEnv -> SimplEnv -> SimplEnv
--- Like restoreFloats, but just for the joins
-restoreJoinFloats env1 env2
-  = env1 {seFloats = seFloats env1 `addJoinFlts` seFloats env2}
-
 zapFloats :: SimplEnv -> SimplEnv
 zapFloats env = env { seFloats = emptyFloats }
 
@@ -584,6 +569,10 @@ getFloatBinds (SimplEnv {seFloats = Floats vbs jbs _})
 isEmptyFloats :: SimplEnv -> Bool
 isEmptyFloats (SimplEnv {seFloats = Floats vbs jbs _})
   = isNilOL vbs && isNilOL jbs
+
+isEmptyJoinFloats :: SimplEnv -> Bool
+isEmptyJoinFloats (SimplEnv {seFloats = Floats _ jbs _})
+  = isNilOL jbs
 
 mapFloats :: SimplEnv -> ((Id,CoreExpr) -> (Id,CoreExpr)) -> SimplEnv
 mapFloats env@SimplEnv { seFloats = Floats vbs jbs ff } fun
