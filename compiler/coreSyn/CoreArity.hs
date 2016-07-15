@@ -908,6 +908,28 @@ pushCoercion co1 (EtaCo co2 : eis)
 pushCoercion co eis = EtaCo co : eis
 
 --------------
+etaInfoLocalBndr :: CoreBndr -> [EtaInfo] -> CoreBndr
+etaInfoLocalBndr bndr eis
+  = case idJoinPointInfo bndr of
+      JoinPoint arity -> bndr `setIdType` go arity (idType bndr) eis
+      NotJoinPoint    -> bndr
+  where
+    go 0 ty eis
+      = app ty eis
+    go n ty eis
+      | Just (arg_bndr, res_ty) <- splitPiTy_maybe ty -- also applies to funcs
+      = mkForAllTy arg_bndr (go (n-1) res_ty eis)
+      | otherwise = pprPanic "etaInfoLocalBndr" (pprBndr LetBind bndr)
+    
+    app ty []
+      = ty
+    app ty (EtaVar v : eis)
+      | isId v    = app (funResultTy ty) eis
+      | otherwise = app (piResultTy ty (mkTyVarTy v)) eis
+    app _ty (EtaCo co : eis)
+      = app (pSnd (coercionKind co)) eis
+
+--------------
 etaInfoAbs :: [EtaInfo] -> CoreExpr -> CoreExpr
 etaInfoAbs []               expr = expr
 etaInfoAbs (EtaVar v : eis) expr = Lam v (etaInfoAbs eis expr)
@@ -942,7 +964,7 @@ etaInfoApp subst (Case e b ty alts) eis
 etaInfoApp subst (Let b e) eis
   = Let b' (etaInfoApp subst' e eis)
   where
-    (subst', b') = etaInfoAppBind subst b eis -- subst_bind subst b
+    (subst', b') = etaInfoAppBind subst b eis
 
 etaInfoApp subst (Tick t e) eis
   = Tick (substTickish subst t) (etaInfoApp subst e eis)
@@ -967,15 +989,15 @@ etaInfoAppBind subst (NonRec bndr rhs) eis
   where
     (subst', bndr') = substBndr subst bndr
     rhs'            = etaInfoAppRhs subst' bndr' rhs eis
-    bndr''          = setIdType bndr' (exprType rhs')
+    bndr''          = etaInfoLocalBndr bndr' eis
 etaInfoAppBind subst (Rec pairs) eis
-  = (subst', Rec (zipWith fix_type bndrs' rhss'))
+  = (subst', Rec (bndrs' `zip` rhss'))
   where
     (bndrs, rhss)     = unzip pairs
-    (subst', bndrs')  = substRecBndrs subst bndrs
+    bndrs_w_new_types = map (\bndr -> etaInfoLocalBndr bndr eis) bndrs
+    (subst', bndrs')  = substRecBndrs subst bndrs_w_new_types
     rhss'             = zipWith process bndrs' rhss
     process bndr' rhs = etaInfoAppRhs subst' bndr' rhs eis
-    fix_type bndr rhs = (bndr `setIdType` exprType rhs, rhs)
 
 --------------
 etaInfoAppRhs :: Subst -> CoreBndr -> CoreExpr -> [EtaInfo] -> CoreExpr
