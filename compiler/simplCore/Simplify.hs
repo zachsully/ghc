@@ -408,7 +408,7 @@ simplLazyBind env top_lvl is_rec cont_mb bndr bndr1 rhs rhs_se
         ; let bndr2 | isJoinBndr bndr = setIdType bndr1 (exprType rhs')
                     | otherwise       = bndr1
             -- type of join point may have changed
-        ; completeBind env' top_lvl cont_mb bndr bndr2 rhs' }
+        ; completeBind env' top_lvl is_rec cont_mb bndr bndr2 rhs' }
 
 {-
 A specialised variant of simplNonRec used when the RHS is already simplified,
@@ -449,7 +449,7 @@ completeNonRecX top_lvl env is_strict old_bndr new_bndr new_rhs
                 then do { tick LetFloatFromLet
                         ; return (addFloats env env1, rhs1) }   -- Add the floats to the main env
                 else return (env, wrapFloats env1 rhs1)         -- Wrap the floats around the RHS
-        ; completeBind env2 NotTopLevel Nothing old_bndr new_bndr rhs2 }
+        ; completeBind env2 NotTopLevel NonRecursive Nothing old_bndr new_bndr rhs2 }
 
 {-
 {- No, no, no!  Do not try preInlineUnconditionally in completeNonRecX
@@ -695,6 +695,7 @@ Nor does it do the atomic-argument thing
 
 completeBind :: SimplEnv
              -> TopLevelFlag            -- Flag stuck into unfolding
+             -> RecFlag                 -- Recursive binding?
              -> Maybe SimplCont         -- Context of let binding, if needed
              -> InId                    -- Old binder
              -> OutId -> OutExpr        -- New binder and RHS
@@ -704,7 +705,7 @@ completeBind :: SimplEnv
 --      * or by adding to the floats in the envt
 --
 -- Precondition: rhs obeys the let/app invariant
-completeBind env top_lvl cont_mb old_bndr new_bndr new_rhs
+completeBind env top_lvl is_rec cont_mb old_bndr new_bndr new_rhs
  | isCoVar old_bndr
  = case new_rhs of
      Coercion co -> return (extendCvSubst env old_bndr co)
@@ -718,7 +719,7 @@ completeBind env top_lvl cont_mb old_bndr new_bndr new_rhs
 
         -- Do eta-expansion on the RHS of the binding
         -- See Note [Eta-expanding at let bindings] in SimplUtils
-      ; (new_arity, final_rhs) <- tryEtaExpandRhs env new_bndr new_rhs
+      ; (new_arity, final_rhs) <- tryEtaExpandRhs env is_rec new_bndr new_rhs
 
         -- Simplify the unfolding
       ; new_unfolding <- simplLetUnfolding env top_lvl cont_mb old_bndr final_rhs old_unf
