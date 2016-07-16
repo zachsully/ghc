@@ -852,6 +852,7 @@ decideBindFloat init_env is_bot binding =
     lateLambdaLift fps
       | all_funs || (fps_floatLNE0 fps && isLNE)
            -- only lift functions or zero-arity LNEs
+      ,  not (any (`elemVarSet` le_joins env) abs_vars) -- can't abstract over join
       ,  not (fps_leaveLNE fps && isLNE) -- see Note [Lifting LNEs]
       ,  Nothing <- decider = Just (tOP_LEVEL, abs_vars)
       | otherwise = Nothing -- do not lift
