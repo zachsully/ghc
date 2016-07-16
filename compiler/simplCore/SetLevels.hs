@@ -1093,7 +1093,8 @@ substBndrsSL :: RecFlag -> LevelEnv -> [TaggedBndr BSilt] -> (LevelEnv, [OutVar]
 substBndrsSL is_rec env@(LE { le_subst = subst, le_env = id_env, le_joins = joins }) bndrs
   = ( env { le_subst    = subst'
           , le_env      = foldl add_id  id_env (bndrs `zip` bndrs')
-          , le_joins    = extendVarSetList joins [ bndr | TB bndr _ <- bndrs, isJoinBndr bndr ]}
+          , le_joins    = extendVarSetList joins [ bndr | TB bndr _ <- bndrs
+                                                        , isId bndr, isJoinBndr bndr ]}
     , bndrs')
   where
     (subst', bndrs') = case is_rec of
