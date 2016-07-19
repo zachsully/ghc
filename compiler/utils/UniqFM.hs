@@ -52,6 +52,7 @@ module UniqFM (
         plusUFM,
         plusUFM_C,
         plusUFM_CD,
+        plusMaybeUFM_C,
         minusUFM,
         intersectUFM,
         intersectUFM_C,
@@ -163,6 +164,9 @@ plusUFM_C       :: (elt -> elt -> elt)
 plusUFM_CD      :: (elt -> elt -> elt)
                 -> UniqFM elt -> elt -> UniqFM elt -> elt -> UniqFM elt
 
+plusMaybeUFM_C  :: (elt -> elt -> Maybe elt)
+                -> UniqFM elt -> UniqFM elt -> UniqFM elt
+
 minusUFM        :: UniqFM elt1 -> UniqFM elt2 -> UniqFM elt1
 
 intersectUFM    :: UniqFM elt -> UniqFM elt -> UniqFM elt
@@ -270,6 +274,12 @@ plusUFM_CD f (UFM xm) dx (UFM ym) dy
         (\_ x y -> Just (x `f` y))
         (M.map (\x -> x `f` dy))
         (M.map (\y -> dx `f` y))
+        xm ym
+plusMaybeUFM_C f (UFM xm) (UFM ym)
+    = UFM $ M.mergeWithKey
+        (\_ x y -> x `f` y)
+        id
+        id
         xm ym
 minusUFM (UFM x) (UFM y) = UFM (M.difference x y)
 intersectUFM (UFM x) (UFM y) = UFM (M.intersection x y)

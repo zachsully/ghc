@@ -5,8 +5,9 @@ module CoreJoins (
 ) where
 
 import CoreSyn
-import CoreUtils
 import Id
+import IdInfo
+import Maybes
 import MonadUtils
 import Outputable
 import PprCore ()
@@ -21,7 +22,7 @@ import Control.Monad
 #include "HsVersions.h"
 
 findJoinsInPgm :: CoreProgram -> CoreProgram
-findJoinsInPgm pgm = propagateBinders $ map (\bind -> initFJ $ fjTopBind bind) pgm
+findJoinsInPgm pgm = map (\bind -> propagateBinderSorts $ initFJ (fjTopBind bind)) pgm
 
 findJoinsInExpr :: CoreExpr -> CoreExpr
 findJoinsInExpr expr = initFJ $ do (expr', anal) <- fjExpr expr
@@ -48,13 +49,6 @@ eraseJoins = map doBind
     doExpr (Cast expr co)  = Cast (doExpr expr) co
     doExpr (Tick ti expr)  = Tick ti (doExpr expr)
     doExpr other = other
-
-data BndrSort = JoinBndr | ValBndr deriving (Eq)
-
-setBndrSort :: Var -> BndrSort -> Int -> Var
-setBndrSort b sort ar | not (isId b) = b
-                      | sort == JoinBndr = asJoinId b ar
-                      | otherwise        = zapJoinId b
 
 zapBndrSort :: Var -> Var
 zapBndrSort b | isId b    = zapJoinId b
@@ -99,8 +93,8 @@ fjExpr expr@(Lam {})
        return (mkLams [ zapBndrSort bndr | bndr <- bndrs ] body', markAllVarsBad anal)
 fjExpr (Let bind body)
   = do (expr', anal, _)
-         <- mfix $ \ ~(_, _, sort) ->
-                     fjLet sort bind body
+         <- mfix $ \ ~(_, _, join_arities) ->
+                     fjLet join_arities bind body
        return (expr', anal)
 fjExpr (Case scrut bndr ty alts)
   = do (scrut', scrut_anal) <- fjExpr scrut
@@ -117,29 +111,27 @@ fjExpr (Tick ti expr)
 fjApp :: Id -> [CoreArg] -> FJM (CoreExpr, JoinAnal)
 fjApp v args
   = do (args', arg_anals) <- mapAndUnzipM fjExpr args
-       m_total_arity <- lookupCandidateFJ v
-       let anal = this_anal (length args) m_total_arity
+       is_candidate <- isCandidateFJ v
+       let anal = if is_candidate then oneGoodId v (length args) else emptyJoinAnal
            full_anal = combineManyJoinAnals (anal : map markAllVarsBad arg_anals)
        return (mkApps (Var v) args', full_anal)
-  where
-    this_anal _ Nothing = emptyJoinAnal
-    this_anal n_args (Just total_arity)
-      | n_args == total_arity = oneGoodId v
-      | otherwise             = oneBadId v
 
-fjLet :: BndrSort -> CoreBind -> CoreExpr -> FJM (CoreExpr, JoinAnal, BndrSort)
-fjLet rec_sort bind body
+fjLet :: Maybe [JoinArity] -> CoreBind -> CoreExpr
+      -> FJM (CoreExpr, JoinAnal, Maybe [JoinArity])
+fjLet rec_join_arities bind body
   = do (bind', bind_anal, body', body_anal)
-         <- do (bind', bind_anal, env_ext)
-                 <- vars_bind rec_sort bind
+         <- do (bind', bind_anal, bndrs)
+                 <- vars_bind rec_join_arities bind
                -- Do the body
-               withCandidatesFJ env_ext $ do
+               withCandidatesFJ bndrs $ do
                  (body', body_anal) <- fjExpr body
 
                  return (bind', bind_anal, body', body_anal)
        let new_let = Let bind' body'
 
-           real_bind_anal | rec_sort == JoinBndr  = bind_anal
+           will_be_joins = isJust rec_join_arities
+
+           real_bind_anal | will_be_joins         = bind_anal
                           | otherwise             = markAllVarsBad bind_anal
                               -- Everything escapes which is free in the bindings
 
@@ -153,54 +145,52 @@ fjLet rec_sort bind body
            all_anal | is_rec    = bind_anal `combineJoinAnals` body_anal    -- Still includes binders of
                     | otherwise = body_anal                                 -- this let(rec)
 
-           sort | couldBeJoinBind bind
-                , binders `allInGoodSet` all_anal
-                = JoinBndr
-                | otherwise
-                = ValBndr
+           join_arities = decideSort bind all_anal
 
        return (
            new_let,
            let_anal,
-           sort
+           join_arities
          )
   where
     binders        = bindersOf bind
     is_rec         = case bind of NonRec {} -> False; _ -> True
 
-    vars_bind :: BndrSort                  -- Join points or values?
+    vars_bind :: Maybe [JoinArity]
               -> CoreBind
               -> FJM (CoreBind,
-                      JoinAnal,            -- free vars; good vars
-                      [(Id, TotalArity)])  -- extension to environment
+                      JoinAnal,            -- good vars; bad vars
+                      [Id])   -- extension to environment
 
-    vars_bind sort (NonRec binder rhs) = do
+    vars_bind rec_join_arities (NonRec binder rhs) = do
         (rhs', bind_anal) <- fjRhs rhs
         (bndr', bndr_anal) <- fjBndr binder
-        let
-            join_arity = lambdaCount rhs
+        let bndr'' = case rec_join_arities of
+                       Just [arity] -> asJoinId binder arity
+                       Just _       -> panic "vars_bind"
+                       Nothing | isId bndr' -> zapJoinId bndr'
+                               | otherwise  -> bndr'
 
-        return (NonRec (setBndrSort bndr' sort join_arity) rhs',
-                bind_anal `combineJoinAnals` bndr_anal, [(bndr', join_arity)])
+        return (NonRec bndr'' rhs',
+                bind_anal `combineJoinAnals` bndr_anal, [binder])
 
 
-    vars_bind sort (Rec pairs)
+    vars_bind rec_join_arities (Rec pairs)
       = let
           (binders, rhss) = unzip pairs
-          env_ext = [ (b, lambdaCount rhs)
-                    | (b,rhs) <- pairs ]
         in
-        withCandidatesFJ env_ext $ do
+        withCandidatesFJ binders $ do
           (bndrs', bndr_anals) <- mapAndUnzipM fjBndr binders
           (rhss', rhs_anals)
             <- mapAndUnzipM fjRhs rhss
           let
             anal = combineManyJoinAnals (bndr_anals ++ rhs_anals)
-            bndrs'' = [ setBndrSort bndr' sort ar
-                      | (bndr', (_, ar)) <- bndrs' `zip` env_ext ]
+            bndrs'' = case rec_join_arities of
+                        Just arities -> zipWith asJoinId bndrs' arities
+                        Nothing      -> map zapJoinId bndrs'
 
           return (Rec (bndrs'' `zip` rhss'),
-                  anal, env_ext)
+                  anal, binders)
 
 fjRhs :: CoreExpr -> FJM (CoreExpr, JoinAnal)
 fjRhs expr = do let (bndrs, body) = collectBinders expr
@@ -277,7 +267,7 @@ results in a valid tail call:
   k 0 q ==> j q
 
 Detecting this situation seems difficult, however, so for the moment we sadly
-forbid j as a join point. 
+forbid j as a join point.
 
 -}
 
@@ -285,19 +275,15 @@ forbid j as a join point.
 -- Monad
 -- ---------------------------------------------------------------------------
 
--- There's a lot of stuff to pass around, so we use this FJM monad to
--- help.  All the stuff here is only passed *down*.
-
 newtype FJM a = FJM
     { unFJM :: CandSet
             -> a
     }
 
-type TotalArity = Int -- Counting types AND values
-type CandSet    = IdEnv TotalArity
+type CandSet    = IdSet
 
 initFJ :: FJM a -> a
-initFJ m = unFJM m emptyVarEnv
+initFJ m = unFJM m emptyVarSet
 
 {-# INLINE thenFJ #-}
 {-# INLINE returnFJ #-}
@@ -326,92 +312,158 @@ instance MonadFix FJM where
 
 -- Functions specific to this monad:
 
-withCandidatesFJ :: [(Id, Int)] -> FJM a -> FJM a
-withCandidatesFJ ids_w_arity expr
+withCandidatesFJ :: [Id] -> FJM a -> FJM a
+withCandidatesFJ ids expr
    =    FJM $   \env
-   -> unFJM expr (extendVarEnvList env ids_w_arity)
+   -> unFJM expr (extendVarSetList env ids)
 
 withoutCandidatesFJ :: [Id] -> FJM a -> FJM a
 withoutCandidatesFJ ids expr
    =    FJM $   \env
-   -> unFJM expr (delVarEnvList env ids)
+   -> unFJM expr (delVarSetList env ids)
 
-lookupCandidateFJ :: Id -> FJM (Maybe TotalArity)
-lookupCandidateFJ v = FJM $ \env -> lookupVarEnv env v
+isCandidateFJ :: Id -> FJM Bool
+isCandidateFJ v = FJM $ \env -> v `elemVarSet` env
 
 -- ---------------------------------------------------------------------------
 -- Join Analyses
 -- ---------------------------------------------------------------------------
 
 type JoinAnal = (GoodSet, BadSet)
-type GoodSet = IdSet
+type GoodSet = IdEnv (Id, JoinArity)
 type BadSet = IdSet
 
 emptyJoinAnal :: JoinAnal
-emptyJoinAnal = (emptyVarSet, emptyVarSet)
+emptyJoinAnal = (emptyVarEnv, emptyVarSet)
 
 isEmptyJoinAnal :: JoinAnal -> Bool
-isEmptyJoinAnal (good, bad) = isEmptyVarSet good && isEmptyVarSet bad
+isEmptyJoinAnal (good, bad) = isEmptyVarEnv good && isEmptyVarSet bad
 
-oneGoodId :: Id -> JoinAnal
-oneGoodId id = (unitVarSet id, emptyVarSet)
+oneGoodId :: Id -> JoinArity -> JoinAnal
+oneGoodId id arity = (unitVarEnv id (id, arity), emptyVarSet)
 
-oneBadId :: Id -> JoinAnal
-oneBadId id = (emptyVarSet, unitVarSet id)
+toBadSet :: GoodSet -> BadSet
+toBadSet = mapVarEnv fst
 
 combineJoinAnals :: JoinAnal -> JoinAnal -> JoinAnal
 combineJoinAnals (good1, bad1) (good2, bad2)
-  = (good, bad)
+  | isEmptyVarEnv good2
+  = (good1', bad')
+  | isEmptyVarEnv good1
+  = (good2', bad')
+  | otherwise
+  = (good', bad' `unionVarSet` newly_bad)
   where
-    good = (good1 `minusVarSet` bad2) `unionVarSet`
-           (good2 `minusVarSet` bad1)
-    bad  = bad1 `unionVarSet` bad2
+    good1' = good1 `minusVarEnv` bad2
+    good2' = good2 `minusVarEnv` bad1
+    bad'   = bad1  `unionVarSet` bad2
+
+    -- TODO Avoid extra traversal if possible. What we *really* want is
+    -- a function of type
+    --   (a -> a -> Either a b) -> VarEnv a -> VarEnv a -> (VarEnv a, VarEnv b),
+    -- but that seems a bit narrow to add to VarEnv (and UniqFM).
+    good' = plusMaybeVarEnv_C good_if_equal good1' good2'
+    newly_bad = mapMaybeVarEnv id $ intersectVarEnv_C bad_if_unequal good1' good2'
+
+    good_if_equal pair1@(var, arity1) (_var, arity2)
+      = ASSERT(var == _var)
+        if arity1 == arity2 then Just pair1 else Nothing
+    bad_if_unequal (var, arity1) (_var, arity2)
+      = ASSERT(var == _var)
+        if arity1 == arity2 then Nothing else Just var -- bad set only has var
 
 combineManyJoinAnals :: [JoinAnal] -> JoinAnal
 combineManyJoinAnals []     = emptyJoinAnal
 combineManyJoinAnals (a:as) = foldr combineJoinAnals a as
 
 markAllVarsBad :: JoinAnal -> JoinAnal
-markAllVarsBad (good, bad) = (emptyVarSet, good `unionVarSet` bad)
-
-removeFromJoinAnal :: JoinAnal -> Id -> JoinAnal
-removeFromJoinAnal (good, bad) id
-  = (good `delVarSet` id, bad `delVarSet` id)
+markAllVarsBad (good, bad) = (emptyVarEnv, toBadSet good `unionVarSet` bad)
 
 removeAllFromJoinAnal :: JoinAnal -> [Id] -> JoinAnal
 removeAllFromJoinAnal (good, bad) ids
-  = (good `delVarSetList` ids, bad `delVarSetList` ids)
+  = (good `delVarEnvList` ids, bad `delVarSetList` ids)
 
-inGoodSet :: Id -> JoinAnal -> Bool
-inGoodSet id (good, _bad) = id `elemVarSet` good
+findGoodId :: JoinAnal -> Id -> Maybe JoinArity
+findGoodId (good, _bad) id = snd <$> lookupVarEnv good id
 
-allInGoodSet :: [Id] -> JoinAnal -> Bool
-allInGoodSet ids (good, _bad) = isEmptyVarSet (mkVarSet ids `minusVarSet` good)
+-- ---------------------------------------------------------------------------
+-- Rewriting Occurrences
+-- ---------------------------------------------------------------------------
+
+propagateBinderSorts :: CoreBind -> CoreBind
+-- Change occurrences so that occurrences of join vars appear to be join vars
+-- and similarly for value vars
+propagateBinderSorts bind
+  = let (_ins', bind') = rw_bind emptyInScopeSet bind in bind'
+  where
+    rw_bind ins (NonRec bndr rhs)
+      = (extendInScopeSet ins bndr, NonRec bndr (rw_expr ins rhs))
+    rw_bind ins (Rec pairs)
+      = (ins', Rec [(bndr, rw_expr ins' rhs) | (bndr, rhs) <- pairs])
+      where
+        ins' = extendInScopeSetList ins (map fst pairs)
+
+    rw_expr ins (Var var)
+      = Var var'
+      where
+        bndr = lookupInScope ins var `orElse` var
+        var' | Just arity <- isJoinId_maybe bndr
+             = asJoinId var arity
+             | isJoinId var, not (isJoinId bndr)
+             = WARN(True, text "Join variable was no longer valid:" <+> ppr var)
+               zapJoinId var
+             | otherwise
+             = var
+    rw_expr ins (App fun arg)
+      = App (rw_expr ins fun) (rw_expr ins arg)
+    rw_expr ins (Lam bndr body)
+      = Lam bndr (rw_expr (extendInScopeSet ins bndr) body)
+    rw_expr ins (Let bind body)
+      = Let bind' (rw_expr ins' body)
+      where
+        (ins', bind') = rw_bind ins bind
+    rw_expr ins (Case scrut bndr ty alts)
+      = Case (rw_expr ins scrut) bndr ty (map (rw_alt ins) alts)
+    rw_expr ins (Cast expr co)
+      = Cast (rw_expr ins expr) co
+    rw_expr ins (Tick ti expr)
+      = Tick ti (rw_expr ins expr)
+    rw_expr _   other
+      = other
+
+    rw_alt ins (con, bndrs, rhs)
+      = (con, bndrs, rw_expr (extendInScopeSetList ins bndrs) rhs)
 
 -- ---------------------------------------------------------------------------
 -- Misc.
 -- ---------------------------------------------------------------------------
 
-lambdaCount :: Expr a -> TotalArity
+lambdaCount :: Expr a -> JoinArity
 -- ^ lambdaCount sees how many leading lambdas there are,
 --   *not* skipping casts and *counting* type lambdas. We just need to knew
 --   whether a given application is total (*including* all type arguments)
 lambdaCount expr = length bndrs where (bndrs, _) = collectBinders expr
 
-couldBeJoinBind :: CoreBind -> Bool
--- ^ Checks whether each binding is elegible to be a join point. A join point
+decideSort :: CoreBind -> JoinAnal -> Maybe [JoinArity]
+-- ^ Checks whether each binding is elegible to be a join point, given the
+--   analysis. Besides needing to be in the analysis's good set, a join point
 --   cannot be polymorphic in its return type, since its context is fixed and
 --   thus its type cannot vary.
-couldBeJoinBind bind
-  = case bind of NonRec bndr rhs -> good (bndr, rhs)
-                 Rec pairs       -> all good pairs
+decideSort bind anal
+  = sequence (map decide (flattenBinds [bind]))
   where
-    good (bndr, rhs) = go emptyVarSet (idType bndr) rhs
+    decide (bndr, rhs)
+      | Just arity <- findGoodId anal bndr
+      , arity == lambdaCount rhs -- TODO loosen restriction (carefully!)
+      , good_type arity emptyVarSet (idType bndr)
+      = Just arity
+      | otherwise
+      = Nothing
       where
-        go tvs ty (Lam _ body)
-          | Just (t, ty') <- splitForAllTy_maybe ty
-          = go (extendVarSet tvs t) ty' body
-          | otherwise
-          = go tvs (funResultTy ty) body
-        go tvs ty _
+        good_type 0 tvs ty
           = isEmptyVarSet (tvs `intersectVarSet` tyCoVarsOfType ty)
+        good_type n tvs ty
+          | Just (t, ty') <- splitForAllTy_maybe ty
+          = good_type (n-1) (extendVarSet tvs t) ty'
+          | otherwise
+          = good_type (n-1) tvs (funResultTy ty)

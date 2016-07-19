@@ -12,9 +12,9 @@ module VarEnv (
         elemVarEnv, varEnvElts, varEnvKeys, varEnvToList,
         extendVarEnv, extendVarEnv_C, extendVarEnv_Acc, extendVarEnv_Directly,
         extendVarEnvList,
-        plusVarEnv, plusVarEnv_C, plusVarEnv_CD, alterVarEnv,
+        plusVarEnv, plusVarEnv_C, plusVarEnv_CD, plusMaybeVarEnv_C, alterVarEnv,
         delVarEnvList, delVarEnv, delVarEnv_Directly,
-        minusVarEnv, intersectsVarEnv,
+        minusVarEnv, intersectVarEnv, intersectVarEnv_C, intersectsVarEnv,
         lookupVarEnv, lookupVarEnv_NF, lookupWithDefaultVarEnv,
         mapVarEnv, mapMaybeVarEnv, zipVarEnv,
         modifyVarEnv, modifyVarEnv_Directly,
@@ -424,9 +424,12 @@ restrictVarEnv    :: VarEnv a -> VarSet -> VarEnv a
 delVarEnvList     :: VarEnv a -> [Var] -> VarEnv a
 delVarEnv         :: VarEnv a -> Var -> VarEnv a
 minusVarEnv       :: VarEnv a -> VarEnv b -> VarEnv a
+intersectVarEnv   :: VarEnv a -> VarEnv a -> VarEnv a
+intersectVarEnv_C :: (a -> b -> c) -> VarEnv a -> VarEnv b -> VarEnv c
 intersectsVarEnv  :: VarEnv a -> VarEnv a -> Bool
 plusVarEnv_C      :: (a -> a -> a) -> VarEnv a -> VarEnv a -> VarEnv a
 plusVarEnv_CD     :: (a -> a -> a) -> VarEnv a -> a -> VarEnv a -> a -> VarEnv a
+plusMaybeVarEnv_C :: (a -> a -> Maybe a) -> VarEnv a -> VarEnv a -> VarEnv a
 mapVarEnv         :: (a -> b) -> VarEnv a -> VarEnv b
 mapMaybeVarEnv    :: (a -> Maybe b) -> VarEnv a -> VarEnv b
 modifyVarEnv      :: (a -> a) -> VarEnv a -> Var -> VarEnv a
@@ -454,9 +457,12 @@ extendVarEnv_Directly = addToUFM_Directly
 extendVarEnvList = addListToUFM
 plusVarEnv_C     = plusUFM_C
 plusVarEnv_CD    = plusUFM_CD
+plusMaybeVarEnv_C = plusMaybeUFM_C
 delVarEnvList    = delListFromUFM
 delVarEnv        = delFromUFM
 minusVarEnv      = minusUFM
+intersectVarEnv  = intersectUFM
+intersectVarEnv_C = intersectUFM_C
 intersectsVarEnv e1 e2 = not (isEmptyVarEnv (e1 `intersectUFM` e2))
 plusVarEnv       = plusUFM
 lookupVarEnv     = lookupUFM
