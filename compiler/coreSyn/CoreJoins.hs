@@ -397,9 +397,9 @@ propagateBinderSorts bind
   = let (_ins', bind') = rw_bind emptyInScopeSet bind in bind'
   where
     rw_bind ins (NonRec bndr rhs)
-      = (extendInScopeSet ins bndr, NonRec bndr (rw_expr ins rhs))
+      = (extendInScopeSet ins bndr, NonRec (rw_bndr ins bndr) (rw_expr ins rhs))
     rw_bind ins (Rec pairs)
-      = (ins', Rec [(bndr, rw_expr ins' rhs) | (bndr, rhs) <- pairs])
+      = (ins', Rec [(rw_bndr ins' bndr, rw_expr ins' rhs) | (bndr, rhs) <- pairs])
       where
         ins' = extendInScopeSetList ins (map fst pairs)
 
@@ -417,13 +417,13 @@ propagateBinderSorts bind
     rw_expr ins (App fun arg)
       = App (rw_expr ins fun) (rw_expr ins arg)
     rw_expr ins (Lam bndr body)
-      = Lam bndr (rw_expr (extendInScopeSet ins bndr) body)
+      = Lam (rw_bndr ins bndr) (rw_expr (extendInScopeSet ins bndr) body)
     rw_expr ins (Let bind body)
       = Let bind' (rw_expr ins' body)
       where
         (ins', bind') = rw_bind ins bind
     rw_expr ins (Case scrut bndr ty alts)
-      = Case (rw_expr ins scrut) bndr ty (map (rw_alt ins) alts)
+      = Case (rw_expr ins scrut) (rw_bndr ins bndr) ty (map (rw_alt ins) alts)
     rw_expr ins (Cast expr co)
       = Cast (rw_expr ins expr) co
     rw_expr ins (Tick ti expr)
@@ -432,7 +432,36 @@ propagateBinderSorts bind
       = other
 
     rw_alt ins (con, bndrs, rhs)
-      = (con, bndrs, rw_expr (extendInScopeSetList ins bndrs) rhs)
+      = (con, map (rw_bndr ins) bndrs, rw_expr (extendInScopeSetList ins bndrs) rhs)
+
+    rw_bndr ins bndr
+      | not (isId bndr)
+      = bndr
+      | otherwise
+      = bndr `setIdSpecialisation` mkRuleInfo rules'
+             `setIdUnfolding` unf'
+      where
+        rules' = map (rw_rule ins) (idCoreRules bndr)
+        unf'   = rw_unf ins (realIdUnfolding bndr)
+
+    rw_rule _ins rule@(BuiltinRule {})
+      = rule
+    rw_rule ins rule@(Rule { ru_bndrs = bndrs, ru_rhs = rhs })
+      = rule { ru_rhs = rw_expr ins' rhs }
+      where
+        ins' = extendInScopeSetList ins bndrs
+
+    rw_unf ins unf@(CoreUnfolding { uf_src = src, uf_tmpl = rhs })
+      | isStableSource src
+      = unf { uf_tmpl = rw_expr ins rhs }
+      | otherwise
+      = noUnfolding
+    rw_unf ins unf@(DFunUnfolding { df_bndrs = bndrs, df_args = args })
+      = unf { df_args = map (rw_expr ins') args }
+      where
+        ins' = extendInScopeSetList ins bndrs
+    rw_unf _ins unf
+      = unf
 
 -- ---------------------------------------------------------------------------
 -- Misc.
