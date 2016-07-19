@@ -49,7 +49,7 @@ module Id (
         globaliseId, localiseId,
         setIdInfo, lazySetIdInfo, modifyIdInfo, maybeModifyIdInfo,
         zapLamIdInfo, zapIdDemandInfo, zapIdUsageInfo, zapFragileIdInfo,
-        zapIdStrictness, zapIdJoinPointInfo,
+        zapIdStrictness,
         transferPolyIdInfo,
 
         -- ** Predicates on Ids
@@ -69,6 +69,9 @@ module Id (
         -- ** Evidence variables
         DictId, isDictId, isEvVar,
 
+        -- ** Join variables
+        JoinId, isJoinId, isJoinId_maybe, asJoinId, zapJoinId,
+
         -- ** Inline pragma stuff
         idInlinePragma, setInlinePragma, modifyInlinePragma,
         idInlineActivation, setInlineActivation, idRuleMatchInfo,
@@ -87,8 +90,6 @@ module Id (
         idCafInfo,
         idOneShotInfo,
         idOccInfo,
-        idJoinPointInfo,
-        isJoinBndr,
 
         -- ** Writing 'IdInfo' fields
         setIdUnfoldingLazily,
@@ -99,7 +100,6 @@ module Id (
         setIdSpecialisation,
         setIdCafInfo,
         setIdOccInfo, zapIdOccInfo,
-        setIdJoinPointInfo,
 
         setIdDemandInfo,
         setIdStrictness,
@@ -117,8 +117,8 @@ import IdInfo
 import BasicTypes
 
 -- Imported and re-exported
-import Var( Id, CoVar, DictId,
-            idInfo, idDetails, globaliseId, varType,
+import Var( Id, CoVar, DictId, JoinId,
+            idInfo, idDetails, setIdDetails, globaliseId, varType,
             isId, isLocalId, isGlobalId, isExportedId )
 import qualified Var
 
@@ -146,7 +146,6 @@ infixl  1 `setIdUnfoldingLazily`,
           `setIdArity`,
           `setIdCallArity`,
           `setIdOccInfo`,
-          `setIdJoinPointInfo`,
           `setIdOneShotInfo`,
 
           `setIdSpecialisation`,
@@ -424,11 +423,13 @@ isPrimOpId              :: Id -> Bool
 isFCallId               :: Id -> Bool
 isDataConWorkId         :: Id -> Bool
 isDFunId                :: Id -> Bool
+isJoinId                :: Id -> Bool
 
 isClassOpId_maybe       :: Id -> Maybe Class
 isPrimOpId_maybe        :: Id -> Maybe PrimOp
 isFCallId_maybe         :: Id -> Maybe ForeignCall
 isDataConWorkId_maybe   :: Id -> Maybe DataCon
+isJoinId_maybe          :: Id -> Maybe JoinArity
 
 isRecordSelector id = case Var.idDetails id of
                         RecSelId {}     -> True
@@ -477,6 +478,14 @@ isDataConWorkId id = case Var.idDetails id of
 isDataConWorkId_maybe id = case Var.idDetails id of
                         DataConWorkId con -> Just con
                         _                 -> Nothing
+
+isJoinId id = case Var.idDetails id of
+                        JoinId {} -> True
+                        _         -> False
+
+isJoinId_maybe id = case Var.idDetails id of
+                        JoinId arity -> Just arity
+                        _            -> Nothing
 
 isDataConId_maybe :: Id -> Maybe DataCon
 isDataConId_maybe id = case Var.idDetails id of
@@ -556,6 +565,30 @@ isEvVar var = isPredTy (varType var)
 
 isDictId :: Id -> Bool
 isDictId id = isDictTy (idType id)
+
+{-
+************************************************************************
+*                                                                      *
+              Join variables
+*                                                                      *
+************************************************************************
+-}
+
+asJoinId :: Id -> JoinArity -> JoinId
+asJoinId id arity = ASSERT(isLocalId id)
+                    WARN(not (is_vanilla_or_join id),
+                         ppr id <+> pprIdDetails (idDetails id))
+                    id `setIdDetails` JoinId arity
+  where
+    is_vanilla_or_join id = case Var.idDetails id of
+                              VanillaId -> True
+                              JoinId {} -> True
+                              _         -> False
+
+zapJoinId :: Id -> Id
+-- May be a regular id already
+zapJoinId jid | isJoinId jid = jid `setIdDetails` VanillaId
+              | otherwise    = jid
 
 {-
 ************************************************************************
@@ -669,21 +702,6 @@ setIdOccInfo id occ_info = modifyIdInfo (`setOccInfo` occ_info) id
 
 zapIdOccInfo :: Id -> Id
 zapIdOccInfo b = b `setIdOccInfo` NoOccInfo
-
-        ---------------------------------
-        -- JOIN POINTS
-        
-idJoinPointInfo :: Id -> JoinPointInfo
-idJoinPointInfo id = joinPointInfo (idInfo id)
-
-setIdJoinPointInfo :: Id -> JoinPointInfo -> Id
-setIdJoinPointInfo id jp_info = modifyIdInfo (`setJoinPointInfo` jp_info) id
-
-zapIdJoinPointInfo :: Id -> Id
-zapIdJoinPointInfo b = b `setIdJoinPointInfo` noJoinPointInfo
-
-isJoinBndr :: Id -> Bool
-isJoinBndr id = isJoinPoint (idJoinPointInfo id)
 
 {-
         ---------------------------------

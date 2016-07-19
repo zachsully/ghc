@@ -34,7 +34,7 @@
 
 module Var (
         -- * The main data type and synonyms
-        Var, CoVar, Id, DictId, DFunId, EvVar, EqVar, EvId, IpId,
+        Var, CoVar, Id, DictId, DFunId, EvVar, EqVar, EvId, IpId, JoinId,
         TyVar, TypeVar, KindVar, TKVar, TyCoVar,
 
         -- ** Taking 'Var's apart
@@ -108,6 +108,7 @@ type DFunId = Id        -- A dictionary function
 type DictId = EvId      -- A dictionary variable
 type IpId   = EvId      -- A term-level implicit parameter
 type EqVar  = EvId      -- Boxed equality evidence
+type JoinId = Id        -- A join variable
 
 type CoVar = Id         -- See Note [Evidence: EvIds and CoVars]
 

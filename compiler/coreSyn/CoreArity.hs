@@ -24,7 +24,6 @@ import Demand
 import Var
 import VarEnv
 import Id
-import IdInfo   ( JoinPointInfo(..) )
 import Type
 import TyCon    ( initRecTc, checkRecTc )
 import Coercion
@@ -910,9 +909,9 @@ pushCoercion co eis = EtaCo co : eis
 --------------
 etaInfoLocalBndr :: CoreBndr -> [EtaInfo] -> CoreBndr
 etaInfoLocalBndr bndr eis
-  = case idJoinPointInfo bndr of
-      JoinPoint arity -> bndr `setIdType` go arity (idType bndr) eis
-      NotJoinPoint    -> bndr
+  = case isJoinId_maybe bndr of
+      Just arity -> bndr `setIdType` go arity (idType bndr) eis
+      Nothing    -> bndr
   where
     go 0 ty eis
       = app ty eis
@@ -920,7 +919,7 @@ etaInfoLocalBndr bndr eis
       | Just (arg_bndr, res_ty) <- splitPiTy_maybe ty -- also applies to funcs
       = mkForAllTy arg_bndr (go (n-1) res_ty eis)
       | otherwise = pprPanic "etaInfoLocalBndr" (pprBndr LetBind bndr)
-    
+
     app ty []
       = ty
     app ty (EtaVar v : eis)
@@ -972,7 +971,7 @@ etaInfoApp subst (Tick t e) eis
 etaInfoApp subst expr@(App {}) _
   | (Var fun, _) <- collectArgs expr
   , Var fun' <- lookupIdSubst (text "etaInfoApp" <+> ppr fun) subst fun
-  , isJoinBndr fun'
+  , isJoinId fun'
   = subst_expr subst expr
 
 etaInfoApp subst e eis
@@ -1002,7 +1001,7 @@ etaInfoAppBind subst (Rec pairs) eis
 --------------
 etaInfoAppRhs :: Subst -> CoreBndr -> CoreExpr -> [EtaInfo] -> CoreExpr
 etaInfoAppRhs subst bndr expr eis
-  | JoinPoint arity <- idJoinPointInfo bndr
+  | Just arity <- isJoinId_maybe bndr
   = do_join_point arity
   | otherwise
   = subst_expr subst expr

@@ -399,7 +399,6 @@ ppIdInfo id info
     [ (True, pp_scope <> ppr (idDetails id))
     , (has_arity,        text "Arity=" <> int arity)
     , (has_called_arity, text "CallArity=" <> int called_arity)
-    , (is_jp,            ppr jp_info)
     , (has_caf_info,     text "Caf=" <> ppr caf_info)
     , (True,             text "Str=" <> pprStrictness str_info)
     , (has_unf,          text "Unf=" <> ppr unf_info)
@@ -417,9 +416,6 @@ ppIdInfo id info
 
     called_arity = callArityInfo info
     has_called_arity = called_arity /= 0
-
-    jp_info = joinPointInfo info
-    is_jp = isJoinPoint jp_info
 
     caf_info = cafInfo info
     has_caf_info = not (mayHaveCafRefs caf_info)

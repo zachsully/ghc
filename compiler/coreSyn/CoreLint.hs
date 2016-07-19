@@ -502,7 +502,7 @@ lintSingleBinding top_lvl_flag rec_flag (binder,rhs)
        ; flags <- getLintFlags
            
         -- Check that if the binder is top-level, it's not a join point
-       ; checkL (not (lf_check_join_points flags && isJoinBndr binder
+       ; checkL (not (lf_check_join_points flags && isJoinId binder
                                                  && isTopLevel top_lvl_flag))
            (mkTopJoinMsg binder)
 
@@ -554,10 +554,10 @@ lintSingleBinding top_lvl_flag rec_flag (binder,rhs)
 lintRhs :: Id -> CoreExpr -> LintM Type
 lintRhs bndr rhs
   = do { flags <- getLintFlags 
-       ; case idJoinPointInfo bndr of
-           JoinPoint arity | lf_check_join_points flags
-                          -> lint_join_lams arity arity rhs 
-           _              -> markAllJoinsBad $ lintCoreExpr rhs }
+       ; case isJoinId_maybe bndr of
+           Just arity | lf_check_join_points flags
+                     -> lint_join_lams arity arity rhs
+           _         -> markAllJoinsBad $ lintCoreExpr rhs }
   where
     lint_join_lams 0 _ rhs
       = lintCoreExpr rhs
@@ -756,13 +756,13 @@ lintCoreApp var args
         ; var' <- lookupIdInScope var
         ; flags <- getLintFlags
         ; when (lf_check_join_points flags) $
-          case idJoinPointInfo var' of
-            JoinPoint join_arity ->
+          case isJoinId_maybe var' of
+            Just join_arity ->
               do  { bad <- isBadJoin var'
                   ; checkL (not bad) $ mkJoinOutOfScopeMsg var'
                   ; checkL (length args == join_arity) $
                       mkBadJoinCallMsg var' join_arity (length args) }
-            NotJoinPoint -> return ()
+            Nothing -> return ()
         ; return (idType var') }
 
 {-
@@ -1754,7 +1754,7 @@ addInScopeVars vars m
               errs
   where
     bad_joins' env = delVarSetList (le_bad_joins env)
-                                   (filter (\v -> isId v && isJoinBndr v) vars)
+                                   (filter (\v -> isId v && isJoinId v) vars)
 
 addInScopeVar :: Var -> LintM a -> LintM a
 addInScopeVar var m
@@ -1762,8 +1762,8 @@ addInScopeVar var m
     unLintM m (env { le_subst     = extendTCvInScope (le_subst env) var
                    , le_bad_joins = bad_joins' env }) errs
   where
-    bad_joins' env | isId var && isJoinBndr var = delVarSet (le_bad_joins env) var
-                   | otherwise                  = le_bad_joins env
+    bad_joins' env | isId var && isJoinId var = delVarSet (le_bad_joins env) var
+                   | otherwise                = le_bad_joins env
 
 extendSubstL :: TyVar -> Type -> LintM a -> LintM a
 extendSubstL tv ty m
@@ -1780,13 +1780,13 @@ markAllJoinsBad m
   where
     marked env = env { le_bad_joins = filterVarSet is_join in_set }
       where
-        is_join bndr = isId bndr && isJoinBndr bndr
+        is_join bndr = isId bndr && isJoinId bndr
         in_set = getInScopeVars (getTCvInScope (le_subst env))
 
 markAllJoinsBadUnlessJoin :: Var -> LintM a -> LintM a
 markAllJoinsBadUnlessJoin bndr m
-  | isJoinBndr bndr = m
-  | otherwise       = markAllJoinsBad m
+  | isJoinId bndr = m
+  | otherwise     = markAllJoinsBad m
 
 getTCvSubst :: LintM TCvSubst
 getTCvSubst = LintM (\ env errs -> (Just (le_subst env), errs))

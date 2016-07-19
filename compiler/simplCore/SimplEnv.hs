@@ -146,7 +146,7 @@ pprSimplEnv env
    ppr_one v | isId v = ppr v <+> ppr (idUnfolding v)
              | otherwise = ppr v
 
-type SimplIdSubst = IdEnv (SimplSR, JoinPointInfo) -- IdId |--> OutExpr
+type SimplIdSubst = IdEnv (SimplSR, Maybe JoinArity) -- IdId |--> OutExpr
         -- See Note [Extending the Subst] in CoreSubst
 
 -- | A substitution result.
@@ -175,12 +175,9 @@ isJoinVar env var
 joinVarArity :: SimplEnv -> InId -> Maybe JoinArity
 joinVarArity (SimplEnv { seIdSubst = subst, seInScope = ins }) var
   | Just (_, jpi) <- lookupVarEnv subst var
-  = case jpi of JoinPoint arity -> Just arity
-                NotJoinPoint    -> Nothing
+  = jpi
   | otherwise
-  = case idJoinPointInfo real_var of
-      JoinPoint arity -> Just arity
-      NotJoinPoint    -> Nothing
+  = isJoinId_maybe real_var
   where
     real_var = lookupInScope ins var `orElse` var
 
@@ -310,7 +307,7 @@ updMode upd env = env { seMode = upd (seMode env) }
 extendIdSubst :: SimplEnv -> Id -> SimplSR -> SimplEnv
 extendIdSubst env@(SimplEnv {seIdSubst = subst}) var res
   = ASSERT2( isId var && not (isCoVar var), ppr var )
-    env { seIdSubst = extendVarEnv subst var (res, idJoinPointInfo var) }
+    env { seIdSubst = extendVarEnv subst var (res, isJoinId_maybe var) }
 
 extendTvSubst :: SimplEnv -> TyVar -> Type -> SimplEnv
 extendTvSubst env@(SimplEnv {seTvSubst = tsubst}) var res
@@ -433,13 +430,13 @@ andFF FltOkSpec  FltCareful = FltCareful
 andFF FltOkSpec  _          = FltOkSpec
 andFF FltLifted  flt        = flt
 
-doFloatFromRhs :: TopLevelFlag -> RecFlag -> JoinPointInfo -> Bool -> OutExpr -> SimplEnv -> Bool
+doFloatFromRhs :: TopLevelFlag -> RecFlag -> Maybe JoinArity -> Bool -> OutExpr -> SimplEnv -> Bool
 -- If you change this function look also at FloatIn.noFloatFromRhs
 doFloatFromRhs lvl rec jpi str rhs (SimplEnv {seFloats = Floats vfs jfs ff})
   =  not (isNilOL vfs && isNilOL jfs) && want_to_float && can_float
   where
      want_to_float
-       | jpi == NotJoinPoint && not (isNilOL jfs)
+       | isNothing jpi && not (isNilOL jfs)
                    = False
                      -- See Note [doFloatFromRhs and preserving joins]
        | otherwise = isTopLevel lvl || exprIsCheap rhs || exprIsExpandable rhs
@@ -475,22 +472,22 @@ unitFloat :: OutBind -> Floats
 unitFloat bind = Floats vbinds jbinds (flag bind)
   where
     (vbinds, jbinds) = split_bind bind
-    
+
     split_bind bind@(NonRec bndr _)
-      | isJoinBndr bndr              = (nilOL, unitOL bind)
-      | otherwise                    = (unitOL bind, nilOL)
+      | isJoinId bndr              = (nilOL, unitOL bind)
+      | otherwise                  = (unitOL bind, nilOL)
     split_bind bind@(Rec pairs)
-      | all isJoinBndr bndrs         = (nilOL, unitOL bind)
-      | all (not . isJoinBndr) bndrs = (unitOL bind, nilOL)
-      | otherwise                    = (unitOL (Rec vpairs), unitOL (Rec jpairs))
+      | all isJoinId bndrs         = (nilOL, unitOL bind)
+      | all (not . isJoinId) bndrs = (unitOL bind, nilOL)
+      | otherwise                  = (unitOL (Rec vpairs), unitOL (Rec jpairs))
       where
         bndrs = map fst pairs
-        (vpairs, jpairs) = partition (isJoinBndr . fst) pairs
+        (vpairs, jpairs) = partition (isJoinId . fst) pairs
     -- If any given values and join points are purportedly mutually recursive,
     -- they are vacuously so - values cannot have free occurrences of join
     -- points. But this invariant is more trouble than it's worth to enforce,
     -- so we tolerate mixed recursive groups.
-    
+
     flag (Rec {})                = FltLifted
     flag (NonRec bndr rhs)
       | not (isStrictId bndr)    = FltLifted
@@ -556,7 +553,7 @@ wrapFloats :: SimplEnv -> OutExpr -> OutExpr
 -- satisfy the let/app invariant, so mkLets should do the job just fine
 wrapFloats (SimplEnv {seFloats = Floats vbs jbs _}) body
   = foldrOL Let body (vbs `appOL` jbs)
-  
+
 wrapJoinFloats :: SimplEnv -> OutExpr -> OutExpr
 -- Wrap the floating join points are the expression
 wrapJoinFloats (SimplEnv {seFloats = Floats _ jbs _}) body
@@ -587,14 +584,14 @@ promoteJoinFloats :: SimplEnv -> SimplEnv
 promoteJoinFloats env@(SimplEnv {seFloats = Floats vbs jbs ff, seInScope = ins})
   = env {seFloats = Floats (vbs `appOL` mapOL zap jbs) nilOL ff, seInScope = ins'}
   where
-    zap (NonRec b e) = NonRec (zapIdJoinPointInfo b) e
-    zap (Rec bs)     = Rec [(zapIdJoinPointInfo b, e) | (b, e) <- bs]
-    
+    zap (NonRec b e) = NonRec (zapJoinId b) e
+    zap (Rec bs)     = Rec [(zapJoinId b, e) | (b, e) <- bs]
+
     ins' :: InScopeSet
     ins' = foldrOL (\jb ins -> zap_in_scope ins (bindersOf jb)) ins jbs
     zap_in_scope :: InScopeSet -> [Var] -> InScopeSet
     zap_in_scope ins ids
-      = foldr (\bndr ins -> extendInScopeSet ins (zapIdJoinPointInfo bndr)) ins ids
+      = foldr (\bndr ins -> extendInScopeSet ins (zapJoinId bndr)) ins ids
 
 {-
 ************************************************************************
@@ -728,7 +725,7 @@ substNonCoVarIdBndr env@(SimplEnv { seInScope = in_scope, seIdSubst = id_subst }
         -- or there's some useful occurrence information
         -- See the notes with substTyVarBndr for the delSubstEnv
     new_subst | new_id /= old_id
-              = extendVarEnv id_subst old_id (DoneId new_id, idJoinPointInfo old_id)
+              = extendVarEnv id_subst old_id (DoneId new_id, isJoinId_maybe old_id)
               | otherwise
               = delVarEnv id_subst old_id
 

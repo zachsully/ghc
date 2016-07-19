@@ -36,6 +36,9 @@ module CoreUtils (
         -- * Eta reduction
         tryEtaReduce,
 
+        -- * Binders and occurrences
+        propagateBinders,
+
         -- * Manipulating data constructors and types
         exprToType, exprToCoercion_maybe,
         applyTypeToArgs, applyTypeToArg,
@@ -2028,6 +2031,69 @@ we can eta-reduce    \x. f x  ===>  f
 This turned up in Trac #7542.
 
 
+************************************************************************
+*                                                                      *
+\subsection{Propagating info from binders}
+*                                                                      *
+************************************************************************
+
+Often we alter the information stored on a binder, but don't bother with the
+id's occurrences, hoping the simplifier will propagate the change if it's
+important. This function is useful when we don't want to wait, such as when we
+change whether a function is a join point (important that we know this at the
+occurrence sites!).
+-}
+
+propagateBinders :: CoreProgram -> CoreProgram
+propagateBinders pgm
+  = map do_top_bind pgm
+  where
+    do_top_bind bind
+      = bind'
+      where
+        (_ins', bind') = do_bind emptyInScopeSet bind
+
+    do_bind ins (NonRec bndr rhs)
+      = (ins', NonRec bndr rhs')
+      where
+        ins' = extendInScopeSet ins bndr
+        rhs' = do_expr ins rhs
+    do_bind ins (Rec pairs)
+      = (ins', Rec (bndrs `zip` rhss'))
+      where
+        (bndrs, rhss) = unzip pairs
+        ins'          = extendInScopeSetList ins bndrs
+        rhss'         = map (do_expr ins') rhss
+
+    do_expr ins (Var var)
+      | isLocalId var
+      = Var (lookupInScope ins var `orElse` var)
+      | otherwise
+      = Var var
+    do_expr ins (App fun arg)
+      = App (do_expr ins fun) (do_expr ins arg)
+    do_expr ins (Lam bndr body)
+      = Lam bndr (do_expr (extendInScopeSet ins bndr) body)
+    do_expr ins (Let bind body)
+      = Let bind' body'
+      where
+        (ins', bind') = do_bind ins bind
+        body'         = do_expr ins' body
+    do_expr ins (Case scrut bndr ty alts)
+      = Case (do_expr ins scrut) bndr ty (map (do_alt ins') alts)
+      where
+        ins' = extendInScopeSet ins bndr
+    do_expr ins (Cast expr co)
+      = Cast (do_expr ins expr) co
+    do_expr ins (Tick ti expr)
+      = Tick ti (do_expr ins expr)
+    do_expr _   other
+      = other
+
+    do_alt ins (con, bndrs, rhs)
+      = (con, bndrs, do_expr (extendInScopeSetList ins bndrs) rhs)
+
+{-
 ************************************************************************
 *                                                                      *
 \subsection{Determining non-updatable right-hand-sides}

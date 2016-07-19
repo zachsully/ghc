@@ -108,7 +108,7 @@ import FV
 
 import MonadUtils       ( mapAndUnzipM )
 
-import Data.Maybe       ( mapMaybe )
+import Data.Maybe       ( isJust, mapMaybe )
 import qualified Data.List
 
 import qualified Control.Monad
@@ -836,16 +836,16 @@ decideBindFloat init_env is_bot binding =
         is_profitable_float =
              (dest_lvl `ltMajLvl` le_ctxt_lvl init_env) -- Escapes a value lambda
           || isTopLvl dest_lvl -- Going all the way to top level
-          
+
         is_unlifted_binding
           = case binding of
               AnnNonRec (TB bndr _) _ -> isUnliftedType (idType bndr)
               _                       -> False
-        
+
         careful_with_joins = floatJoinsOnlyToTop (le_switches init_env)
-        
+
         has_unfloatable_join_binding =
-          any (\(TB bndr _, rhs) -> isJoinBndr bndr && isFunction (deTagExpr (deAnnotate rhs))) pairs
+          any (\(TB bndr _, rhs) -> isJoinId bndr && isFunction (deTagExpr (deAnnotate rhs))) pairs
             -- We're fine with floating a nullary join point - it's no longer a
             -- join point but it *is* now shared. Hence we consult isFunction.
 
@@ -878,7 +878,7 @@ decideBindFloat init_env is_bot binding =
     (ids, rhss)  = unzip pairs
     rhs_silt_s   = [(unTag id, siltOf rhs) | (id, rhs) <- pairs]
     TB b bsilt   = head ids
-    sort         = idJoinPointInfo b
+    join_arity   = isJoinId_maybe b
       -- in a recursive group, the binder sort and the scope silt are the same
       -- for each
     scope_silt   = case bsilt of BoringB -> emptySilt
@@ -894,8 +894,8 @@ decideBindFloat init_env is_bot binding =
             where
               rhss_silt = foldr bothSilt emptySilt (map siltOf rhss)
               rhss_fvs  = computeRecRHSsFVs (map unTag ids) (map fvsOf rhss)
-    
-    isLNE = isJoinPoint sort
+
+    isLNE = isJust join_arity
     is_OneShot e = case collectBinders $ deTagExpr $ deAnnotate e of
       (bs,_) -> all (\b -> isId b && isOneShotBndr b) bs
 
@@ -1094,7 +1094,7 @@ substBndrsSL is_rec env@(LE { le_subst = subst, le_env = id_env, le_joins = join
   = ( env { le_subst    = subst'
           , le_env      = foldl add_id  id_env (bndrs `zip` bndrs')
           , le_joins    = extendVarSetList joins [ bndr | TB bndr _ <- bndrs
-                                                        , isId bndr, isJoinBndr bndr ]}
+                                                        , isId bndr, isJoinId bndr ]}
     , bndrs')
   where
     (subst', bndrs') = case is_rec of
@@ -1234,7 +1234,7 @@ floatOverSat le = floatOutOverSatApps (le_switches le)
 lneLvlEnv :: LevelEnv -> [InId] -> LevelEnv
 lneLvlEnv env bndrs = env { le_joins = extendVarSetList (le_joins env) joins }
   where
-    joins = [ bndr | TB bndr _ <- bndrs, isJoinBndr bndr ]
+    joins = [ bndr | TB bndr _ <- bndrs, isJoinId bndr ]
 
 setCtxtLvl :: LevelEnv -> Level -> LevelEnv
 setCtxtLvl env lvl = env { le_ctxt_lvl = lvl }
@@ -1413,7 +1413,7 @@ add_id id_env (TB v _, v1)
 
 zap_demand_info :: Var -> Var
 zap_demand_info v
-  | isId v    = zapIdDemandInfo (zapIdJoinPointInfo v)
+  | isId v    = zapIdDemandInfo (zapJoinId v)
   | otherwise = v
 
 {-
@@ -1816,10 +1816,10 @@ lambdaLikeFVUp bs up = up {
 floatFVUp :: FVEnv -> Maybe CoreBndr -> Bool -> CoreExpr -> FVUp -> FVUp
 floatFVUp env mb_id use_case rhs up =
   let rhs_floats@(FIFloats _ _ bndrs_floating_out _ _) = fvu_floats up
-      
-      sort = case mb_id of Nothing       -> NotJoinPoint -- floating an argument
-                           Just b        -> idJoinPointInfo b
-      
+
+      join_arity = case mb_id of Nothing       -> Nothing -- floating an argument
+                                 Just b        -> isJoinId_maybe b
+
       FISilt m fids sk = fvu_silt up
 
       new_float = FIFloats okToSpec n bndrs fids sk'
@@ -1833,7 +1833,7 @@ floatFVUp env mb_id use_case rhs up =
             Just id -> (m,unitDVarSet id)
 
           -- treat LNEs like cases; see Note [recognizing LNE]
-          sk' | use_case || (fve_ignoreLNEClo env && isJoinPoint sort) = sk
+          sk' | use_case || (fve_ignoreLNEClo env && isJust join_arity) = sk
               | otherwise = CloSk mb_id fids' sk
 
                 where fids' = bndrs_floating_out `unionDVarSet` mapDVarEnv fii_var fids
@@ -2054,9 +2054,10 @@ analyzeFVsM env (Let (NonRec binder rhs) body) = do
 
 analyzeFVsM env (Let (Rec binds) body) = do
   let binders = map fst binds
-  let sort = idJoinPointInfo (head binders)
+  let is_joins = map (isJust . isJoinId_maybe) binders
+      is_join  = head is_joins
 
-  MASSERT(all (== sort) (map idJoinPointInfo binders))
+  MASSERT(all (== is_join) is_joins)
 
   -- step 1: recurse
   let recurse = analyzeFVsM $ unappliedEnv $ extendEnv binders $ letBoundsEnv binds env
@@ -2064,7 +2065,7 @@ analyzeFVsM env (Let (Rec binds) body) = do
     (rhss2,rhs_up) <- recurse rhs
     return $ (,) rhss2 $ perhapsWrapFloatsFVUp Recursive False rhs rhs_up
   (body2,body_up) <- recurse body
-  
+
   -- step 2: approximate floating the bindings
   let binding_up_s = flip map (zip binds rhs_up_s) $ \((binder,rhs),rhs_up) ->
         floatFVUp env (Just binder) False rhs $
@@ -2075,7 +2076,7 @@ analyzeFVsM env (Let (Rec binds) body) = do
         fvu_fvs = delBindersFVs binders $
                   fvu_fvs body_up `unionDVarSet`
                     computeRecRHSsFVs binders (map fvu_fvs binding_up_s),
-        
+
         fvu_floats = foldr appendFloats (fvu_floats body_up) $ map fvu_floats binding_up_s,
         fvu_silt   = delBindersSilt binders $ fvu_silt body_up,
 

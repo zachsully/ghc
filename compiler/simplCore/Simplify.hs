@@ -389,7 +389,7 @@ simplLazyBind env top_lvl is_rec cont_mb bndr bndr1 rhs rhs_se
         ; (body_env2, body2) <- prepareRhs top_lvl body_env1 bndr1 body1
 
         ; (env', rhs')
-            <-  if not (doFloatFromRhs top_lvl is_rec (idJoinPointInfo bndr) False body2 body_env2)
+            <-  if not (doFloatFromRhs top_lvl is_rec (isJoinId_maybe bndr) False body2 body_env2)
                 then                            -- No floating, revert to body1
                      do { rhs' <- mkLam tvs' (wrapFloats body_env1 body1) rhs_cont
                         ; return (env, rhs') }
@@ -405,8 +405,8 @@ simplLazyBind env top_lvl is_rec cont_mb bndr bndr1 rhs rhs_se
                         ; env' <- foldlM (addPolyBind top_lvl) env poly_binds
                         ; return (env', rhs') }
 
-        ; let bndr2 | isJoinBndr bndr = setIdType bndr1 (exprType rhs')
-                    | otherwise       = bndr1
+        ; let bndr2 | isJoinId bndr = setIdType bndr1 (exprType rhs')
+                    | otherwise     = bndr1
             -- type of join point may have changed
         ; completeBind env' top_lvl is_rec cont_mb bndr bndr2 rhs' }
 
@@ -445,7 +445,7 @@ completeNonRecX :: TopLevelFlag -> SimplEnv
 completeNonRecX top_lvl env is_strict old_bndr new_bndr new_rhs
   = do  { (env1, rhs1) <- prepareRhs top_lvl (zapFloats env) new_bndr new_rhs
         ; (env2, rhs2) <-
-                if doFloatFromRhs NotTopLevel NonRecursive (idJoinPointInfo new_bndr) is_strict rhs1 env1
+                if doFloatFromRhs NotTopLevel NonRecursive (isJoinId_maybe new_bndr) is_strict rhs1 env1
                 then do { tick LetFloatFromLet
                         ; return (addFloats env env1, rhs1) }   -- Add the floats to the main env
                 else return (env, wrapFloats env1 rhs1)         -- Wrap the floats around the RHS
@@ -981,7 +981,7 @@ simplRhs env cont_mb bndr expr
 
 simplRhsF :: SimplEnv -> Maybe SimplCont -> InId -> InExpr -> SimplM (SimplEnv, OutExpr)
 simplRhsF env cont_mb bndr expr
-  | JoinPoint arity <- idJoinPointInfo bndr
+  | Just arity <- isJoinId_maybe bndr
   = simpl_join_lams arity
   | otherwise
   = simplExprF env expr rhs_cont
@@ -990,7 +990,7 @@ simplRhsF env cont_mb bndr expr
     join_cont = case cont_mb of Just cont -> cont
                                 Nothing   -> pprPanic "simplRhsF" $
                                              text "no context for join:" <+> ppr bndr
-    
+
     simpl_join_lams arity
       | arity > length bndrs
       = pprPanic "simplRhsF" $ text "not enough lambdas for join point:" <+> ppr bndr $$
@@ -1422,7 +1422,7 @@ simplNonRecE env bndr (rhs, rhs_se) (bndrs, body) cont
                   simplLam (extendIdSubst env bndr (mkContEx rhs_se rhs)) bndrs body cont }
 
            | isStrictId bndr          -- Includes coercions
-           , not (isJoinBndr bndr)
+           , not (isJoinId bndr)
            -> simplExprF (rhs_se `setFloats` env) rhs
                          (StrictBind bndr bndrs body env cont)
 
@@ -2503,7 +2503,7 @@ prepareLetCont :: SimplEnv
 -- and the reference to j is invalid.
 
 prepareLetCont env bndrs cont
-  | not (any isJoinBndr bndrs)           = return (env, cont, mkBoringStop (contResultType cont))
+  | not (any isJoinId bndrs)             = return (env, cont, mkBoringStop (contResultType cont))
   | not (sm_case_case (getMode env))     = return (env, mkBoringStop (contHoleType cont), cont)
   | otherwise                            = mkDupableCont env cont
 
@@ -2674,15 +2674,14 @@ mkDupableAlt env case_bndr (con, bndrs', rhs') = do
                 one_shot v | isId v    = setOneShotLambda v
                            | otherwise = v
                 join_rhs   = mkLams really_final_bndrs rhs'
-                join_arity = length (filter (not . isTyVar) final_bndrs')
-                join_jpi   | sm_context_subst (getMode env)
-                           = JoinPoint (length final_bndrs')
-                           | otherwise
-                           = NotJoinPoint
+                arity      = length (filter (not . isTyVar) final_bndrs')
+                join_arity = length final_bndrs'
                 join_call  = mkApps (Var join_bndr) final_args
-                final_join_bndr        = join_bndr
-                                           `setIdArity` join_arity
-                                           `setIdJoinPointInfo` join_jpi
+                join_bndr_w_arity = join_bndr `setIdArity` arity
+                final_join_bndr | sm_context_subst (getMode env)
+                                = asJoinId join_bndr_w_arity join_arity
+                                | otherwise
+                                = join_bndr_w_arity
 
         ; env' <- addPolyBind NotTopLevel env (NonRec final_join_bndr join_rhs)
         ; return (env', (con, bndrs', join_call)) }

@@ -753,7 +753,7 @@ lintCont env e orig_cont
     go ty (StrictArg ai _ k)
       | Just (arg_ty, res_ty) <- splitFunTy_maybe (ai_type ai)
       = check_ty (text "Strict arg type") ty arg_ty $
-        isJoinBndr (ai_fun ai) || -- join point return types are unstable
+        isJoinId (ai_fun ai) || -- join point return types are unstable
         go res_ty k
       | otherwise
       = die (text "Not a function type:" <+> ppr (ai_type ai))
@@ -1516,7 +1516,7 @@ tryEtaExpandRhs env is_rec bndr rhs
             new_arity2 = idCallArity bndr
             new_arity  = max new_arity1 new_arity2
       , new_arity > old_arity      -- And the current manifest arity isn't enough
-      = if is_rec == Recursive && isJoinBndr bndr
+      = if is_rec == Recursive && isJoinId bndr
            then WARN(True, text "Can't eta-expand recursive join point:" <+> ppr bndr)
                 return (old_arity, rhs)
            else do { tick (EtaExpansion bndr)

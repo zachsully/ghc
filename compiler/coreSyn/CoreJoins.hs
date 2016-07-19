@@ -2,12 +2,11 @@
 
 module CoreJoins (
   findJoinsInPgm, findJoinsInExpr, eraseJoins,
-  lintJoinsInCoreBindings,
 ) where
 
 import CoreSyn
+import CoreUtils
 import Id
-import IdInfo
 import MonadUtils
 import Outputable
 import PprCore ()
@@ -22,7 +21,7 @@ import Control.Monad
 #include "HsVersions.h"
 
 findJoinsInPgm :: CoreProgram -> CoreProgram
-findJoinsInPgm pgm = map (\bind -> initFJ $ fjTopBind bind) pgm
+findJoinsInPgm pgm = propagateBinders $ map (\bind -> initFJ $ fjTopBind bind) pgm
 
 findJoinsInExpr :: CoreExpr -> CoreExpr
 findJoinsInExpr expr = initFJ $ do (expr', anal) <- fjExpr expr
@@ -30,12 +29,15 @@ findJoinsInExpr expr = initFJ $ do (expr', anal) <- fjExpr expr
                                    return expr'
 
 eraseJoins :: CoreProgram -> CoreProgram
+-- ^ Remove all join points from a program, turning them into ordinary let
+-- bindings. This is generally only useful for testing how useful join points
+-- are.
 eraseJoins = map doBind
   where
     doBind (NonRec bndr rhs) = NonRec (zapBndrSort bndr) (doExpr rhs)
     doBind (Rec pairs) = Rec [ (zapBndrSort bndr, doExpr rhs)
                              | (bndr, rhs) <- pairs ]
-  
+
     doExpr (App fun arg)   = App (doExpr fun) (doExpr arg)
     doExpr (Lam bndr body) = Lam (zapBndrSort bndr) (doExpr body)
     doExpr (Let bind body) = Let (doBind bind) (doExpr body)
@@ -47,27 +49,22 @@ eraseJoins = map doBind
     doExpr (Tick ti expr)  = Tick ti (doExpr expr)
     doExpr other = other
 
-lintJoinsInCoreBindings :: CoreProgram -> ()
-lintJoinsInCoreBindings pgm
-  = runLintJM $ do mapM_ (lintJBind emptyJoinVarSets) pgm
-                   return ()
-
 data BndrSort = JoinBndr | ValBndr deriving (Eq)
 
 setBndrSort :: Var -> BndrSort -> Int -> Var
 setBndrSort b sort ar | not (isId b) = b
-                      | sort == JoinBndr = setIdJoinPointInfo b (JoinPoint ar)
-                      | otherwise        = setIdJoinPointInfo b NotJoinPoint
+                      | sort == JoinBndr = asJoinId b ar
+                      | otherwise        = zapJoinId b
 
 zapBndrSort :: Var -> Var
-zapBndrSort b | isId b    = zapIdJoinPointInfo b
+zapBndrSort b | isId b    = zapJoinId b
               | otherwise = b
 
 -------------------------
 -- Finding join points --
 -------------------------
 
-fjTopBind :: CoreBind -> FJM CoreBind 
+fjTopBind :: CoreBind -> FJM CoreBind
 fjTopBind (NonRec bndr expr)
   = do (bndr', expr') <- fjTopPair (bndr, expr)
        return $ NonRec bndr' expr'
@@ -141,15 +138,15 @@ fjLet rec_sort bind body
 
                  return (bind', bind_anal, body', body_anal)
        let new_let = Let bind' body'
-           
+
            real_bind_anal | rec_sort == JoinBndr  = bind_anal
                           | otherwise             = markAllVarsBad bind_anal
                               -- Everything escapes which is free in the bindings
-           
+
            real_bind_anal_wo_binders
              | is_rec    = real_bind_anal `removeAllFromJoinAnal` binders
              | otherwise = real_bind_anal
-           
+
            let_anal = (body_anal `removeAllFromJoinAnal` binders)
                         `combineJoinAnals` real_bind_anal_wo_binders
 
@@ -269,7 +266,7 @@ The difficulty is with arity. Suppose we have:
       {-# RULES "SPEC k 0" k 0 = j #-}
       k x y = x + 2 * y
   in ...
-  
+
 (By "arity" here we mean arity counting type args, as usual with join points.)
 Now suppose that both j and k appear only as saturated tail calls in the body.
 Thus we would like to make them both join points. The rule complicates matters,
@@ -373,7 +370,7 @@ combineJoinAnals (good1, bad1) (good2, bad2)
 combineManyJoinAnals :: [JoinAnal] -> JoinAnal
 combineManyJoinAnals []     = emptyJoinAnal
 combineManyJoinAnals (a:as) = foldr combineJoinAnals a as
-    
+
 markAllVarsBad :: JoinAnal -> JoinAnal
 markAllVarsBad (good, bad) = (emptyVarSet, good `unionVarSet` bad)
 
@@ -390,112 +387,6 @@ inGoodSet id (good, _bad) = id `elemVarSet` good
 
 allInGoodSet :: [Id] -> JoinAnal -> Bool
 allInGoodSet ids (good, _bad) = isEmptyVarSet (mkVarSet ids `minusVarSet` good)
-
--- ---------------------------------------------------------------------------
--- Lint
--- ---------------------------------------------------------------------------
-
-type JoinVarSet = VarEnv TotalArity
-type JoinVarSets = (JoinVarSet, JoinVarSet) -- in-scope joins, out-of-scope joins
-newtype LintJM a = LintJM a
-  -- Just for seq; TODO gather errors rather than panicking
-
-instance Applicative LintJM where
-  pure = LintJM
-  (<*>) = ap
-instance Monad LintJM where
-  return = pure
-  LintJM a >>= k = a `seq` k a
-instance Functor LintJM where fmap = liftM
-
-runLintJM :: LintJM a -> a
-runLintJM (LintJM a) = a
-
-emptyJoinVarSets :: JoinVarSets
-emptyJoinVarSets = (emptyVarEnv, emptyVarEnv)
-
-addBndrs :: [(CoreBndr, TotalArity)] -> JoinVarSets -> JoinVarSets
-addBndrs bndrs (ins, outs)
-  = (extendVarEnvList ins bndrs, outs)
-
-markAllOut :: JoinVarSets -> JoinVarSets
-markAllOut (ins, outs) = (emptyVarEnv, ins `plusVarEnv` outs)
-
-lintJBind :: JoinVarSets -> CoreBind -> LintJM JoinVarSets
-lintJBind joins (NonRec bndr rhs)
-  | not (isJoinBndr bndr)
-  = lintJExpr (markAllOut joins) rhs >> return joins
-  | otherwise
-  = lintJExpr joins rhsBody >> return bodyJoins
-  where
-    (argBndrs, rhsBody) = collectBinders rhs
-    bodyJoins = addBndrs [(bndr, length argBndrs)] joins
-lintJBind joins (Rec pairs)
-  = mapM_ doPair pairs >> return joins'
-  where
-    joins' = addBndrs [ (bndr, lambdaCount rhs)
-                      | (bndr, rhs) <- pairs, isJoinBndr bndr ] joins
-      
-    doPair (bndr, rhs) | isJoinBndr bndr = lintJExpr joins' (skip_lambdas rhs)
-                       | otherwise = lintJExpr (markAllOut joins') rhs
-    
-    skip_lambdas expr = snd $ collectBinders expr
-
-lintJExpr :: JoinVarSets -> CoreExpr -> LintJM ()
-lintJExpr joins (Var v) = lintJApp joins v []
-lintJExpr _ (Lit _) = return ()
-lintJExpr joins expr@(App {})
-  | Var v <- fun
-  = lintJApp joins v args
-  | otherwise
-  = lintJExpr joins' fun >> mapM_ (lintJExpr joins') args
-  where
-    (fun, args) = collectArgs expr
-    joins' = markAllOut joins
-lintJExpr joins (Lam bndr expr) = do lintJArgBndr bndr
-                                     lintJExpr (markAllOut joins) expr
-lintJExpr joins (Let bind body) = do joins' <- lintJBind joins bind
-                                     lintJExpr joins' body
-lintJExpr joins (Case scrut bndr _ty alts)
-  = do lintJExpr (markAllOut joins) scrut
-       lintJArgBndr bndr
-       mapM_ (lintJAlt joins) alts
-lintJExpr joins (Cast expr _) = lintJExpr (markAllOut joins) expr
-lintJExpr joins (Tick _ expr) = lintJExpr (markAllOut joins) expr
-lintJExpr _ (Type _) = return ()
-lintJExpr _ (Coercion _) = return ()
-
-lintJAlt :: JoinVarSets -> CoreAlt -> LintJM ()
-lintJAlt joins (_con, bndrs, rhs)
-  = do mapM_ lintJArgBndr bndrs
-       lintJExpr joins rhs
-
-lintJApp :: JoinVarSets -> Var -> [CoreExpr] -> LintJM ()
-lintJApp joins@(ins, outs) v args
-  | v `elemVarEnv` outs
-  = pprPanic "lintJApp" $
-      text "Join var not in scope:" <+> ppr v $$
-      text "Scopes:" <+> pprScopes joins
-  | Just arity <- lookupVarEnv ins v
-  , let call_arity = length args
-  , arity /= call_arity
-  = pprPanic "lintJApp" $
-      text "Arity mismatch calling:" <+> ppr v $$
-      text "Expected:" <+> int arity $$
-      text "Actual:" <+> int call_arity
-  | otherwise
-  = mapM_ (lintJExpr (markAllOut joins)) args
-
-lintJArgBndr :: CoreBndr -> LintJM ()
-lintJArgBndr bndr
-  | isJoinBndr bndr
-  = pprPanic "lintJArgBndr" $ text "Unexpected join binder:" <+> ppr bndr
-lintJArgBndr _
-  = return ()
-
-pprScopes :: JoinVarSets -> SDoc
-pprScopes (ins, outs) = text "In:"  <+> ppr ins $$
-                        text "Out:" <+> ppr outs
 
 -- ---------------------------------------------------------------------------
 -- Misc.
