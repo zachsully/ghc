@@ -1,16 +1,17 @@
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP, ViewPatterns #-}
 
 module CoreJoins (
   findJoinsInPgm, findJoinsInExpr, eraseJoins,
 ) where
 
+import BasicTypes
 import CoreSyn
+import CoreUtils
 import Id
 import IdInfo
 import Maybes
 import MonadUtils
 import Outputable
-import PprCore ()
 import Rules
 import Type
 import Util
@@ -39,6 +40,7 @@ eraseJoins = map doBind
     doBind (Rec pairs) = Rec [ (zapBndrSort bndr, doExpr rhs)
                              | (bndr, rhs) <- pairs ]
 
+    doExpr (Var var)       = Var (zapBndrSort var)
     doExpr (App fun arg)   = App (doExpr fun) (doExpr arg)
     doExpr (Lam bndr body) = Lam (zapBndrSort bndr) (doExpr body)
     doExpr (Let bind body) = Let (doBind bind) (doExpr body)
@@ -119,33 +121,23 @@ fjApp v args
 fjLet :: Maybe [JoinArity] -> CoreBind -> CoreExpr
       -> FJM (CoreExpr, JoinAnal, Maybe [JoinArity])
 fjLet rec_join_arities bind body
-  = do (bind', bind_anal, body', body_anal)
-         <- do (bind', bind_anal, bndrs)
+  = do (bind', int_bind_anal, ext_bind_anal, body', body_anal)
+         <- do (bind', int_bind_anal, ext_bind_anal, bndrs)
                  <- vars_bind rec_join_arities bind
                -- Do the body
                withCandidatesFJ bndrs $ do
                  (body', body_anal) <- fjExpr body
 
-                 return (bind', bind_anal, body', body_anal)
+                 return (bind', int_bind_anal, ext_bind_anal, body', body_anal)
        let new_let = Let bind' body'
 
-           will_be_joins = isJust rec_join_arities
+           all_anal = int_bind_anal `combineJoinAnals` body_anal -- Still includes binders of
+                                                                 -- this let(rec)
 
-           real_bind_anal | will_be_joins         = bind_anal
-                          | otherwise             = markAllVarsBad bind_anal
-                              -- Everything escapes which is free in the bindings
-
-           real_bind_anal_wo_binders
-             | is_rec    = real_bind_anal `removeAllFromJoinAnal` binders
-             | otherwise = real_bind_anal
+           join_arities = decideSort is_rec bind all_anal
 
            let_anal = (body_anal `removeAllFromJoinAnal` binders)
-                        `combineJoinAnals` real_bind_anal_wo_binders
-
-           all_anal | is_rec    = bind_anal `combineJoinAnals` body_anal    -- Still includes binders of
-                    | otherwise = body_anal                                 -- this let(rec)
-
-           join_arities = decideSort bind all_anal
+                        `combineJoinAnals` ext_bind_anal
 
        return (
            new_let,
@@ -154,25 +146,38 @@ fjLet rec_join_arities bind body
          )
   where
     binders        = bindersOf bind
-    is_rec         = case bind of NonRec {} -> False; _ -> True
+    is_rec         = case bind of NonRec {} -> NonRecursive; _ -> Recursive
 
     vars_bind :: Maybe [JoinArity]
               -> CoreBind
               -> FJM (CoreBind,
                       JoinAnal,            -- good vars; bad vars
+                      JoinAnal,            -- externally visible analysis
                       [Id])   -- extension to environment
 
     vars_bind rec_join_arities (NonRec binder rhs) = do
         (rhs', bind_anal) <- fjRhs rhs
-        (bndr', bndr_anal) <- fjBndr binder
+        (bndr', rule_anals, unf_anal) <- fjBndr binder
         let bndr'' = case rec_join_arities of
                        Just [arity] -> asJoinId binder arity
                        Just _       -> panic "vars_bind"
                        Nothing | isId bndr' -> zapJoinId bndr'
                                | otherwise  -> bndr'
+            ext_anal = case rec_join_arities of
+                         Just [arity]
+                           -> bind_anal `combineJoinAnals` unf_anal
+                                `combineJoinAnals`
+                                combineRuleAnals NonRecursive arity rule_anals
+                         Just _
+                           -> panic "vars_bind/2"
+                         Nothing
+                           -> markAllVarsBad (bind_anal `combineJoinAnals` unf_anal)
+                                `combineJoinAnals`
+                                markAllVarsBadInRuleAnals rule_anals
 
         return (NonRec bndr'' rhs',
-                bind_anal `combineJoinAnals` bndr_anal, [binder])
+                emptyJoinAnal, -- analysis doesn't apply to binder itself
+                ext_anal, [binder])
 
 
     vars_bind rec_join_arities (Rec pairs)
@@ -180,17 +185,24 @@ fjLet rec_join_arities bind body
           (binders, rhss) = unzip pairs
         in
         withCandidatesFJ binders $ do
-          (bndrs', bndr_anals) <- mapAndUnzipM fjBndr binders
+          (unzip3 -> (bndrs', rule_analss, unf_anals)) <- mapM fjBndr binders
           (rhss', rhs_anals)
             <- mapAndUnzipM fjRhs rhss
           let
-            anal = combineManyJoinAnals (bndr_anals ++ rhs_anals)
+            combine rule_anals rhs
+              = combineRuleAnals Recursive (lambdaCount rhs) rule_anals
+            final_rule_anals = zipWith combine rule_analss rhss
+            anal = combineManyJoinAnals (final_rule_anals ++ unf_anals ++ rhs_anals)
             bndrs'' = case rec_join_arities of
                         Just arities -> zipWith asJoinId bndrs' arities
                         Nothing      -> map zapJoinId bndrs'
+            ext_anal = anal `removeAllFromJoinAnal` binders
+            final_ext_anal = case rec_join_arities of
+                               Just _  -> ext_anal
+                               Nothing -> markAllVarsBad ext_anal
 
           return (Rec (bndrs'' `zip` rhss'),
-                  anal, binders)
+                    anal, final_ext_anal, binders)
 
 fjRhs :: CoreExpr -> FJM (CoreExpr, JoinAnal)
 fjRhs expr = do let (bndrs, body) = collectBinders expr
@@ -202,28 +214,27 @@ fjAlt (con, bndrs, rhs)
   = do (rhs', anal) <- withoutCandidatesFJ bndrs $ fjExpr rhs
        return ((con, [ zapBndrSort bndr | bndr <- bndrs ], rhs'), anal)
 
-fjBndr :: CoreBndr -> FJM (CoreBndr, JoinAnal)
+fjBndr :: CoreBndr -> FJM (CoreBndr, [RuleAnal], JoinAnal)
 fjBndr bndr
   | not (isId bndr)
-  = return (bndr, emptyJoinAnal)
+  = return (bndr, [], emptyJoinAnal)
   | otherwise
-  = do (rules', anals) <- mapAndUnzipM fjRule (idCoreRules bndr)
+  = do (rules', rule_anals) <- mapAndUnzipM fjRule (idCoreRules bndr)
        (unf', unf_anal) <- fjUnfolding (realIdUnfolding bndr)
        let bndr' = bndr `setIdSpecialisation` (mkRuleInfo rules')
                         `setIdUnfolding` unf'
-           anal  = combineManyJoinAnals (unf_anal : anals)
-       return (bndr', anal)
+       return (bndr', catMaybes rule_anals, unf_anal)
 
 -- FIXME Right now we just brazenly go in and tweak the expressions stored in
--- rules and unfoldings. Surely we should be more careful than that. - LVWM 
+-- rules and unfoldings. Surely we should be more careful than that. - LVWM
 
-fjRule :: CoreRule -> FJM (CoreRule, JoinAnal)
+fjRule :: CoreRule -> FJM (CoreRule, Maybe RuleAnal)
 fjRule rule@(BuiltinRule {})
-  = return (rule, emptyJoinAnal)
-fjRule rule@(Rule { ru_bndrs = bndrs, ru_rhs = rhs })
+  = return (rule, Nothing)
+fjRule rule@(Rule { ru_bndrs = bndrs, ru_args = args, ru_rhs = rhs })
   = do (rhs', anal) <- withoutCandidatesFJ bndrs $ fjRhs rhs
          -- See Note [Rules]
-       return (rule { ru_rhs = rhs' }, anal)
+       return (rule { ru_rhs = rhs' }, Just (length args, anal))
 
 fjUnfolding :: Unfolding -> FJM (Unfolding, JoinAnal)
 fjUnfolding unf@(CoreUnfolding { uf_src = src, uf_tmpl = rhs })
@@ -387,6 +398,29 @@ findGoodId :: JoinAnal -> Id -> Maybe JoinArity
 findGoodId (good, _bad) id = snd <$> lookupVarEnv good id
 
 -- ---------------------------------------------------------------------------
+-- Rules
+-- ---------------------------------------------------------------------------
+
+type RuleAnal = (JoinArity, JoinAnal)
+
+combineRuleAnals :: RecFlag -> JoinArity -> [RuleAnal] -> JoinAnal
+combineRuleAnals is_rec join_arity anals
+  = combineManyJoinAnals (map convert anals)
+  where
+    convert (rule_arity, anal@(good, bad))
+      | rule_arity == join_arity = anal
+      | is_rec == Recursive ||
+        rule_arity > join_arity  = markAllVarsBad anal
+      | otherwise                = (good', bad)
+      where
+        good' = mapVarEnv adjust_arity good
+        adjust_arity (id, arity) = (id, arity + (join_arity - rule_arity))
+
+markAllVarsBadInRuleAnals :: [RuleAnal] -> JoinAnal
+markAllVarsBadInRuleAnals anals
+  = combineManyJoinAnals [ markAllVarsBad anal | (_, anal) <- anals ]
+
+-- ---------------------------------------------------------------------------
 -- Rewriting Occurrences
 -- ---------------------------------------------------------------------------
 
@@ -473,17 +507,19 @@ lambdaCount :: Expr a -> JoinArity
 --   whether a given application is total (*including* all type arguments)
 lambdaCount expr = length bndrs where (bndrs, _) = collectBinders expr
 
-decideSort :: CoreBind -> JoinAnal -> Maybe [JoinArity]
+decideSort :: RecFlag -> CoreBind -> JoinAnal -> Maybe [JoinArity]
 -- ^ Checks whether each binding is elegible to be a join point, given the
 --   analysis. Besides needing to be in the analysis's good set, a join point
 --   cannot be polymorphic in its return type, since its context is fixed and
 --   thus its type cannot vary.
-decideSort bind anal
+decideSort rec_flag bind anal
   = sequence (map decide (flattenBinds [bind]))
   where
     decide (bndr, rhs)
       | Just arity <- findGoodId anal bndr
       , arity == lambdaCount rhs -- TODO loosen restriction (carefully!)
+      , rec_flag == Recursive || not (isUnliftedType (idType bndr)) || exprOkForSpeculation rhs
+          -- TODO Eliminate let/app invariant for join points
       , good_type arity emptyVarSet (idType bndr)
       = Just arity
       | otherwise
