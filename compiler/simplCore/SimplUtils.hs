@@ -653,10 +653,10 @@ interestingArg env e = go env 0 e
     go env n (Var v)
        | SimplEnv { seIdSubst = ids, seInScope = in_scope } <- env
        = case lookupVarEnv ids v of
-           Nothing                        -> go_var n (refineFromInScope in_scope v)
-           Just (DoneId v', _)            -> go_var n (refineFromInScope in_scope v')
-           Just (DoneEx e, _)             -> go (zapSubstEnv env)             n e
-           Just (ContEx tvs cvs ids e, _) -> go (setSubstEnv env tvs cvs ids) n e
+           Nothing                     -> go_var n (refineFromInScope in_scope v)
+           Just (DoneId v')            -> go_var n (refineFromInScope in_scope v')
+           Just (DoneEx e)             -> go (zapSubstEnv env)             n e
+           Just (ContEx tvs cvs ids e) -> go (setSubstEnv env tvs cvs ids) n e
 
     go _   _ (Lit {})          = ValueArg
     go _   _ (Type _)          = TrivArg
@@ -1326,7 +1326,7 @@ postInlineUnconditionally dflags env top_lvl bndr occ_info rhs unfolding
         -- See Note [pre/postInlineUnconditionally in gentle mode]
     
     eta_reducible_join
-      | Just _ <- joinVarArity env bndr
+      | isJoinId bndr
       , Just _ <- tryEtaReduce bndrs body
       = True
       | otherwise
