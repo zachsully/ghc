@@ -47,7 +47,10 @@ module CoreUtils (
 
         -- * Working with ticks
         stripTicksTop, stripTicksTopE, stripTicksTopT,
-        stripTicksE, stripTicksT
+        stripTicksE, stripTicksT,
+
+        -- * Join points
+        isJoinBind
     ) where
 
 #include "HsVersions.h"
@@ -2252,3 +2255,17 @@ isEmptyTy ty
     = True
     | otherwise
     = False
+
+{-
+************************************************************************
+*                                                                      *
+\subsection{Join points}
+*                                                                      *
+************************************************************************
+-}
+
+-- | Does this binding bind a join point (or a recursive group of join points)?
+isJoinBind :: CoreBind -> Bool
+isJoinBind (NonRec b _)       = isJoinId b
+isJoinBind (Rec ((b, _) : _)) = isJoinId b
+isJoinBind _                  = panic "isJoinBind"
