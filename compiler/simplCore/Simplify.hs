@@ -1152,7 +1152,7 @@ simplExprF1 env (Let (Rec pairs) body) cont
   = simplRecE env pairs body cont
 
 simplExprF1 env (Let (NonRec bndr rhs) body) cont
-  | isJoinId bndr
+  | isId bndr, isJoinId bndr
   = simplNonRecJoinE env bndr (rhs, env) body cont
   | otherwise
   = simplNonRecE env bndr (rhs, env) ([], body) cont
