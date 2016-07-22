@@ -1096,7 +1096,7 @@ simplExprF env e cont
       , text "cvsubst =" <+> ppr (seCvSubst env)
       {- , ppr (seFloats env) -}
       ]) $
-    ASSERT(lintCont env e cont) -}
+    ASSERT(lintCont "simplExprF" empty env e cont) -}
     simplExprF1 env e cont
 
 simplExprF1 :: SimplEnv -> InExpr -> SimplCont

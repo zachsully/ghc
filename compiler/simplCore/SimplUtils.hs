@@ -698,16 +698,16 @@ The lintCont function is useful for finding errors early, but it's expensive.
 Accordingly the use in simplExprF is commented out.
 -}
 
-lintCont :: SimplEnv -> InExpr -> SimplCont -> Bool
+lintCont :: String -> SDoc -> SimplEnv -> InExpr -> SimplCont -> Bool
 -- ^ Perform typechecking on the given continuation, given the expression it's
 -- being applied to. Returns True on success; panics with detailed message on
 -- failure. (The expression argument is needed because if this is an invocation
 -- of a join point, the outer context will get thrown out, so the likely type
 -- mismatch doesn't matter.)
-lintCont _ (Type _) _
+lintCont _ _ _ (Type _) _
   = True -- FIXME Types get passed with wrong Stop continuations for some reason
 
-lintCont env e orig_cont
+lintCont hdr doc env e orig_cont
   | Var v <- fun
   , isJoinId v
   = True -- Continuation will get thrown out anyway (besides some arguments)
@@ -769,11 +769,12 @@ lintCont env e orig_cont
       = if cond then next else die msg
       
     die msg
-      = pprPanic "lintCont" $
+      = pprPanic hdr $
         vcat [ text "Error in continuation"
              , msg
              , ppr orig_cont
-             , text "Expr:" <+> ppr e ]
+             , text "Expr:" <+> ppr e
+             , doc ]
 
 {-
 ************************************************************************
