@@ -70,7 +70,7 @@ module Id (
         DictId, isDictId, isEvVar,
 
         -- ** Join variables
-        JoinId, isJoinId, isJoinId_maybe, asJoinId, zapJoinId,
+        JoinId, isJoinId, isJoinId_maybe, asJoinId, asJoinId_maybe, zapJoinId,
 
         -- ** Inline pragma stuff
         idInlinePragma, setInlinePragma, modifyInlinePragma,
@@ -154,7 +154,10 @@ infixl  1 `setIdUnfoldingLazily`,
           `idCafInfo`,
 
           `setIdDemandInfo`,
-          `setIdStrictness`
+          `setIdStrictness`,
+
+          `asJoinId`,
+          `asJoinId_maybe`
 
 {-
 ************************************************************************
@@ -589,6 +592,10 @@ zapJoinId :: Id -> Id
 -- May be a regular id already
 zapJoinId jid | isJoinId jid = jid `setIdDetails` VanillaId
               | otherwise    = jid
+
+asJoinId_maybe :: Id -> Maybe JoinArity -> Id
+asJoinId_maybe id (Just arity) = asJoinId id arity
+asJoinId_maybe id Nothing      = id
 
 {-
 ************************************************************************

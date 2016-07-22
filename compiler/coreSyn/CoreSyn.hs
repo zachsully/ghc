@@ -15,7 +15,7 @@ module CoreSyn (
 
         -- ** 'Expr' construction
         mkLets, mkLams,
-        mkApps, mkTyApps, mkCoApps, mkVarApps,
+        mkApps, mkTyApps, mkCoApps, mkVarApps, mkTyArg,
 
         mkIntLit, mkIntLitInt,
         mkWordLit, mkWordLitWord,
@@ -1466,17 +1466,17 @@ mkCoApps  f args = foldl (\ e a -> App e (Coercion a)) f args
 mkVarApps f vars = foldl (\ e a -> App e (varToCoreExpr a)) f vars
 mkConApp con args = mkApps (Var (dataConWorkId con)) args
 
-mkTyApps  f args = foldl (\ e a -> App e (typeOrCoercion a)) f args
-  where
-    typeOrCoercion ty
-      | Just co <- isCoercionTy_maybe ty = Coercion co
-      | otherwise                        = Type ty
+mkTyApps  f args = foldl (\ e a -> App e (mkTyArg a)) f args
 
 mkConApp2 :: DataCon -> [Type] -> [Var] -> Expr b
 mkConApp2 con tys arg_ids = Var (dataConWorkId con)
                             `mkApps` map Type tys
                             `mkApps` map varToCoreExpr arg_ids
 
+mkTyArg :: Type -> Expr b
+mkTyArg ty
+  | Just co <- isCoercionTy_maybe ty = Coercion co
+  | otherwise                        = Type ty
 
 -- | Create a machine integer literal expression of type @Int#@ from an @Integer@.
 -- If you want an expression of type @Int@ use 'MkCore.mkIntExpr'
