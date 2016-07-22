@@ -656,7 +656,7 @@ lintCoreExpr (Let (NonRec tv (Type ty)) body)
     do  { addLoc (RhsOf tv) $ lintTyKind tv' ty'
                 -- Now extend the substitution so we
                 -- take advantage of it in the body
-        ; extendSubstL tv' ty'       $
+        ; extendSubstL tv ty'        $
           addLoc (BodyOfLet tv)      $
           lintCoreExpr body } }
 
