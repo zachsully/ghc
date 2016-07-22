@@ -69,6 +69,7 @@ import qualified Control.Monad.Fail as MonadFail
 import MonadUtils
 import Data.Maybe
 import Pair
+import Data.List
 
 {-
 Note [GHC Formalism]
@@ -656,13 +657,13 @@ lintCoreExpr (Let (NonRec tv (Type ty)) body)
                 -- Now extend the substitution so we
                 -- take advantage of it in the body
         ; extendSubstL tv' ty'       $
-          addLoc (BodyOfLetRec [tv]) $
+          addLoc (BodyOfLet tv)      $
           lintCoreExpr body } }
 
 lintCoreExpr (Let (NonRec bndr rhs) body)
   | isId bndr
   = do  { lintSingleBinding NotTopLevel NonRecursive (bndr,rhs)
-        ; addLoc (BodyOfLetRec [bndr])
+        ; addLoc (BodyOfLet bndr)
                  (lintAndScopeId bndr $ \_ -> (lintCoreExpr body)) }
 
   | otherwise
@@ -1677,6 +1678,7 @@ instance HasDynFlags LintM where
 data LintLocInfo
   = RhsOf Id            -- The variable bound
   | LambdaBodyOf Id     -- The lambda-binder
+  | BodyOfLet Var       -- The variable bound
   | BodyOfLetRec [Id]   -- One of the binders
   | CaseAlt CoreAlt     -- Case alternative
   | CasePat CoreAlt     -- The *pattern* of the case alternative
@@ -1729,11 +1731,17 @@ addMsg env msgs msg
    locs = le_loc env
    (loc, cxt1) = dumpLoc (head locs)
    cxts        = [snd (dumpLoc loc) | loc <- locs]
-   context     | opt_PprStyle_Debug = vcat (reverse cxts) $$ cxt1 $$
+   root_cxt    = case find not_top_level (reverse (tail locs)) of
+                   Just root_loc -> snd (dumpLoc root_loc)
+                   Nothing       -> empty
+   context     | opt_PprStyle_Debug = vcat (reverse cxts) $$
                                       text "Substitution:" <+> ppr (le_subst env)
-               | otherwise          = cxt1
+               | otherwise          = root_cxt $$ cxt1
 
    mk_msg msg = mkLocMessage SevWarning (mkSrcSpan loc loc) (context $$ msg)
+
+   not_top_level TopLevelBindings = False
+   not_top_level _                = True
 
 addLoc :: LintLocInfo -> LintM a -> LintM a
 addLoc extra_loc m
@@ -1857,6 +1865,9 @@ dumpLoc (RhsOf v)
 
 dumpLoc (LambdaBodyOf b)
   = (getSrcLoc b, brackets (text "in body of lambda with binder" <+> pp_binder b))
+
+dumpLoc (BodyOfLet b)
+  = (getSrcLoc b, brackets (text "in body of let with binder" <+> pp_binder b))
 
 dumpLoc (BodyOfLetRec [])
   = (noSrcLoc, brackets (text "In body of a letrec with no binders"))
