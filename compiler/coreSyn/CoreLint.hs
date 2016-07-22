@@ -196,7 +196,7 @@ endPassIO :: HscEnv -> PrintUnqualified
 endPassIO hsc_env print_unqual pass binds rules
   = do { dumpPassResult dflags print_unqual mb_flag
                         (ppr pass) (pprPassDetails pass) binds rules
-       ; lintPassResult hsc_env pass binds }
+       ; lintPassResult hsc_env pass empty binds }
   where
     dflags  = hsc_dflags hsc_env
     mb_flag = case coreDumpFlag pass of
@@ -269,24 +269,24 @@ coreDumpFlag (CoreDoPasses {})        = Nothing
 ************************************************************************
 -}
 
-lintPassResult :: HscEnv -> CoreToDo -> CoreProgram -> IO ()
-lintPassResult hsc_env pass binds
+lintPassResult :: HscEnv -> CoreToDo -> SDoc -> CoreProgram -> IO ()
+lintPassResult hsc_env pass extra_hdr binds
   | not (gopt Opt_DoCoreLinting dflags)
   = return ()
   | otherwise
   = do { let (warns, errs) = lintCoreBindings dflags pass (interactiveInScope hsc_env) binds
-       ; Err.showPass dflags ("Core Linted result of " ++ showPpr dflags pass)
-       ; displayLintResults dflags pass warns errs binds  }
+       ; Err.showPass dflags ("Core Linted result of " ++ showSDoc dflags (ppr pass <+> extra_hdr))
+       ; displayLintResults dflags pass extra_hdr warns errs binds  }
   where
     dflags = hsc_dflags hsc_env
 
-displayLintResults :: DynFlags -> CoreToDo
+displayLintResults :: DynFlags -> CoreToDo -> SDoc
                    -> Bag Err.MsgDoc -> Bag Err.MsgDoc -> CoreProgram
                    -> IO ()
-displayLintResults dflags pass warns errs binds
+displayLintResults dflags pass extra_hdr warns errs binds
   | not (isEmptyBag errs)
   = do { log_action dflags dflags NoReason Err.SevDump noSrcSpan defaultDumpStyle
-           (vcat [ lint_banner "errors" (ppr pass), Err.pprMessageBag errs
+           (vcat [ lint_banner "errors" (ppr pass <+> extra_hdr), Err.pprMessageBag errs
                  , text "*** Offending Program ***"
                  , pprCoreBindings binds
                  , text "*** End of Offense ***" ])
@@ -296,7 +296,7 @@ displayLintResults dflags pass warns errs binds
   , not opt_NoDebugOutput
   , showLintWarnings pass
   = log_action dflags dflags NoReason Err.SevDump noSrcSpan defaultDumpStyle
-        (lint_banner "warnings" (ppr pass) $$ Err.pprMessageBag warns)
+        (lint_banner "warnings" (ppr pass <+> extra_hdr) $$ Err.pprMessageBag warns)
 
   | otherwise = return ()
   where
@@ -748,7 +748,7 @@ lintCoreExpr (Coercion co)
 lintCoreApp :: Var -> [CoreExpr] -> LintM Type -- returns type of the *function*
 -- Checks that this function can be applied to this many arguments, *not* the
 -- arguments themselves
-lintCoreApp var args 
+lintCoreApp var args
   = do  { checkL (isId var && not (isCoVar var))
                  (text "Non term variable" <+> ppr var)
 
