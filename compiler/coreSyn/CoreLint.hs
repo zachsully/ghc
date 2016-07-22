@@ -662,6 +662,8 @@ lintCoreExpr (Let (NonRec bndr rhs) body)
 lintCoreExpr (Let (Rec pairs) body)
   = lintAndScopeIds bndrs       $ \_ ->
     do  { checkL (null dups) (dupVars dups)
+        ; checkL (all isJoinId bndrs || all (not . isJoinId) bndrs) $
+            mkInconsistentRecMsg bndrs
         ; mapM_ (lintSingleBinding NotTopLevel Recursive) pairs
         ; addLoc (BodyOfLetRec bndrs) (lintCoreExpr body) }
   where
@@ -749,9 +751,13 @@ lintCoreApp var args
             Just join_arity ->
               do  { bad <- isBadJoin var'
                   ; checkL (not bad) $ mkJoinOutOfScopeMsg var'
+                  ; checkL (isJoinId_maybe var == Just join_arity) $
+                      mkJoinBndrOccMismatchMsg var' var
                   ; checkL (length args == join_arity) $
                       mkBadJoinCallMsg var' join_arity (length args) }
-            Nothing -> return ()
+            Nothing ->
+              do  { checkL (not (isJoinId var)) $
+                      mkJoinBndrOccMismatchMsg var' var }
         ; return (idType var') }
 
 {-
@@ -2081,6 +2087,25 @@ mkBadJoinCallMsg var ar nargs
            text "Join var:" <+> ppr var,
            text "Arity:" <+> ppr ar,
            text "Number of arguments:" <+> int nargs ]
+
+mkInconsistentRecMsg :: [Var] -> SDoc
+mkInconsistentRecMsg bndrs
+  = vcat [ text "Recursive let binders mix values and join points",
+           text "Binders:" <+> hsep (map ppr_with_details bndrs) ]
+  where
+    ppr_with_details bndr = ppr bndr <> ppr (idDetails bndr)
+
+mkJoinBndrOccMismatchMsg :: Var -> Var -> SDoc
+mkJoinBndrOccMismatchMsg bndr var
+  = vcat [ text "Mismatch in join point status between binder and occurrence",
+           text "Var:" <+> ppr bndr,
+           text "Binder:" <+> ppr_join_status bndr,
+           text "Occ:" <+> ppr_join_status var ]
+  where
+    ppr_join_status v = case details of JoinId _ -> ppr details
+                                        _        -> text "not a join id"
+      where
+        details = idDetails v
 
 pprLeftOrRight :: LeftOrRight -> MsgDoc
 pprLeftOrRight CLeft  = text "left"
