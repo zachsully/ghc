@@ -197,10 +197,13 @@ libCase :: LibCaseEnv
         -> CoreExpr
         -> CoreExpr
 
-libCase env (Var v)             = libCaseId env v
+libCase env (Var v)             = libCaseApp env v []
 libCase _   (Lit lit)           = Lit lit
 libCase _   (Type ty)           = Type ty
 libCase _   (Coercion co)       = Coercion co
+libCase env e@(App {})          | let (fun, args) = collectArgs e
+                                , Var v <- fun
+                                = libCaseApp env v args
 libCase env (App fun arg)       = App (libCase env fun) (libCase env arg)
 libCase env (Tick tickish body) = Tick tickish (libCase env body)
 libCase env (Cast e co)         = Cast (libCase env e) co
@@ -228,20 +231,25 @@ libCaseAlt env (con,args,rhs) = (con, args, libCase (addBinders env args) rhs)
 {-
 Ids
 ~~~
+
+To unfold, we can't just wrap the id itself in its binding, since it could be
+the invocation of a join point---in which case all occurrences must be
+saturated. Thus we carry along all the arguments.
 -}
 
-libCaseId :: LibCaseEnv -> Id -> CoreExpr
-libCaseId env v
+libCaseApp :: LibCaseEnv -> Id -> [CoreExpr] -> CoreExpr
+libCaseApp env v args
   | Just the_bind <- lookupRecId env v  -- It's a use of a recursive thing
   , notNull free_scruts                 -- with free vars scrutinised in RHS
-  = Let the_bind (Var v)
+  = Let the_bind expr'
 
   | otherwise
-  = Var v
+  = expr'
 
   where
     rec_id_level = lookupLevel env v
     free_scruts  = freeScruts env rec_id_level
+    expr'        = mkApps (Var v) (map (libCase env) args)
 
 freeScruts :: LibCaseEnv
            -> LibCaseLevel      -- Level of the recursive Id
