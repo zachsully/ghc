@@ -230,6 +230,48 @@ There is an infelicity though.  We may get something like
 The code for f duplicates that for g, without any real benefit. It
 won't really be executed, because calls to f will go via the inlining.
 
+Note [Don't CPR join points]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+There's no point in doing CPR on a join point. If the whole function is getting
+CPR'd, then the case expression around the worker function will get pushed into
+the join point by the simplifier, which will have the same effect that CPR would
+have - the result will be returned in an unboxed tuple.
+
+  f z = let join j x y = (x+1, y+1)
+        in case z of A -> j 1 2
+                     B -> j 2 3
+
+  =>
+
+  f z = case $wf z of (# a, b #) -> (a, b)
+  $wf z = case (let join j x y = (x+1, y+1)
+                in case z of A -> j 1 2
+                             B -> j 2 3) of (a, b) -> (# a, b #)
+
+  =>
+
+  f z = case $wf z of (# a, b #) -> (a, b)
+  $wf z = let join j x y = (# x+1, y+1 #)
+          in case z of A -> j 1 2
+                       B -> j 2 3
+
+Doing CPR on a join point would be tricky anyway, as the worker could not be
+a join point because it would not be tail-called. However, doing the *argument*
+part of W/W still works for join points, since the wrapper body will make a tail
+call:
+
+  f z = let join j x y = x + y
+        in ...
+
+  =>
+
+  f z = let join $wj x# y# = x# +# y#
+                 j x y = case x of I# x# ->
+                         case y of I# y# ->
+                         $wj x# y#
+        in ...
+
 Note [Wrapper activation]
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 When should the wrapper inlining be active?  It must not be active
@@ -330,7 +372,7 @@ splitFun :: DynFlags -> FamInstEnvs -> Id -> IdInfo -> [Demand] -> DmdResult -> 
 splitFun dflags fam_envs fn_id fn_info wrap_dmds res_info rhs
   = WARN( not (wrap_dmds `lengthIs` arity), ppr fn_id <+> (ppr arity $$ ppr wrap_dmds $$ ppr res_info) ) do
     -- The arity should match the signature
-    stuff <- mkWwBodies dflags fam_envs fun_ty wrap_dmds res_info one_shots
+    stuff <- mkWwBodies dflags fam_envs fun_ty wrap_dmds use_res_info one_shots
     case stuff of
       Just (work_demands, wrap_fn, work_fn) -> do
         work_uniq <- getUniqueM
@@ -392,7 +434,11 @@ splitFun dflags fam_envs fn_id fn_info wrap_dmds res_info rhs
                     -- The arity is set by the simplifier using exprEtaExpandArity
                     -- So it may be more than the number of top-level-visible lambdas
 
-    work_res_info = case returnsCPR_maybe res_info of
+    use_res_info  | isJoinId fn_id = topRes -- Note [Don't CPR join points]
+                  | otherwise      = res_info
+    work_res_info | isJoinId fn_id = res_info -- Worker remains CPR-able
+                  | otherwise
+                  = case returnsCPR_maybe res_info of
                        Just _  -> topRes    -- Cpr stuff done by wrapper; kill it here
                        Nothing -> res_info  -- Preserve exception/divergence
 
