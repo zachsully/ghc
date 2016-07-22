@@ -709,7 +709,7 @@ lintCont _ (Type _) _
 
 lintCont env e orig_cont
   | Var v <- fun
-  , isJoinVar env v
+  , isJoinId v
   = True -- Continuation will get thrown out anyway (besides some arguments)
   | otherwise
   = go orig_ty orig_cont
