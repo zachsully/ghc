@@ -379,8 +379,7 @@ lintCoreBindings dflags pass local_in_scope binds
        ; mapM lint_bind binds }
   where
     flags = LF { lf_check_global_ids = check_globals
-               , lf_check_inline_loop_breakers = check_lbs
-               , lf_check_join_points = check_joins }
+               , lf_check_inline_loop_breakers = check_lbs }
 
     -- See Note [Checking for global Ids]
     check_globals = case pass of
@@ -393,12 +392,6 @@ lintCoreBindings dflags pass local_in_scope binds
                       CoreDesugar    -> False
                       CoreDesugarOpt -> False
                       _              -> True
-    
-    -- See Note [Checking join points]
-    check_joins = case pass of
-                      CoreDoSimplify {}      -> True
-                      CoreDoFloatOutwards {} -> True
-                      _                      -> False
 
     binders = bindersOfBinds binds
     (_, dups) = removeDups compare binders
@@ -503,8 +496,7 @@ lintSingleBinding top_lvl_flag rec_flag (binder,rhs)
        ; flags <- getLintFlags
            
         -- Check that if the binder is top-level, it's not a join point
-       ; checkL (not (lf_check_join_points flags && isJoinId binder
-                                                 && isTopLevel top_lvl_flag))
+       ; checkL (not (isJoinId binder && isTopLevel top_lvl_flag))
            (mkTopJoinMsg binder)
 
        ; when (lf_check_inline_loop_breakers flags
@@ -554,11 +546,9 @@ lintSingleBinding top_lvl_flag rec_flag (binder,rhs)
 
 lintRhs :: Id -> CoreExpr -> LintM Type
 lintRhs bndr rhs
-  = do { flags <- getLintFlags 
-       ; case isJoinId_maybe bndr of
-           Just arity | lf_check_join_points flags
-                     -> lint_join_lams arity arity rhs
-           _         -> markAllJoinsBad $ lintCoreExpr rhs }
+  = case isJoinId_maybe bndr of
+      Just arity -> lint_join_lams arity arity rhs
+      _          -> markAllJoinsBad $ lintCoreExpr rhs
   where
     lint_join_lams 0 _ rhs
       = lintCoreExpr rhs
@@ -755,9 +745,7 @@ lintCoreApp var args
 
         ; checkDeadIdOcc var
         ; var' <- lookupIdInScope var
-        ; flags <- getLintFlags
-        ; when (lf_check_join_points flags) $
-          case isJoinId_maybe var' of
+        ; case isJoinId_maybe var' of
             Just join_arity ->
               do  { bad <- isBadJoin var'
                   ; checkL (not bad) $ mkJoinOutOfScopeMsg var'
@@ -1608,13 +1596,11 @@ data LintEnv
 data LintFlags
   = LF { lf_check_global_ids           :: Bool -- See Note [Checking for global Ids]
        , lf_check_inline_loop_breakers :: Bool -- See Note [Checking for INLINE loop breakers]
-       , lf_check_join_points          :: Bool -- See Note [Checking join points]
     }
 
 defaultLintFlags :: LintFlags
 defaultLintFlags = LF { lf_check_global_ids = False
-                      , lf_check_inline_loop_breakers = True
-                      , lf_check_join_points = False }
+                      , lf_check_inline_loop_breakers = True }
 
 newtype LintM a =
    LintM { unLintM ::
@@ -1628,14 +1614,6 @@ type WarnsAndErrs = (Bag MsgDoc, Bag MsgDoc)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Before CoreTidy, all locally-bound Ids must be LocalIds, even
 top-level ones. See Note [Exported LocalIds] and Trac #9857.
-
-Note [Checking join points]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Most passes are currently unaware of join points and treat them as functions
-(which is not wrong, so long as it's done consistently). The ones that *are*
-aware should be checked, however; in particular, the simplifier could wreak
-havoc if it's not careful.
 
 Note [Type substitution]
 ~~~~~~~~~~~~~~~~~~~~~~~~
