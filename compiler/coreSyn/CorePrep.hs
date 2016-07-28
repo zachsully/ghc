@@ -19,7 +19,7 @@ import OccurAnal
 
 import HscTypes
 import PrelNames
-import MkId             ( realWorldPrimId )
+import MkId             ( realWorldPrimId, voidArgId, voidPrimId )
 import CoreUtils
 import CoreArity
 import CoreFVs
@@ -200,7 +200,8 @@ corePrepTopBinds initialCorePrepEnv binds
   = go initialCorePrepEnv binds
   where
     go _   []             = return emptyFloats
-    go env (bind : binds) = do (env', bind') <- cpeBind TopLevel env bind
+    go env (bind : binds) = do (env', bind', maybe_wrap) <- cpeBind TopLevel env bind
+                               MASSERT(isNothing maybe_wrap)
                                binds' <- go env' binds
                                return (bind' `appendFloats` binds')
 
@@ -365,8 +366,9 @@ Into this one:
 -}
 
 cpeBind :: TopLevelFlag -> CorePrepEnv -> CoreBind
-        -> UniqSM (CorePrepEnv, Floats)
+        -> UniqSM (CorePrepEnv, Floats, Maybe (CoreExpr -> CoreExpr))
 cpeBind top_lvl env (NonRec bndr rhs)
+  | not (isJoinId bndr)
   = do { (_, bndr1) <- cpCloneBndr env bndr
        ; let dmd         = idDemandInfo bndr
              is_unlifted = isUnliftedType (idType bndr)
@@ -379,19 +381,53 @@ cpeBind top_lvl env (NonRec bndr rhs)
         -- We want bndr'' in the envt, because it records
         -- the evaluated-ness of the binder
        ; return (extendCorePrepEnv env bndr bndr2,
-                 addFloat floats new_float) }
+                 addFloat floats new_float,
+                 Nothing) }
+  | otherwise
+  = ASSERT(not (isTopLevel top_lvl))
+    do { (_, bndr1) <- cpCloneBndr env bndr
+       ; let dmd         = idDemandInfo bndr
+             is_unlifted = False -- we're making the RHS a function
+             (env1, bndr2, rhs1) = addVoidParamIfNeeded env bndr1 rhs
+       ; (floats, bndr3, rhs2) <- cpePair top_lvl NonRecursive
+                                          dmd
+                                          is_unlifted
+                                          env bndr2 rhs1
+       ; return (extendCorePrepEnv env1 bndr bndr3,
+                 floats,
+                 Just (Let (NonRec bndr3 rhs2))) }
 
 cpeBind top_lvl env (Rec pairs)
-  = do { let (bndrs,rhss) = unzip pairs
-       ; (env', bndrs1) <- cpCloneBndrs env (map fst pairs)
+  | not (isJoinId (head bndrs))
+  = do { (env', bndrs1) <- cpCloneBndrs env bndrs
        ; stuff <- zipWithM (cpePair top_lvl Recursive topDmd False env') bndrs1 rhss
 
        ; let (floats_s, bndrs2, rhss2) = unzip3 stuff
              all_pairs = foldrOL add_float (bndrs2 `zip` rhss2)
                                            (concatFloats floats_s)
        ; return (extendCorePrepEnvList env (bndrs `zip` bndrs2),
-                 unitFloat (FloatLet (Rec all_pairs))) }
+                 unitFloat (FloatLet (Rec all_pairs)),
+                 Nothing) }
+  | otherwise
+  = do { (env', bndrs1) <- cpCloneBndrs env bndrs
+       ; let (env'', pairs1) = mapAccumL add_void_param env' (bndrs1 `zip` rhss)
+             (bndrs2, rhss1) = unzip pairs1
+       ; stuff <- zipWithM (cpePair top_lvl Recursive topDmd False env'') bndrs2 rhss1
+
+       ; let (floats_s, bndrs2, rhss2) = unzip3 stuff
+             value_pairs = foldrOL add_float [] (concatFloats floats_s)
+             join_pairs  = bndrs2 `zip` rhss2
+                           -- joins may refer to values, but not vice versa
+       ; return (extendCorePrepEnvList env'' (bndrs `zip` bndrs2),
+                 unitFloat (FloatLet (Rec value_pairs)),
+                 Just (Let (Rec join_pairs))) }
   where
+    (bndrs, rhss) = unzip pairs
+
+    add_void_param env (bndr, rhs)
+      = case addVoidParamIfNeeded env bndr rhs of
+          (env', bndr', rhs') -> (env', (bndr', rhs'))
+
         -- Flatten all the floats, and the currrent
         -- group into a single giant Rec
     add_float (FloatLet (NonRec b r)) prs2 = (b,r) : prs2
@@ -433,7 +469,7 @@ cpePair top_lvl is_rec dmd is_unlifted env bndr rhs
 
        ; return (floats4, bndr', rhs4) }
   where
-    is_strict_or_unlifted = (isStrictDmd dmd) || is_unlifted
+    is_strict_or_unlifted = not (isJoinId bndr) && (isStrictDmd dmd || is_unlifted)
 
     platform = targetPlatform (cpe_dynFlags env)
 
@@ -535,9 +571,11 @@ runRW# strict (which we do in MkId), this can't happen
 cpeRhsE env expr@(App {}) = cpeApp env expr
 
 cpeRhsE env (Let bind expr)
-  = do { (env', new_binds) <- cpeBind NotTopLevel env bind
+  = do { (env', new_binds, maybe_wrap) <- cpeBind NotTopLevel env bind
        ; (floats, body) <- cpeRhsE env' expr
-       ; return (new_binds `appendFloats` floats, body) }
+       ; let body' = case maybe_wrap of Just wrap -> wrap body
+                                        Nothing   -> body
+       ; return (new_binds `appendFloats` floats, body') }
 
 cpeRhsE env (Tick tickish expr)
   | tickishPlace tickish == PlaceNonLam && tickish `tickishScopesLike` SoftScope
@@ -663,7 +701,7 @@ cpeApp env expr
 
         -- Now deal with the function
        ; case head of
-           Var fn_id -> do { sat_app <- maybeSaturate fn_id app depth
+           Var fn_id -> do { sat_app <- maybeSaturate env fn_id app depth
                            ; return (floats, sat_app) }
            _other    -> return (floats, app) }
 
@@ -792,8 +830,8 @@ maybeSaturate deals with saturating primops and constructors
 The type is the type of the entire application
 -}
 
-maybeSaturate :: Id -> CpeApp -> Int -> UniqSM CpeRhs
-maybeSaturate fn expr n_args
+maybeSaturate :: CorePrepEnv -> Id -> CpeApp -> Int -> UniqSM CpeRhs
+maybeSaturate env fn expr n_args
   | Just DataToTagOp <- isPrimOpId_maybe fn     -- DataToTag must have an evaluated arg
                                                 -- A gruesome special case
   = saturateDataToTag sat_expr
@@ -801,6 +839,9 @@ maybeSaturate fn expr n_args
   | hasNoBinding fn        -- There's no binding
   = return sat_expr
 
+  | addingVoidParam env fn
+  = return (App expr (Var voidPrimId))
+  
   | otherwise
   = return expr
   where
@@ -1174,6 +1215,7 @@ data CorePrepEnv
         , cpe_env             :: IdEnv Id   -- Clone local Ids
         , cpe_mkIntegerId     :: Id
         , cpe_integerSDataCon :: Maybe DataCon
+        , cpe_addingVoidParam :: IdSet
     }
 
 lookupMkIntegerName :: DynFlags -> HscEnv -> IO Id
@@ -1204,7 +1246,8 @@ mkInitialCorePrepEnv dflags hsc_env
                       cpe_dynFlags = dflags,
                       cpe_env = emptyVarEnv,
                       cpe_mkIntegerId = mkIntegerId,
-                      cpe_integerSDataCon = integerSDataCon
+                      cpe_integerSDataCon = integerSDataCon,
+                      cpe_addingVoidParam = emptyVarSet
                   }
 
 extendCorePrepEnv :: CorePrepEnv -> Id -> Id -> CorePrepEnv
@@ -1223,6 +1266,14 @@ lookupCorePrepEnv cpe id
 
 getMkIntegerId :: CorePrepEnv -> Id
 getMkIntegerId = cpe_mkIntegerId
+
+markAddingVoidParam :: CorePrepEnv -> Id -> CorePrepEnv
+markAddingVoidParam env id
+  = env { cpe_addingVoidParam = extendVarSet (cpe_addingVoidParam env) id }
+
+addingVoidParam :: CorePrepEnv -> Id -> Bool
+addingVoidParam env id
+  = id `elemVarEnv` cpe_addingVoidParam env
 
 ------------------------------------------------------------------------------
 -- Cloning binders
@@ -1315,3 +1366,33 @@ wrapTicks (Floats flag floats0) expr = (Floats flag floats1, expr')
                                              (ppr other)
         wrapBind t (NonRec binder rhs) = NonRec binder (mkTick t rhs)
         wrapBind t (Rec pairs)         = Rec (mapSnd (mkTick t) pairs)
+
+{-
+************************************************************************
+*                                                                      *
+                Join points
+*                                                                      *
+************************************************************************
+-}
+
+-- | Ensure that a join point's RHS takes at least one value parameter (as
+-- expected by codegen)
+addVoidParamIfNeeded :: CorePrepEnv
+                     -> CoreBndr      -- Original binder (must be join id)
+                     -> CoreExpr      -- Original RHS
+                     -> (CorePrepEnv, -- Env with id marked if adding
+                         CoreBndr,    -- New binder, possibly with new type
+                         CoreExpr)    -- New RHS
+addVoidParamIfNeeded env bndr expr
+  | all (not . isId) bndrs
+  = (env', bndr', expr')
+  | otherwise
+  = (env, bndr, expr)
+  where
+    (bndrs, body)   = collectBinders expr
+    Just join_arity = isJoinId_maybe bndr
+
+    expr' = mkCoreLams (bndrs ++ [voidArgId]) body
+    bndr' = bndr `setIdType` exprType expr'
+                 `asJoinId`  join_arity + 1
+    env'  = markAddingVoidParam env bndr'

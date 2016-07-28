@@ -518,8 +518,6 @@ decideSort rec_flag bind anal
     decide (bndr, rhs)
       | Just arity <- findGoodId anal bndr
       , arity == lambdaCount rhs -- TODO loosen restriction (carefully!)
-      , rec_flag == Recursive || not (isUnliftedType (idType bndr)) || exprOkForSpeculation rhs
-          -- TODO Eliminate let/app invariant for join points
       , good_type arity emptyVarSet (idType bndr)
       = Just arity
       | otherwise

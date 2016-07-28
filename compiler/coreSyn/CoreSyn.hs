@@ -355,7 +355,8 @@ The let/app invariant
      the right hand side of a non-recursive 'Let', and
      the argument of an 'App',
     /may/ be of unlifted type, but only if
-    the expression is ok-for-speculation.
+    the expression is ok-for-speculation
+    or the 'Let' is for a join point.
 
 This means that the let can be floated around
 without difficulty. For example, this is OK:

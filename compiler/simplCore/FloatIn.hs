@@ -23,7 +23,7 @@ import MkCore
 import CoreUtils        ( exprIsDupable, exprIsExpandable,
                           exprOkForSideEffects, mkTicks, isJoinBind )
 import CoreFVs
-import Id               ( isOneShotBndr, idType )
+import Id               ( isJoinId, isOneShotBndr, idType )
 import Var
 import Type             ( isUnliftedType )
 import VarSet
@@ -31,6 +31,7 @@ import Util
 import DynFlags
 import Outputable
 import Data.List( mapAccumL )
+import BasicTypes       ( RecFlag(..), isRec )
 
 {-
 Top-level interface function, @floatInwards@.  Note that we do not
@@ -164,7 +165,7 @@ fiExpr dflags to_drop ann_expr@(_,AnnApp {})
 
     mk_arg_fvs :: FreeVarSet -> CoreExprWithFVs -> (FreeVarSet, FreeVarSet)
     mk_arg_fvs extra_fvs ann_arg
-      | noFloatIntoRhs ann_arg
+      | noFloatIntoRhs False NonRecursive ann_arg
       = (extra_fvs `unionDVarSet` freeVarsOf ann_arg, emptyDVarSet)
       | otherwise
       = (extra_fvs, freeVarsOf ann_arg)
@@ -291,6 +292,15 @@ can't have unboxed bindings.
 So we make "extra_fvs" which is the rhs_fvs of such bindings, and
 arrange to dump bindings that bind extra_fvs before the entire let.
 
+We also don't float into ok-for-speculation unlifted RHSs, since they would no
+longer be ok-for-speculation and thus would violate the let/app invariant. See
+Note [Do not destroy the let/app invariant].
+
+However, since we *never* float out of a join point (and the invariant doesn't
+apply to them), we can always float into one. Non-recursive join points (and not
+recursive ones) are implicitly one-shot, so we float into a join point iff it's
+not recursive.
+
 Note [extra_fvs (2): free variables of rules]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Consider
@@ -308,11 +318,14 @@ fiExpr dflags to_drop (_,AnnLet (AnnNonRec id rhs) body)
     rhs_fvs  = freeVarsOf rhs
 
     rule_fvs = idRuleAndUnfoldingVarsDSet id        -- See Note [extra_fvs (2): free variables of rules]
-    extra_fvs | noFloatIntoRhs rhs = rule_fvs `unionDVarSet` freeVarsOf rhs
-              | otherwise          = rule_fvs
+    extra_fvs | noFloatIntoRhs is_join is_rec rhs = rule_fvs `unionDVarSet` freeVarsOf rhs
+              | otherwise                         = rule_fvs
         -- See Note [extra_fvs (1): avoid floating into RHS]
         -- No point in floating in only to float straight out again
-        -- Ditto ok-for-speculation unlifted RHSs
+        -- *Can't* float into ok-for-speculation unlifted RHSs
+        -- But do float into join points
+    is_join = isJoinId id
+    is_rec  = NonRecursive
 
     [shared_binds, extra_binds, rhs_binds, body_binds]
         = sepBindsByDropPoint dflags False False
@@ -341,8 +354,8 @@ fiExpr dflags to_drop (_,AnnLet (AnnRec bindings) body)
         -- See Note [extra_fvs (1,2)]
     rule_fvs = mapUnionDVarSet idRuleAndUnfoldingVarsDSet ids
     extra_fvs = rule_fvs `unionDVarSet`
-                unionDVarSets [ freeVarsOf rhs | rhs@(_, rhs') <- rhss
-                              , noFloatIntoExpr rhs' ]
+                unionDVarSets [ freeVarsOf rhs | (bndr, rhs) <- bindings
+                              , noFloatIntoRhs (isJoinId bndr) Recursive rhs ]
 
     (shared_binds:extra_binds:body_binds:rhss_binds)
         = sepBindsByDropPoint dflags False False
@@ -440,11 +453,15 @@ okToFloatInside bndrs = all ok bndrs
     ok b = not (isId b) || isOneShotBndr b
     -- Push the floats inside there are no non-one-shot value binders
 
-noFloatIntoRhs :: CoreExprWithFVs -> Bool
+noFloatIntoRhs :: Bool -> RecFlag -> CoreExprWithFVs -> Bool
 -- ^ True if it's a bad idea to float bindings into this RHS
 -- Preconditio:  rhs :: rhs_ty
-noFloatIntoRhs rhs@(_, rhs')
-  =  isUnliftedType rhs_ty   -- See Note [Do not destroy the let/app invariant]
+noFloatIntoRhs is_join is_rec rhs@(_, rhs')
+  |  is_join
+  =  isRec is_rec -- Joins are one-shot iff non-recursive
+  |  otherwise
+  =  isUnliftedType rhs_ty
+       -- See Note [Do not destroy the let/app invariant]
   || noFloatIntoExpr rhs'
   where
     rhs_ty = exprTypeFV rhs

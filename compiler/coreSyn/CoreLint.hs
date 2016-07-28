@@ -477,6 +477,7 @@ lintSingleBinding top_lvl_flag rec_flag (binder,rhs)
         -- Check the let/app invariant
         -- See Note [CoreSyn let/app invariant] in CoreSyn
        ; checkL (not (isUnliftedType binder_ty)
+            || isJoinId binder
             || (isNonRec rec_flag && exprOkForSpeculation rhs))
            (mkRhsPrimMsg binder rhs)
 

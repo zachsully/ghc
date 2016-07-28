@@ -18,7 +18,7 @@ import SimplUtils
 import FamInstEnv       ( FamInstEnv )
 import Literal          ( litIsLifted ) --, mkMachInt ) -- temporalily commented out. See #8326
 import Id
-import MkId             ( seqId, voidPrimId )
+import MkId             ( seqId )
 import MkCore           ( mkImpossibleExpr, castBottomExpr )
 import IdInfo
 import Name             ( Name, mkSystemVarName, isExternalName )
@@ -36,7 +36,7 @@ import CoreUnfold
 import CoreUtils
 --import PrimOp           ( tagToEnumKey ) -- temporalily commented out. See #8326
 import Rules            ( mkRuleInfo, lookupRule, getRules )
-import TysPrim          ( voidPrimTy ) --, intPrimTy ) -- temporalily commented out. See #8326
+--import TysPrim          ( intPrimTy ) -- temporalily commented out. See #8326
 import BasicTypes       ( TopLevelFlag(..), isTopLevel, RecFlag(..) )
 import MonadUtils       ( foldlM, mapAccumLM, liftIO )
 import Maybes           ( orElse )
@@ -2885,23 +2885,18 @@ mkDupableAlt env case_bndr (con, bndrs', rhs') = do
                   | otherwise    = not (isDeadBinder bndr)
                         -- The deadness info on the new Ids is preserved by simplBinders
 
-        ; (final_bndrs', final_args)    -- Note [Join point abstraction]
-                <- if (any isId used_bndrs')
-                   then return (used_bndrs', varsToCoreExprs used_bndrs')
-                    else do { rw_id <- newId (fsLit "w") voidPrimTy
-                            ; return ([setOneShotLambda rw_id], [Var voidPrimId]) }
-
-        ; join_bndr <- newId (fsLit "$j") (mkPiTypes final_bndrs' rhs_ty')
+        ; join_bndr <- newId (fsLit "$j") (mkPiTypes used_bndrs' rhs_ty')
                 -- Note [Funky mkPiTypes]
 
         ; let   -- We make the lambdas into one-shot-lambdas.  The
                 -- join point is sure to be applied at most once, and doing so
                 -- prevents the body of the join point being floated out by
                 -- the full laziness pass
-                really_final_bndrs     = map one_shot final_bndrs'
+                final_bndrs'           = map one_shot used_bndrs'
+                final_args             = varsToCoreExprs final_bndrs'
                 one_shot v | isId v    = setOneShotLambda v
                            | otherwise = v
-                join_rhs   = mkLams really_final_bndrs rhs'
+                join_rhs   = mkLams final_bndrs' rhs'
                 arity      = length (filter (not . isTyVar) final_bndrs')
                 join_arity = length final_bndrs'
                 join_call  = mkApps (Var join_bndr) final_args
@@ -3035,6 +3030,12 @@ type variables as well as term variables.
 
 Note [Join point abstraction]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+NB: This note is now historical. Now that "join point" is not a fuzzy concept
+but a formal syntactic construct (as distinguished by the JoinId constructor of
+IdDetails), each of these concerns is handled separately, with no need for a
+vestigial extra argument.
+
 Join points always have at least one value argument,
 for several reasons
 
