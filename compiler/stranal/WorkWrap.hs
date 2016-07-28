@@ -374,7 +374,7 @@ splitFun dflags fam_envs fn_id fn_info wrap_dmds res_info rhs
     -- The arity should match the signature
     stuff <- mkWwBodies dflags fam_envs fun_ty wrap_dmds use_res_info one_shots
     case stuff of
-      Just (work_demands, wrap_fn, work_fn) -> do
+      Just (work_demands, join_arity, wrap_fn, work_fn) -> do
         work_uniq <- getUniqueM
         let work_rhs = work_fn rhs
             work_prag = InlinePragma { inl_src = "{-# INLINE"
@@ -385,7 +385,10 @@ splitFun dflags fam_envs fn_id fn_info wrap_dmds res_info rhs
               -- idl_inline: copy from fn_id; see Note [Worker-wrapper for INLINABLE functions]
               -- idl_act: see Note [Activation for INLINABLE workers]
               -- inl_rule: it does not make sense for workers to be constructorlike.
-
+            work_join_arity | isJoinId fn_id = Just join_arity
+                            | otherwise      = Nothing
+              -- worker is join point iff wrapper is join point
+              -- (see Note [Don't CPR join points])
             work_id  = mkWorkerId work_uniq fn_id (exprType work_rhs)
                         `setIdOccInfo` occInfo fn_info
                                 -- Copy over occurrence info from parent
@@ -405,6 +408,7 @@ splitFun dflags fam_envs fn_id fn_info wrap_dmds res_info rhs
                         `setIdArity` exprArity work_rhs
                                 -- Set the arity so that the Core Lint check that the
                                 -- arity is consistent with the demand type goes through
+                        `asJoinId_maybe` work_join_arity
 
             wrap_act  = ActiveAfter "0" 0
             wrap_rhs  = wrap_fn work_id

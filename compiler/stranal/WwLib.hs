@@ -15,10 +15,11 @@ module WwLib ( mkWwBodies, mkWWstr, mkWorkerArgs
 import CoreSyn
 import CoreUtils        ( exprType, mkCast )
 import Id
-import IdInfo           ( vanillaIdInfo )
+import IdInfo           ( JoinArity, vanillaIdInfo )
 import DataCon
 import Demand
-import MkCore           ( mkRuntimeErrorApp, aBSENT_ERROR_ID, mkCoreUbxTup )
+import MkCore           ( mkRuntimeErrorApp, aBSENT_ERROR_ID, mkCoreUbxTup
+                        , mkCoreApp, mkCoreLet )
 import MkId             ( voidArgId, voidPrimId )
 import TysPrim          ( voidPrimTy )
 import TysWiredIn       ( tupleDataCon )
@@ -113,6 +114,7 @@ mkWwBodies :: DynFlags
            -> DmdResult                             -- Info about function result
            -> [OneShotInfo]                         -- One-shot-ness of the function, value args only
            -> UniqSM (Maybe ([Demand],              -- Demands for worker (value) args
+                             JoinArity,             -- Number of worker (type OR value) args
                              Id -> CoreExpr,        -- Wrapper body, lacking only the worker Id
                              CoreExpr -> CoreExpr)) -- Worker body, lacking the original function rhs
 
@@ -143,7 +145,7 @@ mkWwBodies dflags fam_envs fun_ty demands res_info one_shots
               worker_body = mkLams work_lam_args. work_fn_str . work_fn_cpr . work_fn_args
 
         ; if useful1 && not (only_one_void_argument) || useful2
-          then return (Just (worker_args_dmds, wrapper_body, worker_body))
+          then return (Just (worker_args_dmds, length work_call_args, wrapper_body, worker_body))
           else return Nothing
         }
         -- We use an INLINE unconditionally, even if the wrapper turns out to be
@@ -251,6 +253,36 @@ Then we drop the unused args to give
 If we made the void-arg one-shot we might inline an expensive
 computation for y, which would be terrible!
 
+Note [Join points and beta-redexes]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Originally, the worker would invoke the original function by calling it with
+arguments, thus producing a beta-redex for the simplifier to munch away:
+
+  \x y z -> e => (\x y z -> e) wx wy wz
+
+Now that we have special rules about join points, however, this is Not Good if
+the original function is itself a join point, as then it may contain invocations
+of other join points:
+
+  let join j1 x = ...
+  let join j2 y = if y == 0 then 0 else j1 y
+
+  =>
+
+  let join j1 x = ...
+  let join $wj2 y# = let wy = I# y# in (\y -> if y == 0 then 0 else j1 y) wy
+  let join j2 y = case y of I# y# -> $wj2 y#
+
+There can't be an intervening lambda between a join point's declaration and its
+occurrences, so $wj2 here is wrong. But of course, this is easy enough to fix:
+
+  ...
+  let join $wj2 y# = let wy = I# y# in let y = wy in if y == 0 then 0 else j1 y
+  ...
+
+Hence we simply do the beta-reduction here. (This would be harder if we had to
+worry about hygiene, but luckily wy is freshly generated.)
 
 ************************************************************************
 *                                                                      *
@@ -311,7 +343,7 @@ mkWWargs subst fun_ty arg_info
               <- mkWWargs subst fun_ty' arg_info'
         ; return (id : wrap_args,
                   Lam id . wrap_fn_args,
-                  work_fn_args . (`App` varToCoreExpr id),
+                  apply_or_bind_then work_fn_args (varToCoreExpr id),
                   res_ty) }
 
   | Just (tv, fun_ty') <- splitForAllTy_maybe fun_ty
@@ -322,7 +354,7 @@ mkWWargs subst fun_ty arg_info
              <- mkWWargs subst' fun_ty' arg_info
         ; return (tv' : wrap_args,
                   Lam tv' . wrap_fn_args,
-                  work_fn_args . (`mkTyApps` [mkTyVarTy tv']),
+                  apply_or_bind_then work_fn_args (mkTyArg (mkTyVarTy tv')),
                   res_ty) }
 
   | Just (co, rep_ty) <- topNormaliseNewType_maybe fun_ty
@@ -344,7 +376,11 @@ mkWWargs subst fun_ty arg_info
   | otherwise
   = WARN( True, ppr fun_ty )                    -- Should not happen: if there is a demand
     return ([], id, id, substTy subst fun_ty)   -- then there should be a function arrow
-
+  where
+    apply_or_bind_then k arg (Lam bndr body)
+      = mkCoreLet (NonRec bndr arg) (k body)    -- Important that arg is fresh!
+    apply_or_bind_then k arg fun
+      = k $ mkCoreApp (text "mkWWargs") fun arg
 applyToVars :: [Var] -> CoreExpr -> CoreExpr
 applyToVars vars fn = mkVarApps fn vars
 
