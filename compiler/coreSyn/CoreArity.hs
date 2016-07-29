@@ -33,7 +33,7 @@ import DynFlags ( DynFlags, GeneralFlag(..), gopt )
 import Outputable
 import FastString
 import Pair
-import Util     ( debugIsOn )
+import Util     ( count, debugIsOn )
 
 {-
 ************************************************************************
@@ -907,17 +907,29 @@ pushCoercion co1 (EtaCo co2 : eis)
 pushCoercion co eis = EtaCo co : eis
 
 --------------
+-- | Alter a local binder according to its context. A join point will have the
+-- EtaInfos applied to its RHS, so its type, arity, and call arity may all
+-- change. (Its join arity will not, since eta-expansion does not affect the
+-- *occurrences* of join points.)
 etaInfoLocalBndr :: CoreBndr -> [EtaInfo] -> CoreBndr
 etaInfoLocalBndr bndr eis
   = case isJoinId_maybe bndr of
-      Just arity -> bndr `setIdType` go arity (idType bndr) eis
+      Just arity -> bndr `setIdType`      skip_then_app arity (idType bndr) eis
+                         `setIdArity`     idArity bndr     - n_val_args
+                         `setIdCallArity` idCallArity bndr - n_val_args
       Nothing    -> bndr
   where
-    go 0 ty eis
+    n_val_args = count is_val_var eis
+    is_val_var (EtaVar v) = isId v
+    is_val_var _          = False
+
+    -- | Skip n arguments in the type, then apply the given EtaInfos to the
+    -- return type.
+    skip_then_app 0 ty eis
       = app ty eis
-    go n ty eis
+    skip_then_app n ty eis
       | Just (arg_bndr, res_ty) <- splitPiTy_maybe ty -- also applies to funcs
-      = mkForAllTy arg_bndr (go (n-1) res_ty eis)
+      = mkForAllTy arg_bndr (skip_then_app (n-1) res_ty eis)
       | otherwise = pprPanic "etaInfoLocalBndr" (pprBndr LetBind bndr)
 
     app ty []
