@@ -528,7 +528,7 @@ lvlMFE strict_ctxt env ann_expr
 
   | otherwise   -- Float it out!
   = do { expr' <- lvlFloatRhs abs_vars dest_lvl env ann_expr
-       ; var   <- newLvlVar expr' is_bot
+       ; var   <- newLvlVar expr' is_bot join_arity_maybe
        ; return (Let (NonRec (TB var (FloatMe dest_lvl)) expr')
                      (mkVarApps (Var var) abs_vars)) }
   where
@@ -537,6 +537,11 @@ lvlMFE strict_ctxt env ann_expr
     is_bot   = exprIsBottom (deTagExpr expr)      -- Note [Bottoming floats]
     dest_lvl = destLevel env fvs (isFunction (deTagExpr expr)) is_bot
     abs_vars = abstractVars dest_lvl env fvs
+
+        -- Note [Join points and MFEs]
+    need_join = any (\v -> isId v && remainsJoinId env v) (dVarSetElems fvs)
+    join_arity_maybe | need_join = Just (length abs_vars)
+                     | otherwise = Nothing
 
         -- A decision to float entails let-binding this thing, and we only do
         -- that if we'll escape a value lambda, or will go to the top level.
@@ -623,6 +628,43 @@ Because in doing so we share a tiny bit of computation (the switch) but
 in exchange we build a thunk, which is bad.  This case reduces allocation
 by 7% in spectral/puzzle (a rather strange benchmark) and 1.2% in real/fem.
 Doesn't change any other allocation at all.
+
+Note [Join points and MFEs]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When we create an MFE float, if it has a free join variable, the new binding
+must be a join point:
+
+  let join j x = ...
+  in case a of A -> ...
+               B -> j 3
+
+  =>
+
+  let join j x = ...
+      join k = j 3 -- only valid because k is a join point
+  in case a of A -> ...
+               B -> k
+
+Normally we're very circumspect about floating join points, but in this case
+it's definitely safe because we can only be floating it as far as another join
+binding. In other words, one might worry about a situation like:
+
+  let join j x = ...
+  in case a of A -> ...
+               B -> f (j 3)
+
+  =>
+
+  let join j x = ...
+  in case a of A -> ...
+               B -> f (let join k = j 3 in k)
+
+Here we have created the MFE float k, and are contemplating floating it up to
+j. This would indeed be an invalid operation on a join point like k. However,
+this example is ill-typed to begin with, since this time the call to j is not a
+tail call. In summary, the very occurrence of the join variable in the MFE is
+proof that we can float the MFE as far as that binding.
 -}
 
 annotateBotStr :: Id -> Maybe (Arity, StrictSig) -> Id
@@ -1270,6 +1312,11 @@ lookupVar le v = case lookupVarEnv (le_env le) v of
                     Just (v', vs') -> mkVarApps (Var v') vs'
                     _              -> Var v
 
+remainsJoinId :: LevelEnv -> Id -> Bool
+remainsJoinId le v = case lookupVarEnv (le_env le) v of
+                         Just (v', _) -> isJoinId v'
+                         Nothing      -> isJoinId v
+
 abstractVars :: Level -> LevelEnv -> DVarSet -> [OutVar]
         -- Find the variables in fvs, free vars of the target expresion,
         -- whose level is greater than the destination level
@@ -1359,15 +1406,17 @@ newPolyBndrs dest_lvl
 
 newLvlVar :: LevelledExpr        -- The RHS of the new binding
           -> Bool                -- Whether it is bottom
+          -> Maybe JoinArity     -- Its join arity, if it is a join point
           -> LvlM Id
-newLvlVar lvld_rhs is_bot
+newLvlVar lvld_rhs is_bot join_arity_maybe
   = do { uniq <- getUniqueM
-       ; return (add_bot_info (mkLocalIdOrCoVar (mk_name uniq) rhs_ty)) }
+       ; return (add_bot_info (add_join_info (mkLocalIdOrCoVar (mk_name uniq) rhs_ty))) }
   where
     add_bot_info var  -- We could call annotateBotStr always, but the is_bot
                       -- flag just tells us when we don't need to do so
        | is_bot    = annotateBotStr var (exprBotStrictness_maybe de_tagged_rhs)
        | otherwise = var
+    add_join_info var = var `asJoinId_maybe` join_arity_maybe
     de_tagged_rhs = deTagExpr lvld_rhs
     rhs_ty = exprType de_tagged_rhs
     mk_name uniq = mkSystemVarName uniq (mkFastString "lvl")
