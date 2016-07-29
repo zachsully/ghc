@@ -386,15 +386,10 @@ cpeBind top_lvl env (NonRec bndr rhs)
   | otherwise
   = ASSERT(not (isTopLevel top_lvl))
     do { (_, bndr1) <- cpCloneBndr env bndr
-       ; let dmd         = idDemandInfo bndr
-             is_unlifted = False -- we're making the RHS a function
-             (env1, bndr2, rhs1) = addVoidParamIfNeeded env bndr1 rhs
-       ; (floats, bndr3, rhs2) <- cpePair top_lvl NonRecursive
-                                          dmd
-                                          is_unlifted
-                                          env bndr2 rhs1
+       ; let (env1, bndr2, rhs1) = addVoidParamIfNeeded env bndr1 rhs
+       ; (bndr3, rhs2) <- cpeJoinPair env bndr2 rhs1
        ; return (extendCorePrepEnv env1 bndr bndr3,
-                 floats,
+                 emptyFloats,
                  Just (Let (NonRec bndr3 rhs2))) }
 
 cpeBind top_lvl env (Rec pairs)
@@ -412,15 +407,12 @@ cpeBind top_lvl env (Rec pairs)
   = do { (env', bndrs1) <- cpCloneBndrs env bndrs
        ; let (env'', pairs1) = mapAccumL add_void_param env' (bndrs1 `zip` rhss)
              (bndrs2, rhss1) = unzip pairs1
-       ; stuff <- zipWithM (cpePair top_lvl Recursive topDmd False env'') bndrs2 rhss1
+       ; pairs2 <- zipWithM (cpeJoinPair env'') bndrs2 rhss1
 
-       ; let (floats_s, bndrs2, rhss2) = unzip3 stuff
-             value_pairs = foldrOL add_float [] (concatFloats floats_s)
-             join_pairs  = bndrs2 `zip` rhss2
-                           -- joins may refer to values, but not vice versa
+       ; let bndrs2 = map fst pairs2
        ; return (extendCorePrepEnvList env'' (bndrs `zip` bndrs2),
-                 unitFloat (FloatLet (Rec value_pairs)),
-                 Just (Let (Rec join_pairs))) }
+                 emptyFloats,
+                 Just (Let (Rec pairs2))) }
   where
     (bndrs, rhss) = unzip pairs
 
@@ -440,7 +432,8 @@ cpePair :: TopLevelFlag -> RecFlag -> Demand -> Bool
         -> UniqSM (Floats, Id, CpeRhs)
 -- Used for all bindings
 cpePair top_lvl is_rec dmd is_unlifted env bndr rhs
-  = do { (floats1, rhs1) <- cpeRhsE env rhs
+  = ASSERT(not (isJoinId bndr))
+    do { (floats1, rhs1) <- cpeRhsE env rhs
 
        -- See if we are allowed to float this stuff out of the RHS
        ; (floats2, rhs2) <- float_from_rhs floats1 rhs1
@@ -523,6 +516,26 @@ It's a bizarre case: why is the arity on the Id wrong?  Reason
 When InlineMe notes go away this won't happen any more.  But
 it seems good for CorePrep to be robust.
 -}
+
+---------------
+cpeJoinPair :: CorePrepEnv -> JoinId -> CoreExpr
+            -> UniqSM (JoinId, CpeRhs)
+-- Used for all join bindings
+cpeJoinPair env bndr rhs
+  = do { let Just join_arity = isJoinId_maybe bndr
+             (bndrs, body)   = collectNBinders join_arity rhs
+
+       ; (env', bndrs') <- cpCloneBndrs env bndrs
+
+       ; (floats, body1) <- cpeRhsE env' body
+
+       ; body2 <- rhsToBodyNF body1
+
+       ; let body3 = wrapBinds floats body2
+             rhs'  = mkCoreLams bndrs' body3
+             bndr' = bndr `setIdUnfolding` evaldUnfolding
+
+       ; return (bndr', rhs') }
 
 -- ---------------------------------------------------------------------------
 --              CpeRhs: produces a result satisfying CpeRhs

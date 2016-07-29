@@ -31,7 +31,7 @@ module CoreSyn (
 
         -- ** Simple 'Expr' access functions and predicates
         bindersOf, bindersOfBinds, rhssOfBind, rhssOfAlts,
-        collectBinders, collectTyAndValBinders,
+        collectBinders, collectTyAndValBinders, collectNBinders,
         collectArgs, collectArgsTicks, flattenBinds,
 
         exprToType, exprToCoercion_maybe,
@@ -1635,6 +1635,9 @@ collectBinders               :: Expr b -> ([b],         Expr b)
 -- will pull out the binders for a, b, c, and Baz, but not for d or anything
 -- within Blob. This is to coordinate with tcSplitSigmaTy.
 collectTyAndValBinders       :: CoreExpr -> ([TyVar], [Id], CoreExpr)
+-- | Strip off exactly N leading lambdas (type or value). Good for use with
+-- join points.
+collectNBinders              :: Int -> Expr b -> ([b], Expr b)
 
 collectBinders expr
   = go [] expr
@@ -1652,6 +1655,13 @@ collectTyAndValBinders expr
         go_fun tvs ids (Lam b e)
           | isId b          = go_fun tvs (b:ids) e
         go_fun tvs ids e    = (reverse tvs, reverse ids, e)
+
+collectNBinders orig_n orig_expr
+  = go orig_n [] orig_expr
+  where
+    go 0 bs expr      = (reverse bs, expr)
+    go n bs (Lam b e) = go (n-1) (b:bs) e
+    go _ bs _         = pprPanic "collectNBinders" $ int orig_n
 
 -- | Takes a nested application expression and returns the the function
 -- being applied and the arguments to which it is applied
