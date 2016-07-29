@@ -968,7 +968,7 @@ etaInfoApp subst (Let b e) eis
 etaInfoApp subst (Tick t e) eis
   = Tick (substTickish subst t) (etaInfoApp subst e eis)
 
-etaInfoApp subst expr@(App {}) _
+etaInfoApp subst expr _
   | (Var fun, _) <- collectArgs expr
   , Var fun' <- lookupIdSubst (text "etaInfoApp" <+> ppr fun) subst fun
   , isJoinId fun'
