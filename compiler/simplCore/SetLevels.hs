@@ -76,7 +76,6 @@ import CoreUtils        ( exprType, exprOkForSpeculation, exprIsHNF, exprIsBotto
 import CoreArity        ( exprBotStrictness_maybe )
 import CoreFVs          -- all of it
 import Coercion         ( tyCoVarsOfCoDSet )
-import CoreJoins
 import CoreSubst
 import MkCore           ( sortQuantVars )
 
@@ -260,7 +259,7 @@ setLevels dflags float_lams binds us
 
 lvlTopBind :: DynFlags -> LevelEnv -> Bind Id -> LvlM (LevelledBind, LevelEnv)
 lvlTopBind dflags env (NonRec bndr rhs)
-  = do { rhs' <- lvlExpr env (analyzeFVs (initFVEnv $ finalPass env) (findJoinsInExpr rhs))
+  = do { rhs' <- lvlExpr env (analyzeFVs (initFVEnv $ finalPass env) rhs)
        ; let  -- lambda lifting impedes specialization, so: if the old
               -- RHS has an unstable unfolding that will survive
               -- TidyPgm, "stablize it" so that it ends up in the .hi
@@ -282,7 +281,7 @@ lvlTopBind _ env (Rec pairs)
   = do let (bndrs,rhss) = unzip pairs
            (env', bndrs') = substAndLvlBndrs Recursive env tOP_LEVEL
                               [ boringBinder bndr | bndr <- bndrs ]
-       rhss' <- mapM (lvlExpr env' . analyzeFVs (initFVEnv $ finalPass env) . findJoinsInExpr) rhss
+       rhss' <- mapM (lvlExpr env' . analyzeFVs (initFVEnv $ finalPass env)) rhss
        return (Rec (bndrs' `zip` rhss'), env')
 
 {-

@@ -1,12 +1,11 @@
 {-# LANGUAGE CPP, ViewPatterns #-}
 
 module CoreJoins (
-  findJoinsInPgm, findJoinsInExpr, eraseJoins,
+  findJoinsInPgm, findJoinsInExpr,
 ) where
 
 import BasicTypes
 import CoreSyn
-import CoreUtils
 import Id
 import IdInfo
 import Maybes
@@ -29,28 +28,6 @@ findJoinsInExpr :: CoreExpr -> CoreExpr
 findJoinsInExpr expr = initFJ $ do (expr', anal) <- fjExpr expr
                                    MASSERT(isEmptyJoinAnal anal)
                                    return expr'
-
-eraseJoins :: CoreProgram -> CoreProgram
--- ^ Remove all join points from a program, turning them into ordinary let
--- bindings. This is generally only useful for testing how useful join points
--- are.
-eraseJoins = map doBind
-  where
-    doBind (NonRec bndr rhs) = NonRec (zapBndrSort bndr) (doExpr rhs)
-    doBind (Rec pairs) = Rec [ (zapBndrSort bndr, doExpr rhs)
-                             | (bndr, rhs) <- pairs ]
-
-    doExpr (Var var)       = Var (zapBndrSort var)
-    doExpr (App fun arg)   = App (doExpr fun) (doExpr arg)
-    doExpr (Lam bndr body) = Lam (zapBndrSort bndr) (doExpr body)
-    doExpr (Let bind body) = Let (doBind bind) (doExpr body)
-    doExpr (Case scrut bndr ty alts)
-      = Case (doExpr scrut) (zapBndrSort bndr) ty
-             [ (con, map zapBndrSort bndrs, doExpr rhs)
-             | (con, bndrs, rhs) <- alts ]
-    doExpr (Cast expr co)  = Cast (doExpr expr) co
-    doExpr (Tick ti expr)  = Tick ti (doExpr expr)
-    doExpr other = other
 
 zapBndrSort :: Var -> Var
 zapBndrSort b | isId b    = zapJoinId b
