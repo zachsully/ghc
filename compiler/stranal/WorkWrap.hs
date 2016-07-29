@@ -363,7 +363,7 @@ tryWW dflags fam_envs is_rec fn_id rhs
                                      mkClosedStrictSig wrap_dmds res_info
 
     is_fun    = notNull wrap_dmds
-    is_thunk  = not is_fun && not (exprIsHNF rhs)
+    is_thunk  = not is_fun && not (exprIsHNF rhs) && not (isJoinId fn_id)
 
 
 ---------------------
@@ -522,7 +522,8 @@ then the splitting will go deeper too.
 
 splitThunk :: DynFlags -> FamInstEnvs -> RecFlag -> Var -> Expr Var -> UniqSM [(Var, Expr Var)]
 splitThunk dflags fam_envs is_rec fn_id rhs
-  = do { (useful,_, wrap_fn, work_fn) <- mkWWstr dflags fam_envs [fn_id]
+  = ASSERT(not (isJoinId fn_id))
+    do { (useful,_, wrap_fn, work_fn) <- mkWWstr dflags fam_envs [fn_id]
        ; let res = [ (fn_id, Let (NonRec fn_id rhs) (wrap_fn (work_fn (Var fn_id)))) ]
        ; if useful then ASSERT2( isNonRec is_rec, ppr fn_id ) -- The thunk must be non-recursive
                    return res
