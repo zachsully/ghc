@@ -10,7 +10,7 @@ module IfaceSyn (
 
         IfaceDecl(..), IfaceFamTyConFlav(..), IfaceClassOp(..), IfaceAT(..),
         IfaceConDecl(..), IfaceConDecls(..), IfaceEqSpec,
-        IfaceExpr(..), IfaceAlt, IfaceLetBndr(..),
+        IfaceExpr(..), IfaceAlt, IfaceLetBndr(..), IfaceJoinInfo(..),
         IfaceBinding(..), IfaceConAlt(..),
         IfaceIdInfo(..), IfaceIdDetails(..), IfaceUnfolding(..),
         IfaceInfoItem(..), IfaceRule(..), IfaceAnnotation(..), IfaceAnnTarget,
@@ -62,6 +62,7 @@ import StaticFlags (opt_PprStyle_Debug)
 import Util( filterOut, filterByList )
 import DataCon (SrcStrictness(..), SrcUnpackedness(..))
 import Lexeme (isLexSym)
+import IdInfo (JoinArity)
 
 import Control.Monad
 import System.IO.Unsafe
@@ -470,7 +471,10 @@ data IfaceBinding
 -- IfaceLetBndr is like IfaceIdBndr, but has IdInfo too
 -- It's used for *non-top-level* let/rec binders
 -- See Note [IdInfo on nested let-bindings]
-data IfaceLetBndr = IfLetBndr IfLclName IfaceType IfaceIdInfo
+data IfaceLetBndr = IfLetBndr IfLclName IfaceType IfaceIdInfo IfaceJoinInfo
+
+data IfaceJoinInfo = IfaceNotJoinPoint
+                   | IfaceJoinPoint JoinArity
 
 {-
 Note [Empty case alternatives]
@@ -1072,8 +1076,8 @@ ppr_con_bs :: IfaceConAlt -> [IfLclName] -> SDoc
 ppr_con_bs con bs = ppr con <+> hsep (map ppr bs)
 
 ppr_bind :: (IfaceLetBndr, IfaceExpr) -> SDoc
-ppr_bind (IfLetBndr b ty info, rhs)
-  = sep [hang (ppr b <+> dcolon <+> ppr ty) 2 (ppr info),
+ppr_bind (IfLetBndr b ty info ji, rhs)
+  = sep [hang (ppr b <+> dcolon <+> ppr ty) 2 (ppr ji <+> ppr info),
          equals <+> pprIfaceExpr noParens rhs]
 
 ------------------
@@ -1119,6 +1123,10 @@ instance Outputable IfaceInfoItem where
   ppr (HsArity arity)       = text "Arity:" <+> int arity
   ppr (HsStrictness str) = text "Strictness:" <+> pprIfaceStrictSig str
   ppr HsNoCafRefs           = text "HasNoCafRefs"
+
+instance Outputable IfaceJoinInfo where
+  ppr IfaceNotJoinPoint   = empty
+  ppr (IfaceJoinPoint ar) = angleBrackets (text "join" <+> ppr ar)
 
 instance Outputable IfaceUnfolding where
   ppr (IfCompulsory e)     = text "<compulsory>" <+> parens (ppr e)
@@ -1326,8 +1334,8 @@ freeNamesIfLetBndr :: IfaceLetBndr -> NameSet
 -- Remember IfaceLetBndr is used only for *nested* bindings
 -- The IdInfo can contain an unfolding (in the case of
 -- local INLINE pragmas), so look there too
-freeNamesIfLetBndr (IfLetBndr _name ty info) = freeNamesIfType ty
-                                             &&& freeNamesIfIdInfo info
+freeNamesIfLetBndr (IfLetBndr _name ty info _ji) = freeNamesIfType ty
+                                                 &&& freeNamesIfIdInfo info
 
 freeNamesIfTvBndr :: IfaceTvBndr -> NameSet
 freeNamesIfTvBndr (_fs,k) = freeNamesIfKind k
@@ -1995,14 +2003,27 @@ instance Binary IfaceBinding where
             _ -> do { ac <- get bh; return (IfaceRec ac) }
 
 instance Binary IfaceLetBndr where
-    put_ bh (IfLetBndr a b c) = do
+    put_ bh (IfLetBndr a b c d) = do
             put_ bh a
             put_ bh b
             put_ bh c
+            put_ bh d
     get bh = do a <- get bh
                 b <- get bh
                 c <- get bh
-                return (IfLetBndr a b c)
+                d <- get bh
+                return (IfLetBndr a b c d)
+
+instance Binary IfaceJoinInfo where
+    put_ bh IfaceNotJoinPoint = putByte bh 0
+    put_ bh (IfaceJoinPoint ar) = do
+        putByte bh 1
+        put_ bh ar
+    get bh = do
+        h <- getByte bh
+        case h of
+            0 -> return IfaceNotJoinPoint
+            _ -> liftM IfaceJoinPoint $ get bh
 
 instance Binary IfaceTyConParent where
     put_ bh IfNoParent = putByte bh 0
