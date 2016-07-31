@@ -614,7 +614,7 @@ dmdAnalRhs top_lvl rec_flag env id rhs
     trim_sums = not (isTopLevel top_lvl) -- See Note [CPR for sum types]
 
     -- See Note [CPR for thunks]
-    is_thunk = not (exprIsHNF rhs)
+    is_thunk = not (exprIsHNF rhs) && not (isJoinId id)
     not_strict
        =  isTopLevel top_lvl  -- Top level and recursive things don't
        || isJust rec_flag     -- get their demandInfo set at all
