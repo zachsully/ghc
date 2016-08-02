@@ -695,7 +695,7 @@ simplifyPgmIO pass@(CoreDoSimplify max_iterations mode)
                      occurAnalysePgm this_mod active_rule rules
                                      maybeVects maybeVectVars binds
                ; tagged_binds = {-# SCC "FindJoins" #-}
-                     if sm_context_subst mode then findJoinsInPgm occ_binds
+                     if sm_context_subst mode then findJoinsInPgm dflags occ_binds
                                               else occ_binds
                } ;
            Err.dumpIfSet_dyn dflags Opt_D_dump_occur_anal "Occurrence analysis"

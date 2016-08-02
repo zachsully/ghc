@@ -1,11 +1,12 @@
 {-# LANGUAGE CPP, ViewPatterns #-}
 
 module CoreJoins (
-  findJoinsInPgm, findJoinsInExpr,
+  findJoinsInPgm
 ) where
 
 import BasicTypes
 import CoreSyn
+import DynFlags
 import Id
 import IdInfo
 import Maybes
@@ -21,13 +22,12 @@ import Control.Monad
 
 #include "HsVersions.h"
 
-findJoinsInPgm :: CoreProgram -> CoreProgram
-findJoinsInPgm pgm = map (\bind -> propagateBinderSorts $ initFJ (fjTopBind bind)) pgm
-
-findJoinsInExpr :: CoreExpr -> CoreExpr
-findJoinsInExpr expr = initFJ $ do (expr', anal) <- fjExpr expr
-                                   MASSERT(isEmptyJoinAnal anal)
-                                   return expr'
+findJoinsInPgm :: DynFlags -> CoreProgram -> CoreProgram
+findJoinsInPgm dflags pgm
+  | gopt Opt_ContextSubstitution dflags
+  = map (\bind -> propagateBinderSorts $ initFJ (fjTopBind bind)) pgm
+  | otherwise
+  = pgm
 
 zapBndrSort :: Var -> Var
 zapBndrSort b | isId b    = zapJoinId b
