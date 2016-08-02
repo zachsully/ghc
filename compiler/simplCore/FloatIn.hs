@@ -23,6 +23,7 @@ import MkCore
 import CoreUtils        ( exprIsDupable, exprIsExpandable,
                           exprOkForSideEffects, mkTicks, isJoinBind )
 import CoreFVs
+import CoreJoins
 import Id               ( isJoinId, isOneShotBndr, idType )
 import Var
 import Type             ( isUnliftedType )
@@ -39,7 +40,8 @@ actually float any bindings downwards from the top-level.
 -}
 
 floatInwards :: DynFlags -> CoreProgram -> CoreProgram
-floatInwards dflags = map fi_top_bind
+floatInwards dflags = findJoinsInPgm dflags . map fi_top_bind
+                        -- Note [Look for join points afterward]
   where
     fi_top_bind (NonRec binder rhs)
       = NonRec binder (fiExpr dflags [] (freeVars rhs))
@@ -47,6 +49,35 @@ floatInwards dflags = map fi_top_bind
       = Rec [ (b, fiExpr dflags [] (freeVars rhs)) | (b, rhs) <- pairs ]
 
 {-
+
+Note [Look for join points afterward]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Float In may make things into potential join points:
+
+  let fac = \x a -> case x of 0 -> a
+                              _ -> fac (x-1) (a*x)
+  in fac y 1 > 100
+
+  =>
+
+  (let fac = \x a -> case x of 0 -> a
+                               _ -> fac (x-1) (a*x)
+   in fac y 1) > 100
+
+If fac is a join point, the simplifier will flatten things out:
+
+  let join fac = \x a -> case x of 0 -> a > 100
+                                   _ -> fac (x-1) (a*x)
+  in fac y 1
+
+Here the call a > 100 is not terribly exciting, but in general we can hope to
+see an inlining opportunity or a known case.
+
+Of course, the simplifier looks for join points after it runs the occurrence
+analyzer, but the simplifier doesn't always run right after Float In, and the
+earlier we can nail down a join point, the better.
+
 ************************************************************************
 *                                                                      *
 \subsection{Mail from Andr\'e [edited]}
