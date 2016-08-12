@@ -374,6 +374,10 @@ removeAllFromJoinAnal (good, bad) ids
 findGoodId :: JoinAnal -> Id -> Maybe JoinArity
 findGoodId (good, _bad) id = snd <$> lookupVarEnv good id
 
+isAbsent :: JoinAnal -> Id -> Bool
+isAbsent (good, bad) id = not (id `elemVarEnv` good) &&
+                          not (id `elemVarSet` bad)
+
 -- ---------------------------------------------------------------------------
 -- Rules
 -- ---------------------------------------------------------------------------
@@ -497,6 +501,8 @@ decideSort rec_flag bind anal
       , arity == lambdaCount rhs -- TODO loosen restriction (carefully!)
       , good_type arity emptyVarSet (idType bndr)
       = Just arity
+      | isId bndr, isAbsent anal bndr
+      = isJoinId_maybe bndr -- Dead binder; no need to mess with it
       | otherwise
       = Nothing
       where
