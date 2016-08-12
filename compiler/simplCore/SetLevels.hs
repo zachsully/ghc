@@ -526,6 +526,7 @@ lvlMFE strict_ctxt env ann_expr
   |  isFinalPass env
   || floatTopLvlOnly env && not (isTopLvl dest_lvl)
          -- Only floating to the top level is allowed.
+  || isTopLvl dest_lvl && need_join -- Can't put join point at top level
   || isUnliftedType (exprType (deTagExpr expr))
          -- Can't let-bind it; see Note [Unlifted MFEs]
          -- This includes coercions, which we don't want to float anyway
