@@ -488,9 +488,7 @@ simplJoinBind env top_lvl is_rec cont bndr bndr1 rhs rhs_se
         -- Simplify the RHS
         ; (rhs_env1, rhs1) <- simplJoinRhsF rhs_env cont bndr rhs
         ; let rhs'  = wrapFloats rhs_env1 rhs1
-              bndr2 = bndr1 `setIdType` exprType rhs'
-                        -- return type of join point may change
-        ; completeJoinBind env top_lvl is_rec cont bndr bndr2 rhs' }
+        ; completeJoinBind env top_lvl is_rec cont bndr bndr1 rhs' }
 
 {-
 A specialised variant of simplNonRec used when the RHS is already simplified,
@@ -1176,8 +1174,6 @@ simplJoinRhsF env cont bndr expr
   | otherwise
   = pprPanic "simplJoinRhsF" (ppr bndr)
   where
-    rhs_cont = mkRhsStop (substTy env (exprType expr))
-
     simpl_join_lams arity
       | arity > length bndrs
       = pprPanic "simplRhsF" $ text "not enough lambdas for join point:" <+> ppr bndr $$
@@ -1640,7 +1636,11 @@ simplNonRecJoinE env bndr (rhs, rhs_se) body cont
 
            | otherwise
            -> ASSERT( not (isTyVar bndr) )
-              do { (env1, bndr1) <- simplNonRecBndr env bndr
+              do { let old_type = substTy env (idType bndr)
+                       new_type = applyContToJoinType (idJoinArity bndr) cont
+                                                      old_type
+                       bndr_w_new_type = bndr `setIdType` new_type
+                 ; (env1, bndr1) <- simplNonRecBndr env bndr_w_new_type
                  ; (env2, bndr2) <- addBndrRules env1 bndr bndr1
                  ; (env3, joins1, cont_dup, cont_nodup) <- prepareLetCont env2 [bndr] cont
                  ; (env4, joins2) <- simplJoinBind env3 NotTopLevel NonRecursive cont_dup bndr bndr2 rhs rhs_se
@@ -1671,19 +1671,26 @@ simplRecJoinsE :: SimplEnv
                -> InExpr
                -> SimplCont
                -> SimplM (SimplEnv, OutExpr)
-          
--- simplJoinsRecE is used for
+
+-- simplRecJoinsE is used for
 --  * non-top-level recursive join lets in expressions
 simplRecJoinsE env pairs body cont
   = do  { let bndrs = map fst pairs
         ; MASSERT(all isJoinId bndrs)
-        ; env1 <- simplRecBndrs env bndrs
+        ; let bndrs1 = map adjust_bndr_type bndrs
+        ; env1 <- simplRecBndrs env bndrs1
                 -- NB: bndrs' don't have unfoldings or rules
                 -- We add them as we go down
-        ; (env2, joins1, cont_dup, cont_nodup) <- prepareLetCont env1 bndrs cont
+        ; (env2, joins1, cont_dup, cont_nodup) <- prepareLetCont env1 bndrs1 cont
         ; (env3, joins2) <- simplRecJoinBind env2 cont_dup pairs
         ; (env4, expr) <- simplExprF env3 body cont_dup
         ; rebuild env4 (foldrOL Let expr (joins1 `snocOL` joins2)) cont_nodup }
+  where
+    adjust_bndr_type bndr
+      = bndr `setIdType` applyContToJoinType join_arity cont orig_ty
+      where
+        join_arity = idJoinArity bndr
+        orig_ty    = substTy env (idType bndr)
 
 {-
 ************************************************************************

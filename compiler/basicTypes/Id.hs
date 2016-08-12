@@ -71,7 +71,8 @@ module Id (
         DictId, isDictId, isEvVar,
 
         -- ** Join variables
-        JoinId, isJoinId, isJoinId_maybe, asJoinId, asJoinId_maybe, zapJoinId,
+        JoinId, isJoinId, isJoinId_maybe, idJoinArity,
+        asJoinId, asJoinId_maybe, zapJoinId,
 
         -- ** Inline pragma stuff
         idInlinePragma, setInlinePragma, modifyInlinePragma,
@@ -480,6 +481,9 @@ isJoinId id = case Var.idDetails id of
 isJoinId_maybe id = case Var.idDetails id of
                         JoinId arity -> Just arity
                         _            -> Nothing
+
+idJoinArity :: JoinId -> JoinArity
+idJoinArity id = isJoinId_maybe id `orElse` pprPanic "idJoinArity" (ppr id)
 
 isDataConId_maybe :: Id -> Maybe DataCon
 isDataConId_maybe id = case Var.idDetails id of

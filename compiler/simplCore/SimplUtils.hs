@@ -19,7 +19,7 @@ module SimplUtils (
         -- The continuation type
         SimplCont(..), DupFlag(..),
         isSimplified,
-        contIsDupable, contResultType, contHoleType,
+        contIsDupable, contResultType, contHoleType, applyContToJoinType,
         contIsTrivial, contArgs,
         countArgs,
         mkBoringStop, mkRhsStop, mkLazyArgStop, contIsRhsOrArg,
@@ -48,6 +48,7 @@ import CoreArity
 import CoreUnfold
 import Name
 import Id
+import IdInfo
 import Var
 import Demand
 import SimplMonad
@@ -383,6 +384,16 @@ contHoleType (ApplyToVal { sc_arg = e, sc_env = se, sc_dup = dup, sc_cont = k })
             (contHoleType k)
 contHoleType (Select { sc_dup = d, sc_bndr =  b, sc_env = se })
   = perhapsSubstTy d se (idType b)
+
+applyContToJoinType :: JoinArity -> SimplCont -> OutType -> OutType
+applyContToJoinType 0 cont ty
+  = ASSERT2(ty `eqType` contHoleType cont, ppr ty $$ ppr cont)
+    contResultType cont
+applyContToJoinType n cont ty
+  | Just (arg_bndr, res_ty) <- splitPiTy_maybe ty -- forall or arrow
+  = mkPiTy arg_bndr (applyContToJoinType (n-1) cont res_ty)
+      -- No need to worry about foralls and scope; see decideSort in CoreJoins
+      -- for why not
 
 -------------------
 countArgs :: SimplCont -> Int
