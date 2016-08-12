@@ -424,11 +424,10 @@ propagateBinderSorts bind
         bndr = lookupInScope ins var `orElse` var
         var' | Just arity <- isJoinId_maybe bndr
              = asJoinId var arity
-             | isJoinId var, not (isJoinId bndr)
-             = WARN(True, text "Join variable was no longer valid:" <+> ppr var)
-               zapJoinId var
              | otherwise
-             = var
+             = ASSERT2(not (isJoinId var),
+                 text "join variable no longer valid:" <+> ppr var)
+               var
     rw_expr ins (App fun arg)
       = App (rw_expr ins fun) (rw_expr ins arg)
     rw_expr ins (Lam bndr body)
