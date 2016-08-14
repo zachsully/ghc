@@ -10,9 +10,10 @@ module NameSet (
 
         -- ** Manipulating these sets
         emptyNameSet, unitNameSet, mkNameSet, unionNameSet, unionNameSets,
-        minusNameSet, elemNameSet, nameSetElems, extendNameSet, extendNameSetList,
-        delFromNameSet, delListFromNameSet, isEmptyNameSet, foldNameSet, filterNameSet,
+        minusNameSet, elemNameSet, extendNameSet, extendNameSetList,
+        delFromNameSet, delListFromNameSet, isEmptyNameSet, filterNameSet,
         intersectsNameSet, intersectNameSet,
+        nameSetAny, nameSetAll, nameSetElemsStable,
 
         -- * Free variables
         FreeVars,
@@ -20,6 +21,7 @@ module NameSet (
         -- ** Manipulating sets of free variables
         isEmptyFVs, emptyFVs, plusFVs, plusFV,
         mkFVs, addOneFV, unitFV, delFV, delFVs,
+        intersectFVs,
 
         -- * Defs and uses
         Defs, Uses, DefUse, DefUses,
@@ -33,6 +35,8 @@ module NameSet (
 
 import Name
 import UniqSet
+import UniqFM
+import Data.List (sortBy)
 
 {-
 ************************************************************************
@@ -53,11 +57,9 @@ unionNameSet      :: NameSet -> NameSet -> NameSet
 unionNameSets  :: [NameSet] -> NameSet
 minusNameSet       :: NameSet -> NameSet -> NameSet
 elemNameSet        :: Name -> NameSet -> Bool
-nameSetElems      :: NameSet -> [Name]
 isEmptyNameSet     :: NameSet -> Bool
 delFromNameSet     :: NameSet -> Name -> NameSet
 delListFromNameSet :: NameSet -> [Name] -> NameSet
-foldNameSet        :: (Name -> b -> b) -> b -> NameSet -> b
 filterNameSet      :: (Name -> Bool) -> NameSet -> NameSet
 intersectNameSet   :: NameSet -> NameSet -> NameSet
 intersectsNameSet  :: NameSet -> NameSet -> Bool
@@ -74,15 +76,29 @@ unionNameSet     = unionUniqSets
 unionNameSets = unionManyUniqSets
 minusNameSet      = minusUniqSet
 elemNameSet       = elementOfUniqSet
-nameSetElems     = uniqSetToList
 delFromNameSet    = delOneFromUniqSet
-foldNameSet       = foldUniqSet
 filterNameSet     = filterUniqSet
 intersectNameSet  = intersectUniqSets
 
 delListFromNameSet set ns = foldl delFromNameSet set ns
 
 intersectsNameSet s1 s2 = not (isEmptyNameSet (s1 `intersectNameSet` s2))
+
+nameSetAny :: (Name -> Bool) -> NameSet -> Bool
+nameSetAny = uniqSetAny
+
+nameSetAll :: (Name -> Bool) -> NameSet -> Bool
+nameSetAll = uniqSetAll
+
+-- | Get the elements of a NameSet with some stable ordering.
+-- This only works for Names that originate in the source code or have been
+-- tidied.
+-- See Note [Deterministic UniqFM] to learn about nondeterminism
+nameSetElemsStable :: NameSet -> [Name]
+nameSetElemsStable ns =
+  sortBy stableNameCmp $ nonDetEltsUFM ns
+  -- It's OK to use nonDetEltsUFM here because we immediately sort
+  -- with stableNameCmp
 
 {-
 ************************************************************************
@@ -104,6 +120,7 @@ plusFVs  :: [FreeVars] -> FreeVars
 mkFVs    :: [Name] -> FreeVars
 delFV    :: Name -> FreeVars -> FreeVars
 delFVs   :: [Name] -> FreeVars -> FreeVars
+intersectFVs :: FreeVars -> FreeVars -> FreeVars
 
 isEmptyFVs :: NameSet -> Bool
 isEmptyFVs  = isEmptyNameSet
@@ -115,6 +132,7 @@ addOneFV    = extendNameSet
 unitFV      = unitNameSet
 delFV n s   = delFromNameSet s n
 delFVs ns s = delListFromNameSet s ns
+intersectFVs = intersectNameSet
 
 {-
 ************************************************************************
@@ -187,7 +205,7 @@ findUses dus uses
         = rhs_uses `unionNameSet` uses
     get (Just defs, rhs_uses) uses
         | defs `intersectsNameSet` uses         -- Used
-        || any (startsWithUnderscore . nameOccName) (nameSetElems defs)
+        || nameSetAny (startsWithUnderscore . nameOccName) defs
                 -- At least one starts with an "_",
                 -- so treat the group as used
         = rhs_uses `unionNameSet` uses

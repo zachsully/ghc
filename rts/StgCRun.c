@@ -245,7 +245,7 @@ StgRunIsImplementedInAssembler(void)
 
 #define STG_GLOBAL ".globl "
 
-#ifdef darwin_HOST_OS
+#if defined(darwin_HOST_OS) || defined(ios_HOST_OS)
 #define STG_HIDDEN ".private_extern "
 #else
 #define STG_HIDDEN ".hidden "
@@ -417,13 +417,17 @@ StgRun(StgFunPtr f, StgRegTable *basereg) {
 
 #define STG_GLOBAL ".globl "
 
-#ifdef darwin_HOST_OS
+#if defined(darwin_HOST_OS)
 #define STG_HIDDEN ".private_extern "
 #else
 #define STG_HIDDEN ".hidden "
 #endif
 
-#ifdef darwin_HOST_OS
+#if defined(aix_HOST_OS)
+
+// implementation is in StgCRunAsm.S
+
+#elif defined(darwin_HOST_OS)
 void StgRunIsImplementedInAssembler(void)
 {
 #if HAVE_SUBSECTIONS_VIA_SYMBOLS

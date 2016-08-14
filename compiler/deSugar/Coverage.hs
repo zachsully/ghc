@@ -71,11 +71,8 @@ addTicksToBinds
 addTicksToBinds hsc_env mod mod_loc exports tyCons binds
   | let dflags = hsc_dflags hsc_env
         passes = coveragePasses dflags, not (null passes),
-    Just orig_file <- ml_hs_file mod_loc = do
-
-     if "boot" `isSuffixOf` orig_file
-         then return (binds, emptyHpcInfo False, Nothing)
-         else do
+    Just orig_file <- ml_hs_file mod_loc,
+    not ("boot" `isSuffixOf` orig_file) = do
 
      us <- mkSplitUniqSupply 'C' -- for cost centres
      let  orig_file2 = guessSourceFile binds orig_file
@@ -482,13 +479,15 @@ addTickLHsExprNever (L pos e0) = do
 -- general heuristic: expressions which do not denote values are good
 -- break points
 isGoodBreakExpr :: HsExpr Id -> Bool
-isGoodBreakExpr (HsApp {})     = True
-isGoodBreakExpr (OpApp {})     = True
-isGoodBreakExpr _other         = False
+isGoodBreakExpr (HsApp {})        = True
+isGoodBreakExpr (HsAppTypeOut {}) = True
+isGoodBreakExpr (OpApp {})        = True
+isGoodBreakExpr _other            = False
 
 isCallSite :: HsExpr Id -> Bool
-isCallSite HsApp{}  = True
-isCallSite OpApp{}  = True
+isCallSite HsApp{}        = True
+isCallSite HsAppTypeOut{} = True
+isCallSite OpApp{}        = True
 isCallSite _ = False
 
 addTickLHsExprOptAlt :: Bool -> LHsExpr Id -> TM (LHsExpr Id)
@@ -517,14 +516,11 @@ addTickHsExpr e@(HsOverLit _)    = return e
 addTickHsExpr e@(HsOverLabel _)  = return e
 addTickHsExpr e@(HsLit _)        = return e
 addTickHsExpr (HsLam matchgroup) = liftM HsLam (addTickMatchGroup True matchgroup)
-addTickHsExpr (HsLamCase ty mgs) = liftM (HsLamCase ty) (addTickMatchGroup True mgs)
-addTickHsExpr (HsApp e1 e2)      = liftM2 HsApp (addTickLHsExprNever e1) e2'
-  -- This might be a type application. Then don't put a tick around e2,
-  -- or dsExpr won't recognize it as a type application any more (#11329).
-  -- It doesn't make sense to put a tick on a type anyways.
-  where e2'
-          | isLHsTypeExpr e2 = return e2
-          | otherwise        = addTickLHsExpr e2
+addTickHsExpr (HsLamCase mgs)    = liftM HsLamCase (addTickMatchGroup True mgs)
+addTickHsExpr (HsApp e1 e2)      = liftM2 HsApp (addTickLHsExprNever e1)
+                                                (addTickLHsExpr      e2)
+addTickHsExpr (HsAppTypeOut e ty) = liftM2 HsAppTypeOut (addTickLHsExprNever e)
+                                                        (return ty)
 
 addTickHsExpr (OpApp e1 e2 fix e3) =
         liftM4 OpApp
@@ -550,6 +546,9 @@ addTickHsExpr (ExplicitTuple es boxity) =
         liftM2 ExplicitTuple
                 (mapM addTickTupArg es)
                 (return boxity)
+addTickHsExpr (ExplicitSum tag arity e ty) = do
+        e' <- addTickLHsExpr e
+        return (ExplicitSum tag arity e' ty)
 addTickHsExpr (HsCase e mgs) =
         liftM2 HsCase
                 (addTickLHsExpr e) -- not an EvalInner; e might not necessarily
@@ -590,7 +589,7 @@ addTickHsExpr (ExplicitPArr ty es) =
                 (return ty)
                 (mapM (addTickLHsExpr) es)
 
-addTickHsExpr (HsStatic e) = HsStatic <$> addTickLHsExpr e
+addTickHsExpr (HsStatic fvs e) = HsStatic fvs <$> addTickLHsExpr e
 
 addTickHsExpr expr@(RecordCon { rcon_flds = rec_binds })
   = do { rec_binds' <- addTickHsRecordBinds rec_binds

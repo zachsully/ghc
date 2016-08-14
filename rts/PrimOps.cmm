@@ -23,6 +23,7 @@
 
 #include "Cmm.h"
 #include "MachDeps.h"
+#include "SMPClosureOps.h"
 
 #ifdef __PIC__
 import pthread_mutex_lock;
@@ -141,6 +142,23 @@ stg_newAlignedPinnedByteArrayzh ( W_ n, W_ alignment )
     return (p);
 }
 
+stg_isByteArrayPinnedzh ( gcptr ba )
+// ByteArray# s -> Int#
+{
+    W_ bd, flags;
+    bd = Bdescr(ba);
+    // pinned byte arrays live in blocks with the BF_PINNED flag set.
+    // See the comment in Storage.c:allocatePinned.
+    flags = TO_W_(bdescr_flags(bd));
+    return (flags & BF_PINNED != 0);
+}
+
+stg_isMutableByteArrayPinnedzh ( gcptr mba )
+// MutableByteArray# s -> Int#
+{
+    jump stg_isByteArrayPinnedzh(mba);
+}
+
 // shrink size of MutableByteArray in-place
 stg_shrinkMutableByteArrayzh ( gcptr mba, W_ new_size )
 // MutableByteArray# s -> Int# -> State# s -> State# s
@@ -203,7 +221,7 @@ stg_casIntArrayzh( gcptr arr, W_ ind, W_ old, W_ new )
     W_ p, h;
 
     p = arr + SIZEOF_StgArrBytes + WDS(ind);
-    (h) = ccall cas(p, old, new);
+    (h) = prim %cmpxchgW(p, old, new);
 
     return(h);
 }
@@ -320,7 +338,7 @@ stg_casArrayzh ( gcptr arr, W_ ind, gcptr old, gcptr new )
     W_ p, len;
 
     p = arr + SIZEOF_StgMutArrPtrs + WDS(ind);
-    (h) = ccall cas(p, old, new);
+    (h) = prim %cmpxchgW(p, old, new);
 
     if (h != old) {
         // Failure, return what was there instead of 'old':
@@ -472,7 +490,7 @@ stg_casSmallArrayzh ( gcptr arr, W_ ind, gcptr old, gcptr new )
     W_ p, len;
 
     p = arr + SIZEOF_StgSmallMutArrPtrs + WDS(ind);
-    (h) = ccall cas(p, old, new);
+    (h) = prim %cmpxchgW(p, old, new);
 
     if (h != old) {
         // Failure, return what was there instead of 'old':
@@ -512,7 +530,7 @@ stg_casMutVarzh ( gcptr mv, gcptr old, gcptr new )
 {
     gcptr h;
 
-    (h) = ccall cas(mv + SIZEOF_StgHeader + OFFSET_StgMutVar_var, old, new);
+    (h) = prim %cmpxchgW(mv + SIZEOF_StgHeader + OFFSET_StgMutVar_var, old, new);
     if (h != old) {
         return (1,h);
     } else {
@@ -588,7 +606,7 @@ stg_atomicModifyMutVarzh ( gcptr mv, gcptr f )
     x = StgMutVar_var(mv);
     StgThunk_payload(z,1) = x;
 #ifdef THREADED_RTS
-    (h) = ccall cas(mv + SIZEOF_StgHeader + OFFSET_StgMutVar_var, x, y);
+    (h) = prim %cmpxchgW(mv + SIZEOF_StgHeader + OFFSET_StgMutVar_var, x, y);
     if (h != x) { goto retry; }
 #else
     StgMutVar_var(mv) = y;
@@ -1899,6 +1917,137 @@ stg_deRefStablePtrzh ( P_ sp )
 }
 
 /* -----------------------------------------------------------------------------
+   CompactNFData primitives
+
+   See Note [Compact Normal Forms]
+   -------------------------------------------------------------------------  */
+
+stg_compactNewzh ( W_ size )
+{
+    P_ str;
+
+    again: MAYBE_GC(again);
+
+    ("ptr" str) = ccall compactNew(MyCapability() "ptr", size);
+    return (str);
+}
+
+stg_compactAppendzh ( P_ str, P_ val , W_ share)
+{
+    P_ root;
+
+    again: MAYBE_GC(again);
+
+     ("ptr" root) = ccall compactAppend(MyCapability() "ptr", str "ptr", val "ptr", share);
+    return (root);
+}
+
+stg_compactResizzezh ( P_ str, W_ new_size )
+{
+    again: MAYBE_GC(again);
+
+    ccall compactResize(MyCapability() "ptr", str "ptr", new_size);
+    return ();
+}
+
+stg_compactContainszh ( P_ str, P_ val )
+{
+    W_ rval;
+
+    (rval) = ccall compactContains(str "ptr", val "ptr");
+    return (rval);
+}
+
+stg_compactContainsAnyzh ( P_ val )
+{
+    W_ rval;
+
+    (rval) = ccall compactContains(0 "ptr", val "ptr");
+    return (rval);
+}
+
+stg_compactGetFirstBlockzh ( P_ str )
+{
+    /* W_, not P_, because it is not a gc pointer */
+    W_ block;
+    W_ bd;
+    W_ size;
+
+    block = str - SIZEOF_StgCompactNFDataBlock::W_;
+    ASSERT (StgCompactNFDataBlock_owner(block) == str);
+
+    bd = Bdescr(str);
+    size = bdescr_free(bd) - bdescr_start(bd);
+    ASSERT (size <= TO_W_(bdescr_blocks(bd)) * BLOCK_SIZE);
+
+    return (block, size);
+}
+
+stg_compactGetNextBlockzh ( P_ str, W_ block )
+{
+    /* str is a pointer to the closure holding the Compact#
+       it is there primarily to keep everything reachable from
+       the GC: by having it on the stack of type P_, the GC will
+       see all the blocks as live (any pointer in the Compact#
+       keeps it alive), and will not collect the block
+       We don't run a GC inside this primop, but it could
+       happen right after, or we could be preempted.
+
+       str is also useful for debugging, as it can be casted
+       to a useful C struct from the gdb command line and all
+       blocks can be inspected
+    */
+    W_ bd;
+    W_ next_block;
+    W_ size;
+
+    next_block = StgCompactNFDataBlock_next(block);
+
+    if (next_block == 0::W_) {
+        return (0::W_, 0::W_);
+    }
+
+    ASSERT (StgCompactNFDataBlock_owner(next_block) == str ||
+            StgCompactNFDataBlock_owner(next_block) == NULL);
+
+    bd = Bdescr(next_block);
+    size = bdescr_free(bd) - bdescr_start(bd);
+    ASSERT (size <= TO_W_(bdescr_blocks(bd)) * BLOCK_SIZE);
+
+    return (next_block, size);
+}
+
+stg_compactAllocateBlockzh ( W_ size, W_ previous )
+{
+    W_ actual_block;
+
+    again: MAYBE_GC(again);
+
+    ("ptr" actual_block) = ccall compactAllocateBlock(MyCapability(),
+                                                      size,
+                                                      previous "ptr");
+
+    return (actual_block);
+}
+
+stg_compactFixupPointerszh ( W_ first_block, W_ root )
+{
+    W_ str;
+    P_ gcstr;
+    W_ ok;
+
+    str = first_block + SIZEOF_StgCompactNFDataBlock::W_;
+    (ok) = ccall compactFixupPointers (str "ptr", root "ptr");
+
+    // Now we can let the GC know about str, because it was linked
+    // into the generation list and the book-keeping pointers are
+    // guaranteed to be valid
+    // (this is true even if the fixup phase failed)
+    gcstr = str;
+    return (gcstr, ok);
+}
+
+/* -----------------------------------------------------------------------------
    Bytecode object primitives
    -------------------------------------------------------------------------  */
 
@@ -2344,7 +2493,7 @@ stg_getSparkzh ()
 #ifndef THREADED_RTS
     return (0,ghczmprim_GHCziTypes_False_closure);
 #else
-    (spark) = ccall findSpark(MyCapability());
+    ("ptr" spark) = ccall findSpark(MyCapability() "ptr");
     if (spark != 0) {
         return (1,spark);
     } else {

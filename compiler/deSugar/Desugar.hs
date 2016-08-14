@@ -30,7 +30,7 @@ import InstEnv
 import Class
 import Avail
 import CoreSyn
-import CoreFVs( exprsSomeFreeVars )
+import CoreFVs( exprsSomeFreeVarsList )
 import CoreSubst
 import PprCore
 import DsMonad
@@ -60,13 +60,12 @@ import Coverage
 import Util
 import MonadUtils
 import OrdList
-import StaticPtrTable
 import UniqFM
+import UniqDFM
 import ListSetOps
 import Fingerprint
 import Maybes
 
-import Data.Function
 import Data.List
 import Data.IORef
 import Control.Monad( when )
@@ -84,7 +83,8 @@ mkDependencies
  = do
       -- Template Haskell used?
       th_used <- readIORef th_var
-      let dep_mods = eltsUFM (delFromUFM (imp_dep_mods imports) (moduleName mod))
+      let dep_mods = eltsUDFM (delFromUDFM (imp_dep_mods imports)
+                                           (moduleName mod))
                 -- M.hi-boot can be in the imp_dep_mods, but we must remove
                 -- it before recording the modules on which this one depends!
                 -- (We want to retain M.hi-boot in imp_dep_mods so that
@@ -101,7 +101,7 @@ mkDependencies
           trust_pkgs  = imp_trust_pkgs imports
           dep_pkgs'   = map (\x -> (x, x `elem` trust_pkgs)) sorted_pkgs
 
-      return Deps { dep_mods   = sortBy (stableModuleNameCmp `on` fst) dep_mods,
+      return Deps { dep_mods   = dep_mods,
                     dep_pkgs   = dep_pkgs',
                     dep_orphs  = sortBy stableModuleCmp (imp_orphs  imports),
                     dep_finsts = sortBy stableModuleCmp (imp_finsts imports) }
@@ -149,7 +149,9 @@ mk_mod_usage_info pit hsc_env this_mod direct_imports used_names
     -- ent_map groups together all the things imported and used
     -- from a particular module
     ent_map :: ModuleEnv [OccName]
-    ent_map  = foldNameSet add_mv emptyModuleEnv used_names
+    ent_map  = nonDetFoldUFM add_mv emptyModuleEnv used_names
+     -- nonDetFoldUFM is OK here. If you follow the logic, we sort by OccName
+     -- in ent_hashs
      where
       add_mv name mv_map
         | isWiredInName name = mv_map  -- ignore wired-in names
@@ -291,10 +293,14 @@ deSugar hsc_env
 
   = do { let dflags = hsc_dflags hsc_env
              print_unqual = mkPrintUnqualified dflags rdr_env
-        ; showPass dflags "Desugar"
-
-        -- Desugar the program
-        ; let export_set = availsToNameSet exports
+        ; withTiming (pure dflags)
+                     (text "Desugar"<+>brackets (ppr mod))
+                     (const ()) $
+     do { -- Desugar the program
+        ; let export_set =
+                -- Used to be 'availsToNameSet', but we now export selectors
+                -- only when necessary. See #12125.
+                availsToNameSetWithSelectors exports
               target     = hscTarget dflags
               hpcInfo    = emptyHpcInfo other_hpc_info
 
@@ -311,20 +317,13 @@ deSugar hsc_env
                           ; (ds_fords, foreign_prs) <- dsForeigns fords
                           ; ds_rules <- mapMaybeM dsRule rules
                           ; ds_vects <- mapM dsVect vects
-                          ; stBinds <- dsGetStaticBindsVar >>=
-                                           liftIO . readIORef
                           ; let hpc_init
                                   | gopt Opt_Hpc dflags = hpcInitCode mod ds_hpc_info
                                   | otherwise = empty
-                                -- Stub to insert the static entries of the
-                                -- module into the static pointer table
-                                spt_init = sptInitCode mod stBinds
                           ; return ( ds_ev_binds
                                    , foreign_prs `appOL` core_prs `appOL` spec_prs
-                                                 `appOL` toOL (map snd stBinds)
                                    , spec_rules ++ ds_rules, ds_vects
-                                   , ds_fords `appendStubC` hpc_init
-                                              `appendStubC` spt_init) }
+                                   , ds_fords `appendStubC` hpc_init) }
 
         ; case mb_res of {
            Nothing -> return (msgs, Nothing) ;
@@ -391,7 +390,7 @@ deSugar hsc_env
                 mg_trust_pkg    = imp_trust_own_pkg imports
               }
         ; return (msgs, Just mod_guts)
-        }}}
+        }}}}
 
 mkFileSrcSpan :: ModLocation -> SrcSpan
 mkFileSrcSpan mod_loc
@@ -573,7 +572,9 @@ dsRule (L loc (HsRule name rule_act vars lhs _tv_lhs rhs _fv_rhs))
               fn_name   = idName fn_id
               final_rhs = simpleOptExpr rhs''    -- De-crap it
               rule_name = snd (unLoc name)
-              arg_ids = varSetElems (exprsSomeFreeVars isId args `delVarSetList` final_bndrs)
+              final_bndrs_set = mkVarSet final_bndrs
+              arg_ids = filterOut (`elemVarSet` final_bndrs_set) $
+                        exprsSomeFreeVarsList isId args
 
         ; dflags <- getDynFlags
         ; rule <- dsMkUserRule this_mod is_local
@@ -671,7 +672,7 @@ We want the user to express a rule saying roughly “mapping a coercion over a
 list can be replaced by a coercion”. But the cast operator of Core (▷) cannot
 be written in Haskell. So we use `coerce` for that (#2110). The user writes
     map coerce = coerce
-as a RULE, and this optimizes any kind of mapped' casts aways, including `map
+as a RULE, and this optimizes any kind of mapped' casts away, including `map
 MkNewtype`.
 
 For that we replace any forall'ed `c :: Coercible a b` value in a RULE by

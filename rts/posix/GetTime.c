@@ -21,22 +21,22 @@
 # include <sys/times.h>
 #endif
 
-#if ! ((defined(HAVE_GETRUSAGE) && !irix_HOST_OS) || defined(HAVE_TIMES))
+#if ! (defined(HAVE_GETRUSAGE) || defined(HAVE_TIMES))
 #error No implementation for getProcessCPUTime() available.
 #endif
 
-#if defined(HAVE_GETTIMEOFDAY) && defined(HAVE_GETRUSAGE) && !irix_HOST_OS
+#if defined(HAVE_GETTIMEOFDAY) && defined(HAVE_GETRUSAGE)
 // we'll implement getProcessCPUTime() and getProcessElapsedTime()
 // separately, using getrusage() and gettimeofday() respectively
 
-#ifdef darwin_HOST_OS
+#if !defined(HAVE_CLOCK_GETTIME) && defined(darwin_HOST_OS)
 static uint64_t timer_scaling_factor_numer = 0;
 static uint64_t timer_scaling_factor_denom = 0;
 #endif
 
 void initializeTimer()
 {
-#ifdef darwin_HOST_OS
+#if !defined(HAVE_CLOCK_GETTIME) && defined(darwin_HOST_OS)
     mach_timebase_info_data_t info;
     (void) mach_timebase_info(&info);
     timer_scaling_factor_numer = (uint64_t)info.numer;
@@ -140,7 +140,7 @@ Time getProcessElapsedTime(void)
 
 void getProcessTimes(Time *user, Time *elapsed)
 {
-    static nat ClockFreq = 0;
+    static uint32_t ClockFreq = 0;
 
     if (ClockFreq == 0) {
 #if defined(HAVE_SYSCONF)
@@ -190,7 +190,7 @@ void getUnixEpochTime(StgWord64 *sec, StgWord32 *nsec)
 W_
 getPageFaults(void)
 {
-#if !defined(HAVE_GETRUSAGE) || irix_HOST_OS || haiku_HOST_OS
+#if !defined(HAVE_GETRUSAGE) || haiku_HOST_OS
     return 0;
 #else
     struct rusage t;

@@ -114,21 +114,24 @@ static  CostCentreStack * actualPush_     ( CostCentreStack *ccs, CostCentre *cc
 static  rtsBool           ignoreCCS       ( CostCentreStack *ccs );
 static  void              countTickss     ( CostCentreStack *ccs );
 static  void              inheritCosts    ( CostCentreStack *ccs );
-static  nat               numDigits       ( StgInt i );
+static  uint32_t           numDigits       ( StgInt i );
 static  void              findCCSMaxLens  ( CostCentreStack *ccs,
-                                            nat indent,
-                                            nat *max_label_len,
-                                            nat *max_module_len,
-                                            nat *max_id_len );
+                                            uint32_t indent,
+                                            uint32_t *max_label_len,
+                                            uint32_t *max_module_len,
+                                            uint32_t *max_src_len,
+                                            uint32_t *max_id_len );
 static  void              logCCS          ( CostCentreStack *ccs,
-                                            nat indent,
-                                            nat max_label_len,
-                                            nat max_module_len,
-                                            nat max_id_len );
+                                            uint32_t indent,
+                                            uint32_t max_label_len,
+                                            uint32_t max_module_len,
+                                            uint32_t max_src_len,
+                                            uint32_t max_id_len );
 static  void              reportCCS       ( CostCentreStack *ccs );
 static  CostCentreStack * checkLoop       ( CostCentreStack *ccs,
                                             CostCentre *cc );
 static  CostCentreStack * pruneCCSTree    ( CostCentreStack *ccs );
+static  void              sortCCSTree     ( CostCentreStack *ccs );
 static  CostCentreStack * actualPush      ( CostCentreStack *, CostCentre * );
 static  CostCentreStack * isInIndexTable  ( IndexTable *, CostCentre * );
 static  IndexTable *      addToIndexTable ( IndexTable *, CostCentreStack *,
@@ -149,7 +152,7 @@ void initProfiling (void)
 
     /* for the benefit of allocate()... */
     {
-        nat n;
+        uint32_t n;
         for (n=0; n < n_capabilities; n++) {
             capabilities[n]->r.rCCCS = CCS_SYSTEM;
         }
@@ -393,7 +396,7 @@ void enterFunCCS (StgRegTable *reg, CostCentreStack *ccsfn)
 
     // uncommon case 4: ccsapp is deeper than ccsfn
     if (ccsapp->depth > ccsfn->depth) {
-        nat i, n;
+        uint32_t i, n;
         CostCentreStack *tmp = ccsapp;
         n = ccsapp->depth - ccsfn->depth;
         for (i = 0; i < n; i++) {
@@ -747,10 +750,10 @@ insertCCInSortedList( CostCentre *new_cc )
     *prev = new_cc;
 }
 
-static nat
+static uint32_t
 strlen_utf8 (char *s)
 {
-    nat n = 0;
+    uint32_t n = 0;
     unsigned char c;
 
     for (; *s != '\0'; s++) {
@@ -764,13 +767,14 @@ static void
 reportPerCCCosts( void )
 {
     CostCentre *cc, *next;
-    nat max_label_len, max_module_len;
+    uint32_t max_label_len, max_module_len, max_src_len;
 
     aggregateCCCosts(CCS_MAIN);
     sorted_cc_list = NULL;
 
     max_label_len  = 11; // no shorter than the "COST CENTRE" header
     max_module_len = 6;  // no shorter than the "MODULE" header
+    max_src_len    = 3;  // no shorter than the "SRC" header
 
     for (cc = CC_LIST; cc != NULL; cc = next) {
         next = cc->link;
@@ -781,10 +785,12 @@ reportPerCCCosts( void )
 
             max_label_len = stg_max(strlen_utf8(cc->label), max_label_len);
             max_module_len = stg_max(strlen_utf8(cc->module), max_module_len);
+            max_src_len = stg_max(strlen_utf8(cc->srcloc), max_src_len);
         }
     }
 
-    fprintf(prof_file, "%-*s %-*s", max_label_len, "COST CENTRE", max_module_len, "MODULE");
+    fprintf(prof_file, "%-*s %-*s %-*s",
+            max_label_len, "COST CENTRE", max_module_len, "MODULE", max_src_len, "SRC");
     fprintf(prof_file, " %6s %6s", "%time", "%alloc");
     if (RtsFlags.CcFlags.doCostCentres >= COST_CENTRES_VERBOSE) {
         fprintf(prof_file, "  %5s %9s", "ticks", "bytes");
@@ -795,11 +801,13 @@ reportPerCCCosts( void )
         if (ignoreCC(cc)) {
             continue;
         }
-        fprintf(prof_file, "%s%*s %s%*s",
+        fprintf(prof_file, "%s%*s %s%*s %s%*s",
                 cc->label,
                 max_label_len - strlen_utf8(cc->label), "",
                 cc->module,
-                max_module_len - strlen_utf8(cc->module), "");
+                max_module_len - strlen_utf8(cc->module), "",
+                cc->srcloc,
+                max_src_len - strlen_utf8(cc->srcloc), "");
 
         fprintf(prof_file, " %6.1f %6.1f",
                 total_prof_ticks == 0 ? 0.0 : (cc->time_ticks / (StgFloat) total_prof_ticks * 100),
@@ -822,17 +830,20 @@ reportPerCCCosts( void )
    -------------------------------------------------------------------------- */
 
 static void
-fprintHeader( nat max_label_len, nat max_module_len, nat max_id_len )
+fprintHeader( uint32_t max_label_len, uint32_t max_module_len,
+                uint32_t max_src_len, uint32_t max_id_len )
 {
-    fprintf(prof_file, "%-*s %-*s %-*s %11s  %12s   %12s\n",
+    fprintf(prof_file, "%-*s %-*s %-*s %-*s %11s  %12s   %12s\n",
             max_label_len, "",
             max_module_len, "",
+            max_src_len, "",
             max_id_len, "",
             "", "individual", "inherited");
 
-    fprintf(prof_file, "%-*s %-*s %-*s",
+    fprintf(prof_file, "%-*s %-*s %-*s %-*s",
             max_label_len, "COST CENTRE",
             max_module_len, "MODULE",
+            max_src_len, "SRC",
             max_id_len, "no.");
 
     fprintf(prof_file, " %11s  %5s %6s   %5s %6s",
@@ -848,7 +859,7 @@ fprintHeader( nat max_label_len, nat max_module_len, nat max_id_len )
 void
 reportCCSProfiling( void )
 {
-    nat count;
+    uint32_t count;
     char temp[128]; /* sigh: magic constant */
 
     stopProfTimer();
@@ -889,12 +900,14 @@ reportCCSProfiling( void )
 
     inheritCosts(CCS_MAIN);
 
-    reportCCS(pruneCCSTree(CCS_MAIN));
+    CostCentreStack *stack = pruneCCSTree(CCS_MAIN);
+    sortCCSTree(stack);
+    reportCCS(stack);
 }
 
-static nat
+static uint32_t
 numDigits(StgInt i) {
-    nat result;
+    uint32_t result;
 
     result = 1;
 
@@ -909,8 +922,8 @@ numDigits(StgInt i) {
 }
 
 static void
-findCCSMaxLens(CostCentreStack *ccs, nat indent,
-        nat *max_label_len, nat *max_module_len, nat *max_id_len) {
+findCCSMaxLens(CostCentreStack *ccs, uint32_t indent, uint32_t *max_label_len,
+        uint32_t *max_module_len, uint32_t *max_src_len, uint32_t *max_id_len) {
     CostCentre *cc;
     IndexTable *i;
 
@@ -918,19 +931,21 @@ findCCSMaxLens(CostCentreStack *ccs, nat indent,
 
     *max_label_len = stg_max(*max_label_len, indent + strlen_utf8(cc->label));
     *max_module_len = stg_max(*max_module_len, strlen_utf8(cc->module));
+    *max_src_len = stg_max(*max_src_len, strlen_utf8(cc->srcloc));
     *max_id_len = stg_max(*max_id_len, numDigits(ccs->ccsID));
 
     for (i = ccs->indexTable; i != 0; i = i->next) {
         if (!i->back_edge) {
             findCCSMaxLens(i->ccs, indent+1,
-                    max_label_len, max_module_len, max_id_len);
+                    max_label_len, max_module_len, max_src_len, max_id_len);
         }
     }
 }
 
 static void
-logCCS(CostCentreStack *ccs, nat indent,
-        nat max_label_len, nat max_module_len, nat max_id_len)
+logCCS(CostCentreStack *ccs, uint32_t indent,
+        uint32_t max_label_len, uint32_t max_module_len,
+        uint32_t max_src_len, uint32_t max_id_len)
 {
     CostCentre *cc;
     IndexTable *i;
@@ -943,12 +958,14 @@ logCCS(CostCentreStack *ccs, nat indent,
         /* force printing of *all* cost centres if -Pa */
     {
 
-        fprintf(prof_file, "%-*s%s%*s %s%*s",
+        fprintf(prof_file, "%*s%s%*s %s%*s %s%*s",
                 indent, "",
                 cc->label,
                 max_label_len-indent - strlen_utf8(cc->label), "",
                 cc->module,
-                max_module_len - strlen_utf8(cc->module), "");
+                max_module_len - strlen_utf8(cc->module), "",
+                cc->srcloc,
+                max_src_len - strlen_utf8(cc->srcloc), "");
 
         fprintf(prof_file,
                 " %*" FMT_Int "%11" FMT_Word64 "  %5.1f  %5.1f   %5.1f  %5.1f",
@@ -968,7 +985,8 @@ logCCS(CostCentreStack *ccs, nat indent,
 
     for (i = ccs->indexTable; i != 0; i = i->next) {
         if (!i->back_edge) {
-            logCCS(i->ccs, indent+1, max_label_len, max_module_len, max_id_len);
+            logCCS(i->ccs, indent+1,
+                   max_label_len, max_module_len, max_src_len, max_id_len);
         }
     }
 }
@@ -976,16 +994,18 @@ logCCS(CostCentreStack *ccs, nat indent,
 static void
 reportCCS(CostCentreStack *ccs)
 {
-    nat max_label_len, max_module_len, max_id_len;
+    uint32_t max_label_len, max_module_len, max_src_len, max_id_len;
 
     max_label_len = 11; // no shorter than "COST CENTRE" header
     max_module_len = 6; // no shorter than "MODULE" header
+    max_src_len = 3; // no shorter than "SRC" header
     max_id_len = 3; // no shorter than "no." header
 
-    findCCSMaxLens(ccs, 0, &max_label_len, &max_module_len, &max_id_len);
+    findCCSMaxLens(ccs, 0,
+                   &max_label_len, &max_module_len, &max_src_len, &max_id_len);
 
-    fprintHeader(max_label_len, max_module_len, max_id_len);
-    logCCS(ccs, 0, max_label_len, max_module_len, max_id_len);
+    fprintHeader(max_label_len, max_module_len, max_src_len, max_id_len);
+    logCCS(ccs, 0, max_label_len, max_module_len, max_src_len, max_id_len);
 }
 
 
@@ -1063,6 +1083,63 @@ pruneCCSTree (CostCentreStack *ccs)
     }
 }
 
+static IndexTable*
+insertIndexTableInSortedList(IndexTable* tbl, IndexTable* sortedList)
+{
+    StgWord tbl_ticks = tbl->ccs->scc_count;
+    char*   tbl_label = tbl->ccs->cc->label;
+
+    IndexTable *prev   = NULL;
+    IndexTable *cursor = sortedList;
+
+    while (cursor != NULL) {
+        StgWord cursor_ticks = cursor->ccs->scc_count;
+        char*   cursor_label = cursor->ccs->cc->label;
+
+        if (tbl_ticks > cursor_ticks ||
+                (tbl_ticks == cursor_ticks && strcmp(tbl_label, cursor_label) < 0)) {
+            if (prev == NULL) {
+                tbl->next = sortedList;
+                return tbl;
+            } else {
+                prev->next = tbl;
+                tbl->next = cursor;
+                return sortedList;
+            }
+        } else {
+            prev   = cursor;
+            cursor = cursor->next;
+        }
+    }
+
+    prev->next = tbl;
+    return sortedList;
+}
+
+static void
+sortCCSTree(CostCentreStack *ccs)
+{
+    if (ccs->indexTable == NULL) return;
+
+    for (IndexTable *tbl = ccs->indexTable; tbl != NULL; tbl = tbl->next)
+        if (!tbl->back_edge)
+            sortCCSTree(tbl->ccs);
+
+    IndexTable *sortedList    = ccs->indexTable;
+    IndexTable *nonSortedList = sortedList->next;
+    sortedList->next = NULL;
+
+    while (nonSortedList != NULL)
+    {
+        IndexTable *nonSortedTail = nonSortedList->next;
+        nonSortedList->next = NULL;
+        sortedList = insertIndexTableInSortedList(nonSortedList, sortedList);
+        nonSortedList = nonSortedTail;
+    }
+
+    ccs->indexTable = sortedList;
+}
+
 void
 fprintCCS( FILE *f, CostCentreStack *ccs )
 {
@@ -1102,13 +1179,13 @@ fprintCCS_stderr (CostCentreStack *ccs, StgClosure *exception, StgTSO *tso)
     StgPtr frame;
     StgStack *stack;
     CostCentreStack *prev_ccs;
-    nat depth = 0;
-    const nat MAX_DEPTH = 10; // don't print gigantic chains of stacks
+    uint32_t depth = 0;
+    const uint32_t MAX_DEPTH = 10; // don't print gigantic chains of stacks
 
     {
-        char *desc;
-        StgInfoTable *info;
-        info = get_itbl(UNTAG_CLOSURE(exception));
+        const char *desc;
+        const StgInfoTable *info;
+        info = get_itbl(UNTAG_CONST_CLOSURE(exception));
         switch (info->type) {
         case CONSTR:
         case CONSTR_1_0:

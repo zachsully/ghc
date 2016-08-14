@@ -9,6 +9,8 @@
 {-# LANGUAGE UndecidableInstances #-} -- Note [Pass sensitive types]
                                       -- in module PlaceHolder
 {-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE DeriveFunctor #-}
 
 -- | Abstract Haskell syntax for expressions.
 module HsExpr where
@@ -19,7 +21,8 @@ module HsExpr where
 import HsDecls
 import HsPat
 import HsLit
-import PlaceHolder ( PostTc,PostRn,DataId )
+import PlaceHolder ( PostTc,PostRn,DataId,DataIdPost,
+                     NameOrRdrName,OutputableBndrId )
 import HsTypes
 import HsBinds
 
@@ -29,6 +32,8 @@ import CoreSyn
 import Var
 import DynFlags ( gopt, GeneralFlag(Opt_PrintExplicitCoercions) )
 import Name
+import NameSet
+import RdrName  ( GlobalRdrEnv )
 import BasicTypes
 import ConLike
 import SrcLoc
@@ -39,8 +44,14 @@ import FastString
 import Type
 
 -- libraries:
-import Data.Data hiding (Fixity)
+import Data.Data hiding (Fixity(..))
+import qualified Data.Data as Data (Fixity(..))
 import Data.Maybe (isNothing)
+
+#ifdef GHCI
+import GHCi.RemoteTypes ( ForeignRef )
+import qualified Language.Haskell.TH as TH (Q)
+#endif
 
 {-
 ************************************************************************
@@ -92,7 +103,6 @@ noPostTcTable = []
 data SyntaxExpr id = SyntaxExpr { syn_expr      :: HsExpr id
                                 , syn_arg_wraps :: [HsWrapper]
                                 , syn_res_wrap  :: HsWrapper }
-  deriving (Typeable)
 deriving instance (DataId id) => Data (SyntaxExpr id)
 
 -- | This is used for rebindable-syntax pieces that are too polymorphic
@@ -115,7 +125,7 @@ mkRnSyntaxExpr name = SyntaxExpr { syn_expr      = HsVar $ noLoc name
   -- don't care about filling in syn_arg_wraps because we're clearly
   -- not past the typechecker
 
-instance OutputableBndr id => Outputable (SyntaxExpr id) where
+instance (OutputableBndrId id) => Outputable (SyntaxExpr id) where
   ppr (SyntaxExpr { syn_expr      = expr
                   , syn_arg_wraps = arg_wraps
                   , syn_res_wrap  = res_wrap })
@@ -165,17 +175,109 @@ is Less Cool because
     typecheck do-notation with (>>=) :: m1 a -> (a -> m2 b) -> m2 b.)
 -}
 
+-- | An unbound variable; used for treating out-of-scope variables as
+-- expression holes
+data UnboundVar
+  = OutOfScope OccName GlobalRdrEnv  -- ^ An (unqualified) out-of-scope
+                                     -- variable, together with the GlobalRdrEnv
+                                     -- with respect to which it is unbound
+
+                                     -- See Note [OutOfScope and GlobalRdrEnv]
+
+  | TrueExprHole OccName             -- ^ A "true" expression hole (_ or _x)
+
+  deriving Data
+
+instance Outputable UnboundVar where
+    ppr = ppr . unboundVarOcc
+
+unboundVarOcc :: UnboundVar -> OccName
+unboundVarOcc (OutOfScope occ _) = occ
+unboundVarOcc (TrueExprHole occ) = occ
+
+{-
+Note [OutOfScope and GlobalRdrEnv]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+To understand why we bundle a GlobalRdrEnv with an out-of-scope variable,
+consider the following module:
+
+    module A where
+
+    foo :: ()
+    foo = bar
+
+    bat :: [Double]
+    bat = [1.2, 3.4]
+
+    $(return [])
+
+    bar = ()
+    bad = False
+
+When A is compiled, the renamer determines that `bar` is not in scope in the
+declaration of `foo` (since `bar` is declared in the following inter-splice
+group).  Once it has finished typechecking the entire module, the typechecker
+then generates the associated error message, which specifies both the type of
+`bar` and a list of possible in-scope alternatives:
+
+    A.hs:6:7: error:
+        • Variable not in scope: bar :: ()
+        • ‘bar’ (line 13) is not in scope before the splice on line 11
+          Perhaps you meant ‘bat’ (line 9)
+
+When it calls RnEnv.unknownNameSuggestions to identify these alternatives, the
+typechecker must provide a GlobalRdrEnv.  If it provided the current one, which
+contains top-level declarations for the entire module, the error message would
+incorrectly suggest the out-of-scope `bar` and `bad` as possible alternatives
+for `bar` (see Trac #11680).  Instead, the typechecker must use the same
+GlobalRdrEnv the renamer used when it determined that `bar` is out-of-scope.
+
+To obtain this GlobalRdrEnv, can the typechecker simply use the out-of-scope
+`bar`'s location to either reconstruct it (from the current GlobalRdrEnv) or to
+look it up in some global store?  Unfortunately, no.  The problem is that
+location information is not always sufficient for this task.  This is most
+apparent when dealing with the TH function addTopDecls, which adds its
+declarations to the FOLLOWING inter-splice group.  Consider these declarations:
+
+    ex9 = cat               -- cat is NOT in scope here
+
+    $(do -------------------------------------------------------------
+        ds <- [d| f = cab   -- cat and cap are both in scope here
+                  cat = ()
+                |]
+        addTopDecls ds
+        [d| g = cab         -- only cap is in scope here
+            cap = True
+          |])
+
+    ex10 = cat              -- cat is NOT in scope here
+
+    $(return []) -----------------------------------------------------
+
+    ex11 = cat              -- cat is in scope
+
+Here, both occurrences of `cab` are out-of-scope, and so the typechecker needs
+the GlobalRdrEnvs which were used when they were renamed.  These GlobalRdrEnvs
+are different (`cat` is present only in the GlobalRdrEnv for f's `cab'), but the
+locations of the two `cab`s are the same (they are both created in the same
+splice).  Thus, we must include some additional information with each `cab` to
+allow the typechecker to obtain the correct GlobalRdrEnv.  Clearly, the simplest
+information to use is the GlobalRdrEnv itself.
+-}
+
 -- | A Haskell expression.
 data HsExpr id
   = HsVar     (Located id)   -- ^ Variable
 
                              -- See Note [Located RdrNames]
 
-  | HsUnboundVar OccName     -- ^ Unbound variable; also used for "holes" _, or _x.
-                             -- Turned from HsVar to HsUnboundVar by the renamer, when
-                             --   it finds an out-of-scope variable
-                             -- Turned into HsVar by type checker, to support deferred
-                             --   type errors.  (The HsUnboundVar only has an OccName.)
+  | HsUnboundVar UnboundVar  -- ^ Unbound variable; also used for "holes"
+                             --   (_ or _x).
+                             -- Turned from HsVar to HsUnboundVar by the
+                             --   renamer, when it finds an out-of-scope
+                             --   variable or hole.
+                             -- Turned into HsVar by type checker, to support
+                             --   deferred type errors.
 
   | HsRecFld (AmbiguousFieldOcc id) -- ^ Variable pointing to record selector
 
@@ -193,7 +295,7 @@ data HsExpr id
 
        -- For details on above see note [Api annotations] in ApiAnnotation
 
-  | HsLamCase (PostTc id Type) (MatchGroup id (LHsExpr id)) -- ^ Lambda-case
+  | HsLamCase (MatchGroup id (LHsExpr id)) -- ^ Lambda-case
        --
        -- - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnLam',
        --           'ApiAnnotation.AnnCase','ApiAnnotation.AnnOpen',
@@ -202,6 +304,16 @@ data HsExpr id
        -- For details on above see note [Api annotations] in ApiAnnotation
 
   | HsApp     (LHsExpr id) (LHsExpr id) -- ^ Application
+
+  | HsAppType (LHsExpr id) (LHsWcType id) -- ^ Visible type application
+       --
+       -- Explicit type argument; e.g  f @Int x y
+       -- NB: Has wildcards, but no implicit quantification
+       --
+       -- - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnAt',
+
+  | HsAppTypeOut (LHsExpr id) (LHsWcType Name) -- just for pretty-printing
+
 
   -- | Operator applications:
   -- NB Bracketed ops such as (+) come out as Vars.
@@ -243,6 +355,12 @@ data HsExpr id
   | ExplicitTuple
         [LHsTupArg id]
         Boxity
+
+  | ExplicitSum
+          ConTag -- Alternative (one-based)
+          Arity  -- Sum arity
+          (LHsExpr id)
+          (PostTc id [Type])   -- the type arguments
 
   -- | - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnCase',
   --       'ApiAnnotation.AnnOf','ApiAnnotation.AnnOpen' @'{'@,
@@ -458,7 +576,8 @@ data HsExpr id
   -- | - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnStatic',
 
   -- For details on above see note [Api annotations] in ApiAnnotation
-  | HsStatic    (LHsExpr id)
+  | HsStatic (PostRn id NameSet) -- Free variables of the body
+             (LHsExpr id)        -- Body
 
   ---------------------------------------
   -- The following are commands, not expressions proper
@@ -545,14 +664,6 @@ data HsExpr id
   -- For details on above see note [Api annotations] in ApiAnnotation
   | ELazyPat    (LHsExpr id) -- ~ pattern
 
-  -- | Use for type application in expressions.
-  -- 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnAt'
-
-  -- For details on above see note [Api annotations] in ApiAnnotation
-  | HsType      (LHsWcType id) -- Explicit type argument; e.g  f @Int x y
-                               -- NB: Has wildcards, but no implicit quant.
-
-  | HsTypeOut   (LHsWcType Name)  -- just for pretty-printing
 
   ---------------------------------------
   -- Finally, HsWrap appears only in typechecker output
@@ -560,7 +671,6 @@ data HsExpr id
   |  HsWrap     HsWrapper    -- TRANSLATION
                 (HsExpr id)
 
-  deriving (Typeable)
 deriving instance (DataId id) => Data (HsExpr id)
 
 -- | HsTupArg is used for tuple sections
@@ -573,7 +683,6 @@ type LHsTupArg id = Located (HsTupArg id)
 data HsTupArg id
   = Present (LHsExpr id)     -- ^ The argument
   | Missing (PostTc id Type) -- ^ The argument is missing, but this is its type
-  deriving (Typeable)
 deriving instance (DataId id) => Data (HsTupArg id)
 
 tupArgPresent :: LHsTupArg id -> Bool
@@ -646,16 +755,16 @@ RenamedSource that the API Annotations cannot be used directly with
 RenamedSource, so this allows a simple mapping to be used based on the location.
 -}
 
-instance OutputableBndr id => Outputable (HsExpr id) where
+instance (OutputableBndrId id) => Outputable (HsExpr id) where
     ppr expr = pprExpr expr
 
 -----------------------
 -- pprExpr, pprLExpr, pprBinds call pprDeeper;
 -- the underscore versions do not
-pprLExpr :: OutputableBndr id => LHsExpr id -> SDoc
+pprLExpr :: (OutputableBndrId id) => LHsExpr id -> SDoc
 pprLExpr (L _ e) = pprExpr e
 
-pprExpr :: OutputableBndr id => HsExpr id -> SDoc
+pprExpr :: (OutputableBndrId id) => HsExpr id -> SDoc
 pprExpr e | isAtomicHsExpr e || isQuietHsExpr e =            ppr_expr e
           | otherwise                           = pprDeeper (ppr_expr e)
 
@@ -663,23 +772,25 @@ isQuietHsExpr :: HsExpr id -> Bool
 -- Parentheses do display something, but it gives little info and
 -- if we go deeper when we go inside them then we get ugly things
 -- like (...)
-isQuietHsExpr (HsPar _) = True
+isQuietHsExpr (HsPar _)          = True
 -- applications don't display anything themselves
-isQuietHsExpr (HsApp _ _) = True
-isQuietHsExpr (OpApp _ _ _ _) = True
+isQuietHsExpr (HsApp _ _)        = True
+isQuietHsExpr (HsAppType _ _)    = True
+isQuietHsExpr (HsAppTypeOut _ _) = True
+isQuietHsExpr (OpApp _ _ _ _)    = True
 isQuietHsExpr _ = False
 
-pprBinds :: (OutputableBndr idL, OutputableBndr idR)
+pprBinds :: (OutputableBndrId idL, OutputableBndrId idR)
          => HsLocalBindsLR idL idR -> SDoc
 pprBinds b = pprDeeper (ppr b)
 
 -----------------------
-ppr_lexpr :: OutputableBndr id => LHsExpr id -> SDoc
+ppr_lexpr :: (OutputableBndrId id) => LHsExpr id -> SDoc
 ppr_lexpr e = ppr_expr (unLoc e)
 
-ppr_expr :: forall id. OutputableBndr id => HsExpr id -> SDoc
+ppr_expr :: forall id. (OutputableBndrId id) => HsExpr id -> SDoc
 ppr_expr (HsVar (L _ v))  = pprPrefixOcc v
-ppr_expr (HsUnboundVar v) = pprPrefixOcc v
+ppr_expr (HsUnboundVar uv)= pprPrefixOcc (unboundVarOcc uv)
 ppr_expr (HsIPVar v)      = ppr v
 ppr_expr (HsOverLabel l)  = char '#' <> ppr l
 ppr_expr (HsLit lit)      = ppr lit
@@ -689,12 +800,9 @@ ppr_expr (HsPar e)        = parens (ppr_lexpr e)
 ppr_expr (HsCoreAnn _ (StringLiteral _ s) e)
   = vcat [text "HsCoreAnn" <+> ftext s, ppr_lexpr e]
 
-ppr_expr (HsApp e1 e2)
-  = let (fun, args) = collect_args e1 [e2] in
-    hang (ppr_lexpr fun) 2 (sep (map pprParendLExpr args))
-  where
-    collect_args (L _ (HsApp fun arg)) args = collect_args fun (arg:args)
-    collect_args fun args = (fun, args)
+ppr_expr e@(HsApp {})        = ppr_apps e []
+ppr_expr e@(HsAppType {})    = ppr_apps e []
+ppr_expr e@(HsAppTypeOut {}) = ppr_apps e []
 
 ppr_expr (OpApp e1 op _ e2)
   = case unLoc op of
@@ -746,16 +854,21 @@ ppr_expr (ExplicitTuple exprs boxity)
     punc (Missing {} : _) = comma
     punc []               = empty
 
-ppr_expr (HsLam matches)
-  = pprMatches (LambdaExpr :: HsMatchContext id) matches
+ppr_expr (ExplicitSum alt arity expr _)
+  = text "(#" <+> ppr_bars (alt - 1) <+> ppr expr <+> ppr_bars (arity - alt) <+> text "#)"
+  where
+    ppr_bars n = hsep (replicate n (char '|'))
 
-ppr_expr (HsLamCase _ matches)
+ppr_expr (HsLam matches)
+  = pprMatches matches
+
+ppr_expr (HsLamCase matches)
   = sep [ sep [text "\\case {"],
-          nest 2 (pprMatches (CaseAlt :: HsMatchContext id) matches <+> char '}') ]
+          nest 2 (pprMatches matches <+> char '}') ]
 
 ppr_expr (HsCase expr matches)
   = sep [ sep [text "case", nest 4 (ppr expr), ptext (sLit "of {")],
-          nest 2 (pprMatches (CaseAlt :: HsMatchContext id) matches <+> char '}') ]
+          nest 2 (pprMatches matches <+> char '}') ]
 
 ppr_expr (HsIf _ e1 e2 e3)
   = sep [hsep [text "if", nest 2 (ppr e1), ptext (sLit "then")],
@@ -789,8 +902,8 @@ ppr_expr (ExplicitPArr _ exprs)
 ppr_expr (RecordCon { rcon_con_name = con_id, rcon_flds = rbinds })
   = hang (ppr con_id) 2 (ppr rbinds)
 
-ppr_expr (RecordUpd { rupd_expr = aexp, rupd_flds = rbinds })
-  = hang (pprLExpr aexp) 2 (braces (fsep (punctuate comma (map ppr rbinds))))
+ppr_expr (RecordUpd { rupd_expr = L _ aexp, rupd_flds = rbinds })
+  = hang (pprParendExpr aexp) 2 (braces (fsep (punctuate comma (map ppr rbinds))))
 
 ppr_expr (ExprWithTySig expr sig)
   = hang (nest 2 (ppr_lexpr expr) <+> dcolon)
@@ -815,11 +928,6 @@ ppr_expr (HsWrap co_fn e)
   = pprHsWrapper co_fn (\parens -> if parens then pprParendExpr e
                                              else pprExpr       e)
 
-ppr_expr (HsType (HsWC { hswc_body = ty }))
-  = char '@' <> pprParendHsType (unLoc ty)
-ppr_expr (HsTypeOut (HsWC { hswc_body = ty }))
-  = char '@' <> pprParendHsType (unLoc ty)
-
 ppr_expr (HsSpliceE s)         = pprSplice s
 ppr_expr (HsBracket b)         = pprHsBracket b
 ppr_expr (HsRnBracketOut e []) = ppr e
@@ -830,7 +938,7 @@ ppr_expr (HsTcBracketOut e ps) = ppr e $$ text "pending(tc)" <+> ppr ps
 ppr_expr (HsProc pat (L _ (HsCmdTop cmd _ _ _)))
   = hsep [text "proc", ppr pat, ptext (sLit "->"), ppr cmd]
 
-ppr_expr (HsStatic e)
+ppr_expr (HsStatic _ e)
   = hsep [text "static", pprParendLExpr e]
 
 ppr_expr (HsTick tickish exp)
@@ -868,6 +976,26 @@ ppr_expr (HsArrForm op _ args)
          4 (sep (map (pprCmdArg.unLoc) args) <+> text "|)")
 ppr_expr (HsRecFld f) = ppr f
 
+-- We must tiresomely make the "id" parameter to the LHsWcType existential
+-- because it's different in the HsAppType case and the HsAppTypeOut case
+data LHsWcTypeX = forall id. (OutputableBndrId id) => LHsWcTypeX (LHsWcType id)
+
+ppr_apps :: (OutputableBndrId id)
+         => HsExpr id
+         -> [Either (LHsExpr id) LHsWcTypeX]
+         -> SDoc
+ppr_apps (HsApp (L _ fun) arg)        args
+  = ppr_apps fun (Left arg : args)
+ppr_apps (HsAppType (L _ fun) arg)    args
+  = ppr_apps fun (Right (LHsWcTypeX arg) : args)
+ppr_apps (HsAppTypeOut (L _ fun) arg) args
+  = ppr_apps fun (Right (LHsWcTypeX arg) : args)
+ppr_apps fun args = hang (ppr_expr fun) 2 (sep (map pp args))
+  where
+    pp (Left arg)                             = pprParendLExpr arg
+    pp (Right (LHsWcTypeX (HsWC { hswc_body = L _ arg })))
+      = char '@' <> pprParendHsType arg
+
 pprExternalSrcLoc :: (StringLiteral,(Int,Int),(Int,Int)) -> SDoc
 pprExternalSrcLoc (StringLiteral _ src,(n1,n2),(n3,n4))
   = ppr (src,(n1,n2),(n3,n4))
@@ -884,16 +1012,16 @@ fixities should do the job, except in debug mode (-dppr-debug) so we
 can see the structure of the parse tree.
 -}
 
-pprDebugParendExpr :: OutputableBndr id => LHsExpr id -> SDoc
+pprDebugParendExpr :: (OutputableBndrId id) => LHsExpr id -> SDoc
 pprDebugParendExpr expr
   = getPprStyle (\sty ->
     if debugStyle sty then pprParendLExpr expr
                       else pprLExpr      expr)
 
-pprParendLExpr :: OutputableBndr id => LHsExpr id -> SDoc
+pprParendLExpr :: (OutputableBndrId id) => LHsExpr id -> SDoc
 pprParendLExpr (L _ e) = pprParendExpr e
 
-pprParendExpr :: OutputableBndr id => HsExpr id -> SDoc
+pprParendExpr :: (OutputableBndrId id) => HsExpr id -> SDoc
 pprParendExpr expr
   | hsExprNeedsParens expr = parens (pprExpr expr)
   | otherwise              = pprExpr expr
@@ -914,8 +1042,6 @@ hsExprNeedsParens (HsOverLabel {})    = False
 hsExprNeedsParens (ExplicitTuple {})  = False
 hsExprNeedsParens (ExplicitList {})   = False
 hsExprNeedsParens (ExplicitPArr {})   = False
-hsExprNeedsParens (RecordCon {})      = False
-hsExprNeedsParens (RecordUpd {})      = False
 hsExprNeedsParens (HsPar {})          = False
 hsExprNeedsParens (HsBracket {})      = False
 hsExprNeedsParens (HsRnBracketOut {}) = False
@@ -923,8 +1049,6 @@ hsExprNeedsParens (HsTcBracketOut {}) = False
 hsExprNeedsParens (HsDo sc _ _)
        | isListCompExpr sc            = False
 hsExprNeedsParens (HsRecFld{})        = False
-hsExprNeedsParens (HsType {})         = False
-hsExprNeedsParens (HsTypeOut {})      = False
 hsExprNeedsParens _ = True
 
 
@@ -1035,11 +1159,10 @@ data HsCmd id
                 (HsCmd id)     -- If   cmd :: arg1 --> res
                                --      wrap :: arg1 "->" arg2
                                -- Then (HsCmdWrap wrap cmd) :: arg2 --> res
-  deriving (Typeable)
 deriving instance (DataId id) => Data (HsCmd id)
 
 data HsArrAppType = HsHigherOrderApp | HsFirstOrderApp
-  deriving (Data, Typeable)
+  deriving Data
 
 
 {- | Top-level command, introducing a new arrow.
@@ -1054,19 +1177,18 @@ data HsCmdTop id
              (PostTc id Type)   -- Nested tuple of inputs on the command's stack
              (PostTc id Type)   -- return type of the command
              (CmdSyntaxTable id) -- See Note [CmdSyntaxTable]
-  deriving (Typeable)
 deriving instance (DataId id) => Data (HsCmdTop id)
 
-instance OutputableBndr id => Outputable (HsCmd id) where
+instance (OutputableBndrId id) => Outputable (HsCmd id) where
     ppr cmd = pprCmd cmd
 
 -----------------------
 -- pprCmd and pprLCmd call pprDeeper;
 -- the underscore versions do not
-pprLCmd :: OutputableBndr id => LHsCmd id -> SDoc
+pprLCmd :: (OutputableBndrId id) => LHsCmd id -> SDoc
 pprLCmd (L _ c) = pprCmd c
 
-pprCmd :: OutputableBndr id => HsCmd id -> SDoc
+pprCmd :: (OutputableBndrId id) => HsCmd id -> SDoc
 pprCmd c | isQuietHsCmd c =            ppr_cmd c
          | otherwise      = pprDeeper (ppr_cmd c)
 
@@ -1080,10 +1202,10 @@ isQuietHsCmd (HsCmdApp _ _) = True
 isQuietHsCmd _ = False
 
 -----------------------
-ppr_lcmd :: OutputableBndr id => LHsCmd id -> SDoc
+ppr_lcmd :: (OutputableBndrId id) => LHsCmd id -> SDoc
 ppr_lcmd c = ppr_cmd (unLoc c)
 
-ppr_cmd :: forall id. OutputableBndr id => HsCmd id -> SDoc
+ppr_cmd :: forall id. (OutputableBndrId id) => HsCmd id -> SDoc
 ppr_cmd (HsCmdPar c) = parens (ppr_lcmd c)
 
 ppr_cmd (HsCmdApp c e)
@@ -1094,11 +1216,11 @@ ppr_cmd (HsCmdApp c e)
     collect_args fun args = (fun, args)
 
 ppr_cmd (HsCmdLam matches)
-  = pprMatches (LambdaExpr :: HsMatchContext id) matches
+  = pprMatches matches
 
 ppr_cmd (HsCmdCase expr matches)
   = sep [ sep [text "case", nest 4 (ppr expr), ptext (sLit "of {")],
-          nest 2 (pprMatches (CaseAlt :: HsMatchContext id) matches <+> char '}') ]
+          nest 2 (pprMatches matches <+> char '}') ]
 
 ppr_cmd (HsCmdIf _ e ct ce)
   = sep [hsep [text "if", nest 2 (ppr e), ptext (sLit "then")],
@@ -1134,13 +1256,13 @@ ppr_cmd (HsCmdArrForm op _ args)
   = hang (text "(|" <> ppr_lexpr op)
          4 (sep (map (pprCmdArg.unLoc) args) <> text "|)")
 
-pprCmdArg :: OutputableBndr id => HsCmdTop id -> SDoc
+pprCmdArg :: (OutputableBndrId id) => HsCmdTop id -> SDoc
 pprCmdArg (HsCmdTop cmd@(L _ (HsCmdArrForm _ Nothing [])) _ _ _)
   = ppr_lcmd cmd
 pprCmdArg (HsCmdTop cmd _ _ _)
   = parens (ppr_lcmd cmd)
 
-instance OutputableBndr id => Outputable (HsCmdTop id) where
+instance (OutputableBndrId id) => Outputable (HsCmdTop id) where
     ppr = pprCmdArg
 
 {-
@@ -1183,7 +1305,6 @@ data MatchGroup id body
      -- The type is the type of the entire group
      --      t1 -> ... -> tn -> tr
      -- where there are n patterns
-  deriving (Typeable)
 deriving instance (Data body,DataId id) => Data (MatchGroup id body)
 
 type LMatch id body = Located (Match id body)
@@ -1193,20 +1314,29 @@ type LMatch id body = Located (Match id body)
 -- For details on above see note [Api annotations] in ApiAnnotation
 data Match id body
   = Match {
-        m_fixity :: MatchFixity id,
-          -- See note [m_fixity in Match]
+        m_ctxt :: HsMatchContext (NameOrRdrName id),
+          -- See note [m_ctxt in Match]
         m_pats :: [LPat id], -- The patterns
         m_type :: (Maybe (LHsType id)),
                                  -- A type signature for the result of the match
                                  -- Nothing after typechecking
                                  -- NB: No longer supported
         m_grhss :: (GRHSs id body)
-  } deriving (Typeable)
+  }
 deriving instance (Data body,DataId id) => Data (Match id body)
 
 {-
-Note [m_fixity in Match]
+Note [m_ctxt in Match]
 ~~~~~~~~~~~~~~~~~~~~~~
+
+A Match can occur in a number of contexts, such as a FunBind, HsCase, HsLam and
+so on.
+
+In order to simplify tooling processing and pretty print output, the provenance
+is captured in an HsMatchContext.
+
+This is particularly important for the API Annotations for a multi-equation
+FunBind.
 
 The parser initially creates a FunBind with a single Match in it for
 every function definition it sees.
@@ -1228,31 +1358,26 @@ Example infix function definition requiring individual API Annotations
     (  &&&  ) [] ys =  ys
 
 
+
 -}
 
--- |When a Match is part of a FunBind, it captures one complete equation for the
--- function. As such it has the function name, and its fixity.
-data MatchFixity id
-  = NonFunBindMatch
-  | FunBindMatch (Located id) -- of the Id
-                 Bool         -- is infix
-  deriving (Typeable)
-deriving instance (DataId id) => Data (MatchFixity id)
 
 isInfixMatch :: Match id body -> Bool
-isInfixMatch match = case m_fixity match of
-  FunBindMatch _ True -> True
-  _                   -> False
+isInfixMatch match = case m_ctxt match of
+  FunRhs _ Infix -> True
+  _              -> False
 
 isEmptyMatchGroup :: MatchGroup id body -> Bool
 isEmptyMatchGroup (MG { mg_alts = ms }) = null $ unLoc ms
 
--- | Is there only one RHS in this group?
-isSingletonMatchGroup :: MatchGroup id body -> Bool
-isSingletonMatchGroup (MG { mg_alts = L _ [match] })
-  | L _ (Match { m_grhss = GRHSs { grhssGRHSs = [_] } }) <- match
+-- | Is there only one RHS in this list of matches?
+isSingletonMatchGroup :: [LMatch id body] -> Bool
+isSingletonMatchGroup matches
+  | [L _ match] <- matches
+  , Match { m_grhss = GRHSs { grhssGRHSs = [_] } } <- match
   = True
-isSingletonMatchGroup _ = False
+  | otherwise
+  = False
 
 matchGroupArity :: MatchGroup id body -> Arity
 -- Precondition: MatchGroup is non-empty
@@ -1276,7 +1401,7 @@ data GRHSs id body
   = GRHSs {
       grhssGRHSs :: [LGRHS id body],       -- ^ Guarded RHSs
       grhssLocalBinds :: Located (HsLocalBinds id) -- ^ The where clause
-    } deriving (Typeable)
+    }
 deriving instance (Data body,DataId id) => Data (GRHSs id body)
 
 type LGRHS id body = Located (GRHS id body)
@@ -1284,40 +1409,39 @@ type LGRHS id body = Located (GRHS id body)
 -- | Guarded Right Hand Side.
 data GRHS id body = GRHS [GuardLStmt id] -- Guards
                          body            -- Right hand side
-  deriving (Typeable)
 deriving instance (Data body,DataId id) => Data (GRHS id body)
 
 -- We know the list must have at least one @Match@ in it.
 
-pprMatches :: (OutputableBndr idL, OutputableBndr idR, Outputable body)
-           => HsMatchContext idL -> MatchGroup idR body -> SDoc
-pprMatches ctxt (MG { mg_alts = matches })
-    = vcat (map (pprMatch ctxt) (map unLoc (unLoc matches)))
+pprMatches :: (OutputableBndrId idR, Outputable body)
+           => MatchGroup idR body -> SDoc
+pprMatches MG { mg_alts = matches }
+    = vcat (map pprMatch (map unLoc (unLoc matches)))
       -- Don't print the type; it's only a place-holder before typechecking
 
 -- Exported to HsBinds, which can't see the defn of HsMatchContext
-pprFunBind :: (OutputableBndr idL, OutputableBndr idR, Outputable body)
-           => idL -> MatchGroup idR body -> SDoc
-pprFunBind fun matches = pprMatches (FunRhs fun) matches
+pprFunBind :: (OutputableBndrId idR, Outputable body)
+           => MatchGroup idR body -> SDoc
+pprFunBind matches = pprMatches matches
 
 -- Exported to HsBinds, which can't see the defn of HsMatchContext
-pprPatBind :: forall bndr id body. (OutputableBndr bndr, OutputableBndr id, Outputable body)
+pprPatBind :: forall bndr id body. (OutputableBndrId bndr,
+                                    OutputableBndrId id, Outputable body)
            => LPat bndr -> GRHSs id body -> SDoc
 pprPatBind pat (grhss)
  = sep [ppr pat, nest 2 (pprGRHSs (PatBindRhs :: HsMatchContext id) grhss)]
 
-pprMatch :: (OutputableBndr idL, OutputableBndr idR, Outputable body)
-         => HsMatchContext idL -> Match idR body -> SDoc
-pprMatch ctxt match
+pprMatch :: (OutputableBndrId idR, Outputable body) => Match idR body -> SDoc
+pprMatch match
   = sep [ sep (herald : map (nest 2 . pprParendLPat) other_pats)
         , nest 2 ppr_maybe_ty
         , nest 2 (pprGRHSs ctxt (m_grhss match)) ]
   where
-    is_infix = isInfixMatch match
+    ctxt = m_ctxt match
     (herald, other_pats)
         = case ctxt of
-            FunRhs fun
-                | not is_infix -> (pprPrefixOcc fun, m_pats match)
+            FunRhs (L _ fun) fixity
+                | fixity == Prefix -> (pprPrefixOcc fun, m_pats match)
                         -- f x y z = e
                         -- Not pprBndr; the AbsBinds will
                         -- have printed the signature
@@ -1342,14 +1466,14 @@ pprMatch ctxt match
                         Nothing -> empty
 
 
-pprGRHSs :: (OutputableBndr idR, Outputable body)
+pprGRHSs :: (OutputableBndrId idR, Outputable body)
          => HsMatchContext idL -> GRHSs idR body -> SDoc
 pprGRHSs ctxt (GRHSs grhss (L _ binds))
   = vcat (map (pprGRHS ctxt . unLoc) grhss)
  $$ ppUnless (isEmptyLocalBinds binds)
       (text "where" $$ nest 4 (pprBinds binds))
 
-pprGRHS :: (OutputableBndr idR, Outputable body)
+pprGRHS :: (OutputableBndrId idR, Outputable body)
         => HsMatchContext idL -> GRHS idR body -> SDoc
 pprGRHS ctxt (GRHS [] body)
  =  pp_rhs ctxt body
@@ -1513,21 +1637,19 @@ data StmtLR idL idR body -- body should always be (LHs**** idR)
                                    -- With rebindable syntax the type might not
                                    -- be quite as simple as (m (tya, tyb, tyc)).
       }
-  deriving (Typeable)
 deriving instance (Data body, DataId idL, DataId idR)
   => Data (StmtLR idL idR body)
 
 data TransForm   -- The 'f' below is the 'using' function, 'e' is the by function
   = ThenForm     -- then f               or    then f by e             (depending on trS_by)
   | GroupForm    -- then group using f   or    then group by e using f (depending on trS_by)
-  deriving (Data, Typeable)
+  deriving Data
 
 data ParStmtBlock idL idR
   = ParStmtBlock
         [ExprLStmt idL]
         [idR]              -- The variables to be returned
         (SyntaxExpr idR)   -- The return operator
-  deriving( Typeable )
 deriving instance (DataId idL, DataId idR) => Data (ParStmtBlock idL idR)
 
 data ApplicativeArg idL idR
@@ -1538,7 +1660,6 @@ data ApplicativeArg idL idR
       [ExprLStmt idL]            -- stmts
       (HsExpr idL)               -- return (v1,..,vn), or just (v1,..,vn)
       (LPat idL)                 -- (v1,...,vn)
-  deriving( Typeable )
 deriving instance (DataId idL, DataId idR) => Data (ApplicativeArg idL idR)
 
 {-
@@ -1678,15 +1799,15 @@ In any other context than 'MonadComp', the fields for most of these
 'SyntaxExpr's stay bottom.
 -}
 
-instance (OutputableBndr idL)
-      => Outputable (ParStmtBlock idL idR) where
+instance (OutputableBndrId idL) => Outputable (ParStmtBlock idL idR) where
   ppr (ParStmtBlock stmts _ _) = interpp'SP stmts
 
-instance (OutputableBndr idL, OutputableBndr idR, Outputable body)
+instance (OutputableBndrId idL, OutputableBndrId idR, Outputable body)
          => Outputable (StmtLR idL idR body) where
     ppr stmt = pprStmt stmt
 
-pprStmt :: forall idL idR body . (OutputableBndr idL, OutputableBndr idR, Outputable body)
+pprStmt :: forall idL idR body . (OutputableBndrId idL, OutputableBndrId idR,
+                                  Outputable body)
         => (StmtLR idL idR body) -> SDoc
 pprStmt (LastStmt expr ret_stripped _)
   = ifPprDebug (text "[last]") <+>
@@ -1749,7 +1870,8 @@ pprStmt (ApplicativeStmt args mb_join _)
                 (stmts ++ [noLoc (LastStmt (noLoc return) False noSyntaxExpr)]))
            (error "pprStmt"))
 
-pprTransformStmt :: OutputableBndr id => [id] -> LHsExpr id -> Maybe (LHsExpr id) -> SDoc
+pprTransformStmt :: (OutputableBndrId id)
+                 => [id] -> LHsExpr id -> Maybe (LHsExpr id) -> SDoc
 pprTransformStmt bndrs using by
   = sep [ text "then" <+> ifPprDebug (braces (ppr bndrs))
         , nest 2 (ppr using)
@@ -1765,7 +1887,7 @@ pprBy :: Outputable body => Maybe body -> SDoc
 pprBy Nothing  = empty
 pprBy (Just e) = text "by" <+> ppr e
 
-pprDo :: (OutputableBndr id, Outputable body)
+pprDo :: (OutputableBndrId id, Outputable body)
       => HsStmtContext any -> [LStmt id body] -> SDoc
 pprDo DoExpr        stmts = text "do"  <+> ppr_do_stmts stmts
 pprDo GhciStmtCtxt  stmts = text "do"  <+> ppr_do_stmts stmts
@@ -1776,7 +1898,7 @@ pprDo PArrComp      stmts = paBrackets  $ pprComp stmts
 pprDo MonadComp     stmts = brackets    $ pprComp stmts
 pprDo _             _     = panic "pprDo" -- PatGuard, ParStmtCxt
 
-ppr_do_stmts :: (OutputableBndr idL, OutputableBndr idR, Outputable body)
+ppr_do_stmts :: (OutputableBndrId idL, OutputableBndrId idR, Outputable body)
              => [LStmtLR idL idR body] -> SDoc
 -- Print a bunch of do stmts, with explicit braces and semicolons,
 -- so that we are not vulnerable to layout bugs
@@ -1784,7 +1906,7 @@ ppr_do_stmts stmts
   = lbrace <+> pprDeeperList vcat (punctuate semi (map ppr stmts))
            <+> rbrace
 
-pprComp :: (OutputableBndr id, Outputable body)
+pprComp :: (OutputableBndrId id, Outputable body)
         => [LStmt id body] -> SDoc
 pprComp quals     -- Prints:  body | qual1, ..., qualn
   | not (null quals)
@@ -1793,7 +1915,7 @@ pprComp quals     -- Prints:  body | qual1, ..., qualn
   | otherwise
   = pprPanic "pprComp" (pprQuals quals)
 
-pprQuals :: (OutputableBndr id, Outputable body)
+pprQuals :: (OutputableBndrId id, Outputable body)
         => [LStmt id body] -> SDoc
 -- Show list comprehension qualifiers separated by commas
 pprQuals quals = interpp'SP quals
@@ -1820,7 +1942,15 @@ data HsSplice id
         id               -- Quoter
         SrcSpan          -- The span of the enclosed string
         FastString       -- The enclosed string
-  deriving (Typeable )
+
+   | HsSpliced  -- See Note [Delaying modFinalizers in untyped splices] in
+                -- RnSplice.
+                -- This is the result of splicing a splice. It is produced by
+                -- the renamer and consumed by the typechecker. It lives only
+                -- between the two.
+        ThModFinalizers     -- TH finalizers produced by the splice.
+        (HsSplicedThing id) -- The result of splicing
+  deriving Typeable
 
 deriving instance (DataId id) => Data (HsSplice id)
 
@@ -1828,23 +1958,57 @@ isTypedSplice :: HsSplice id -> Bool
 isTypedSplice (HsTypedSplice {}) = True
 isTypedSplice _                  = False   -- Quasi-quotes are untyped splices
 
+-- | Finalizers produced by a splice with
+-- 'Language.Haskell.TH.Syntax.addModFinalizer'
+--
+-- See Note [Delaying modFinalizers in untyped splices] in RnSplice. For how
+-- this is used.
+--
+#ifdef GHCI
+newtype ThModFinalizers = ThModFinalizers [ForeignRef (TH.Q ())]
+#else
+data ThModFinalizers = ThModFinalizers
+#endif
+
+-- A Data instance which ignores the argument of 'ThModFinalizers'.
+#ifdef GHCI
+instance Data ThModFinalizers where
+  gunfold _ z _ = z $ ThModFinalizers []
+  toConstr  a   = mkConstr (dataTypeOf a) "ThModFinalizers" [] Data.Prefix
+  dataTypeOf a  = mkDataType "HsExpr.ThModFinalizers" [toConstr a]
+#else
+instance Data ThModFinalizers where
+  gunfold _ z _ = z ThModFinalizers
+  toConstr  a   = mkConstr (dataTypeOf a) "ThModFinalizers" [] Data.Prefix
+  dataTypeOf a  = mkDataType "HsExpr.ThModFinalizers" [toConstr a]
+#endif
+
+-- | Values that can result from running a splice.
+data HsSplicedThing id
+    = HsSplicedExpr (HsExpr id)
+    | HsSplicedTy   (HsType id)
+    | HsSplicedPat  (Pat id)
+  deriving Typeable
+
+deriving instance (DataId id) => Data (HsSplicedThing id)
+
 -- See Note [Pending Splices]
 type SplicePointName = Name
 
 data PendingRnSplice
   = PendingRnSplice UntypedSpliceFlavour SplicePointName (LHsExpr Name)
-  deriving (Data, Typeable)
+  deriving Data
 
 data UntypedSpliceFlavour
   = UntypedExpSplice
   | UntypedPatSplice
   | UntypedTypeSplice
   | UntypedDeclSplice
-  deriving( Data, Typeable )
+  deriving Data
 
 data PendingTcSplice
   = PendingTcSplice SplicePointName (LHsExpr Id)
-  deriving( Data, Typeable )
+  deriving Data
 
 
 {-
@@ -1911,23 +2075,30 @@ splices. In contrast, when pretty printing the output of the type checker, we
 sense, although I hate to add another constructor to HsExpr.
 -}
 
-instance OutputableBndr id => Outputable (HsSplice id) where
+instance OutputableBndrId id => Outputable (HsSplicedThing id) where
+  ppr (HsSplicedExpr e) = ppr_expr e
+  ppr (HsSplicedTy   t) = ppr t
+  ppr (HsSplicedPat  p) = ppr p
+
+instance (OutputableBndrId id) => Outputable (HsSplice id) where
   ppr s = pprSplice s
 
-pprPendingSplice :: OutputableBndr id => SplicePointName -> LHsExpr id -> SDoc
+pprPendingSplice :: (OutputableBndrId id)
+                 => SplicePointName -> LHsExpr id -> SDoc
 pprPendingSplice n e = angleBrackets (ppr n <> comma <+> ppr e)
 
-pprSplice :: OutputableBndr id => HsSplice id -> SDoc
+pprSplice :: (OutputableBndrId id) => HsSplice id -> SDoc
 pprSplice (HsTypedSplice   n e)  = ppr_splice (text "$$") n e
 pprSplice (HsUntypedSplice n e)  = ppr_splice (text "$")  n e
 pprSplice (HsQuasiQuote n q _ s) = ppr_quasi n q s
+pprSplice (HsSpliced _ thing)    = ppr thing
 
 ppr_quasi :: OutputableBndr id => id -> id -> FastString -> SDoc
 ppr_quasi n quoter quote = ifPprDebug (brackets (ppr n)) <>
                            char '[' <> ppr quoter <> vbar <>
                            ppr quote <> text "|]"
 
-ppr_splice :: OutputableBndr id => SDoc -> id -> LHsExpr id -> SDoc
+ppr_splice :: (OutputableBndrId id) => SDoc -> id -> LHsExpr id -> SDoc
 ppr_splice herald n e
     = herald <> ifPprDebug (brackets (ppr n)) <> eDoc
     where
@@ -1948,18 +2119,17 @@ data HsBracket id = ExpBr (LHsExpr id)   -- [|  expr  |]
                   | VarBr Bool id        -- True: 'x, False: ''T
                                          -- (The Bool flag is used only in pprHsBracket)
                   | TExpBr (LHsExpr id)  -- [||  expr  ||]
-  deriving (Typeable)
 deriving instance (DataId id) => Data (HsBracket id)
 
 isTypedBracket :: HsBracket id -> Bool
 isTypedBracket (TExpBr {}) = True
 isTypedBracket _           = False
 
-instance OutputableBndr id => Outputable (HsBracket id) where
+instance (OutputableBndrId id) => Outputable (HsBracket id) where
   ppr = pprHsBracket
 
 
-pprHsBracket :: OutputableBndr id => HsBracket id -> SDoc
+pprHsBracket :: (OutputableBndrId id) => HsBracket id -> SDoc
 pprHsBracket (ExpBr e)   = thBrackets empty (ppr e)
 pprHsBracket (PatBr p)   = thBrackets (char 'p') (ppr p)
 pprHsBracket (DecBrG gp) = thBrackets (char 'd') (ppr gp)
@@ -1999,10 +2169,9 @@ data ArithSeqInfo id
   | FromThenTo      (LHsExpr id)
                     (LHsExpr id)
                     (LHsExpr id)
-  deriving (Typeable)
 deriving instance (DataId id) => Data (ArithSeqInfo id)
 
-instance OutputableBndr id => Outputable (ArithSeqInfo id) where
+instance (OutputableBndrId id) => Outputable (ArithSeqInfo id) where
     ppr (From e1)             = hcat [ppr e1, pp_dotdot]
     ppr (FromThen e1 e2)      = hcat [ppr e1, comma, space, ppr e2, pp_dotdot]
     ppr (FromTo e1 e3)        = hcat [ppr e1, pp_dotdot, ppr e3]
@@ -2020,40 +2189,49 @@ pp_dotdot = text " .. "
 ************************************************************************
 -}
 
-data HsMatchContext id  -- Context of a Match
-  = FunRhs id                   -- Function binding for f
-  | LambdaExpr                  -- Patterns of a lambda
-  | CaseAlt                     -- Patterns and guards on a case alternative
-  | IfAlt                       -- Guards of a multi-way if alternative
-  | ProcExpr                    -- Patterns of a proc
-  | PatBindRhs                  -- A pattern binding  eg [y] <- e = e
+data FunctionFixity = Prefix | Infix deriving (Typeable,Data,Eq)
 
-  | RecUpd                      -- Record update [used only in DsExpr to
+instance Outputable FunctionFixity where
+  ppr Prefix = text "Prefix"
+  ppr Infix  = text "Infix"
+
+-- | Context of a Match
+data HsMatchContext id
+  = FunRhs (Located id) FunctionFixity -- ^Function binding for f, fixity
+  | LambdaExpr                  -- ^Patterns of a lambda
+  | CaseAlt                     -- ^Patterns and guards on a case alternative
+  | IfAlt                       -- ^Guards of a multi-way if alternative
+  | ProcExpr                    -- ^Patterns of a proc
+  | PatBindRhs                  -- ^A pattern binding  eg [y] <- e = e
+
+  | RecUpd                      -- ^Record update [used only in DsExpr to
                                 --    tell matchWrapper what sort of
                                 --    runtime error message to generate]
 
-  | StmtCtxt (HsStmtContext id) -- Pattern of a do-stmt, list comprehension,
+  | StmtCtxt (HsStmtContext id) -- ^Pattern of a do-stmt, list comprehension,
                                 -- pattern guard, etc
 
-  | ThPatSplice                 -- A Template Haskell pattern splice
-  | ThPatQuote                  -- A Template Haskell pattern quotation [p| (a,b) |]
-  | PatSyn                      -- A pattern synonym declaration
-  deriving (Data, Typeable)
+  | ThPatSplice            -- ^A Template Haskell pattern splice
+  | ThPatQuote             -- ^A Template Haskell pattern quotation [p| (a,b) |]
+  | PatSyn                 -- ^A pattern synonym declaration
+  deriving Functor
+deriving instance (DataIdPost id) => Data (HsMatchContext id)
 
 data HsStmtContext id
   = ListComp
   | MonadComp
-  | PArrComp                             -- Parallel array comprehension
+  | PArrComp                         -- ^Parallel array comprehension
 
-  | DoExpr                               -- do { ... }
-  | MDoExpr                              -- mdo { ... }  ie recursive do-expression
-  | ArrowExpr                            -- do-notation in an arrow-command context
+  | DoExpr                           -- ^do { ... }
+  | MDoExpr                          -- ^mdo { ... }  ie recursive do-expression
+  | ArrowExpr                        -- ^do-notation in an arrow-command context
 
-  | GhciStmtCtxt                         -- A command-line Stmt in GHCi pat <- rhs
-  | PatGuard (HsMatchContext id)         -- Pattern guard for specified thing
-  | ParStmtCtxt (HsStmtContext id)       -- A branch of a parallel stmt
-  | TransStmtCtxt (HsStmtContext id)     -- A branch of a transform stmt
-  deriving (Data, Typeable)
+  | GhciStmtCtxt                     -- ^A command-line Stmt in GHCi pat <- rhs
+  | PatGuard (HsMatchContext id)     -- ^Pattern guard for specified thing
+  | ParStmtCtxt (HsStmtContext id)   -- ^A branch of a parallel stmt
+  | TransStmtCtxt (HsStmtContext id) -- ^A branch of a transform stmt
+  deriving Functor
+deriving instance (DataIdPost id) => Data (HsStmtContext id)
 
 isListCompExpr :: HsStmtContext id -> Bool
 -- Uses syntax [ e | quals ]
@@ -2083,7 +2261,8 @@ matchSeparator ThPatSplice  = panic "unused"
 matchSeparator ThPatQuote   = panic "unused"
 matchSeparator PatSyn       = panic "unused"
 
-pprMatchContext :: Outputable id => HsMatchContext id -> SDoc
+pprMatchContext :: (Outputable (NameOrRdrName id),Outputable id)
+                => HsMatchContext id -> SDoc
 pprMatchContext ctxt
   | want_an ctxt = text "an" <+> pprMatchContextNoun ctxt
   | otherwise    = text "a"  <+> pprMatchContextNoun ctxt
@@ -2092,8 +2271,9 @@ pprMatchContext ctxt
     want_an ProcExpr    = True
     want_an _           = False
 
-pprMatchContextNoun :: Outputable id => HsMatchContext id -> SDoc
-pprMatchContextNoun (FunRhs fun)    = text "equation for"
+pprMatchContextNoun :: (Outputable (NameOrRdrName id),Outputable id)
+                    => HsMatchContext id -> SDoc
+pprMatchContextNoun (FunRhs (L _ fun) _) = text "equation for"
                                       <+> quotes (ppr fun)
 pprMatchContextNoun CaseAlt         = text "case alternative"
 pprMatchContextNoun IfAlt           = text "multi-way if alternative"
@@ -2108,7 +2288,9 @@ pprMatchContextNoun (StmtCtxt ctxt) = text "pattern binding in"
 pprMatchContextNoun PatSyn          = text "pattern synonym declaration"
 
 -----------------
-pprAStmtContext, pprStmtContext :: Outputable id => HsStmtContext id -> SDoc
+pprAStmtContext, pprStmtContext :: (Outputable id,
+                                    Outputable (NameOrRdrName id))
+                                => HsStmtContext id -> SDoc
 pprAStmtContext ctxt = article <+> pprStmtContext ctxt
   where
     pp_an = text "an"
@@ -2144,8 +2326,9 @@ pprStmtContext (TransStmtCtxt c)
 
 
 -- Used to generate the string for a *runtime* error message
-matchContextErrString :: Outputable id => HsMatchContext id -> SDoc
-matchContextErrString (FunRhs fun)         = text "function" <+> ppr fun
+matchContextErrString :: Outputable id
+                      => HsMatchContext id -> SDoc
+matchContextErrString (FunRhs (L _ fun) _) = text "function" <+> ppr fun
 matchContextErrString CaseAlt              = text "case"
 matchContextErrString IfAlt                = text "multi-way if"
 matchContextErrString PatBindRhs           = text "pattern binding"
@@ -2166,12 +2349,15 @@ matchContextErrString (StmtCtxt ListComp)          = text "list comprehension"
 matchContextErrString (StmtCtxt MonadComp)         = text "monad comprehension"
 matchContextErrString (StmtCtxt PArrComp)          = text "array comprehension"
 
-pprMatchInCtxt :: (OutputableBndr idL, OutputableBndr idR, Outputable body)
-               => HsMatchContext idL -> Match idR body -> SDoc
-pprMatchInCtxt ctxt match  = hang (text "In" <+> pprMatchContext ctxt <> colon)
-                             4 (pprMatch ctxt match)
+pprMatchInCtxt :: (OutputableBndrId idR,
+                   Outputable (NameOrRdrName (NameOrRdrName idR)),
+                   Outputable body)
+               => Match idR body -> SDoc
+pprMatchInCtxt match  = hang (text "In" <+> pprMatchContext (m_ctxt match)
+                                        <> colon)
+                             4 (pprMatch match)
 
-pprStmtInCtxt :: (OutputableBndr idL, OutputableBndr idR, Outputable body)
+pprStmtInCtxt :: (OutputableBndrId idL, OutputableBndrId idR, Outputable body)
                => HsStmtContext idL -> StmtLR idL idR body -> SDoc
 pprStmtInCtxt ctxt (LastStmt e _ _)
   | isListCompExpr ctxt      -- For [ e | .. ], do not mutter about "stmts"

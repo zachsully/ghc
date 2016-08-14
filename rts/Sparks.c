@@ -89,7 +89,7 @@ pruneSparkQueue (Capability *cap)
 {
     SparkPool *pool;
     StgClosurePtr spark, tmp, *elements;
-    nat n, pruned_sparks; // stats only
+    uint32_t n, pruned_sparks; // stats only
     StgWord botInd,oldBotInd,currInd; // indices in array (always < size)
     const StgInfoTable *info;
 
@@ -211,15 +211,12 @@ pruneSparkQueue (Capability *cap)
               }
           } else {
               if (INFO_PTR_TO_STRUCT(info)->type == THUNK_STATIC) {
-                  if (*THUNK_STATIC_LINK(spark) != NULL) {
-                      elements[botInd] = spark; // keep entry (new address)
-                      botInd++;
-                      n++;
-                  } else {
-                      pruned_sparks++; // discard spark
-                      cap->spark_stats.gcd++;
-                      traceEventSparkGC(cap);
-                  }
+                  // We can't tell whether a THUNK_STATIC is garbage or not.
+                  // See also Note [STATIC_LINK fields]
+                  // isAlive() also ignores static closures (see GCAux.c)
+                  elements[botInd] = spark; // keep entry (new address)
+                  botInd++;
+                  n++;
               } else {
                   pruned_sparks++; // discard spark
                   cap->spark_stats.fizzled++;
@@ -293,10 +290,10 @@ traverseSparkQueue (evac_fn evac, void *user, Capability *cap)
  *
  * Could be called after GC, before Cap. release, from scheduler.
  * -------------------------------------------------------------------------- */
-void balanceSparkPoolsCaps(nat n_caps, Capability caps[])
+void balanceSparkPoolsCaps(uint32_t n_caps, Capability caps[])
    GNUC3_ATTRIBUTE(__noreturn__);
 
-void balanceSparkPoolsCaps(nat n_caps STG_UNUSED,
+void balanceSparkPoolsCaps(uint32_t n_caps STG_UNUSED,
                            Capability caps[] STG_UNUSED) {
   barf("not implemented");
 }

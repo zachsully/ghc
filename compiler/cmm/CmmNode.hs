@@ -34,8 +34,10 @@ import qualified Unique as U
 
 import Compiler.Hoopl
 import Data.Maybe
-import Data.List (tails,sort)
+import Data.List (tails,sortBy)
 import Prelude hiding (succ)
+import Unique (nonDetCmpUnique)
+import Util
 
 
 ------------------------
@@ -335,7 +337,7 @@ instance UserOfRegs GlobalReg (CmmNode e x) where
                        (b -> GlobalReg -> b) -> b -> a -> b
           fold f z n = foldRegsUsed dflags f z n
 
-instance (Ord r, UserOfRegs r CmmExpr) => UserOfRegs r ForeignTarget where
+instance (Ord r, UserOfRegs r CmmReg) => UserOfRegs r ForeignTarget where
   -- The (Ord r) in the context is necessary here
   -- See Note [Recursive superclasses] in TcInstDcls
   foldRegsUsed _      _ z (PrimTarget _)      = z
@@ -581,7 +583,7 @@ data CmmTickScope
     -- to add ticks to this scope. On the other hand, this means that
     -- setting this scope on a block means no ticks apply to it.
 
-  | SubScope U.Unique CmmTickScope
+  | SubScope !U.Unique CmmTickScope
     -- ^ Constructs a new sub-scope to an existing scope. This allows
     -- us to translate Core-style scoping rules (see @tickishScoped@)
     -- into the Cmm world. Suppose the following code:
@@ -652,15 +654,23 @@ instance Eq CmmTickScope where
   (SubScope u _) == (SubScope u' _) = u == u'
   (SubScope _ _) == _               = False
   _              == (SubScope _ _)  = False
-  scope          == scope'          = sort (scopeUniques scope) ==
-                                      sort (scopeUniques scope')
+  scope          == scope'          =
+    sortBy nonDetCmpUnique (scopeUniques scope) ==
+    sortBy nonDetCmpUnique (scopeUniques scope')
+    -- This is still deterministic because
+    -- the order is the same for equal lists
+
+-- This is non-deterministic but we do not currently support deterministic
+-- code-generation. See Note [Unique Determinism and code generation]
+-- See Note [No Ord for Unique]
 instance Ord CmmTickScope where
   compare GlobalScope    GlobalScope     = EQ
   compare GlobalScope    _               = LT
   compare _              GlobalScope     = GT
-  compare (SubScope u _) (SubScope u' _) = compare u u'
-  compare scope scope'                   = compare (sort $ scopeUniques scope)
-                                                   (sort $ scopeUniques scope')
+  compare (SubScope u _) (SubScope u' _) = nonDetCmpUnique u u'
+  compare scope scope'                   = cmpList nonDetCmpUnique
+     (sortBy nonDetCmpUnique $ scopeUniques scope)
+     (sortBy nonDetCmpUnique $ scopeUniques scope')
 
 instance Outputable CmmTickScope where
   ppr GlobalScope     = text "global"

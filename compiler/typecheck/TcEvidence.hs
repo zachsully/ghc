@@ -62,6 +62,7 @@ import Outputable
 import FastString
 import SrcLoc
 import Data.IORef( IORef )
+import UniqFM
 
 {-
 Note [TcCoercions]
@@ -185,7 +186,7 @@ data HsWrapper
 
   | WpLet TcEvBinds             -- Non-empty (or possibly non-empty) evidence bindings,
                                 -- so that the identity coercion is always exactly WpHole
-  deriving (Data.Data, Data.Typeable)
+  deriving Data.Data
 
 
 (<.>) :: HsWrapper -> HsWrapper -> HsWrapper
@@ -281,8 +282,6 @@ data TcEvBinds
 
   | EvBinds             -- Immutable after zonking
        (Bag EvBind)
-
-  deriving( Data.Typeable )
 
 data EvBindsVar = EvBindsVar (IORef EvBindMap) Unique
      -- The Unique is for debug printing only
@@ -380,7 +379,7 @@ data EvTerm
 
   | EvTypeable Type EvTypeable   -- Dictionary for (Typeable ty)
 
-  deriving( Data.Data, Data.Typeable )
+  deriving Data.Data
 
 
 -- | Instructions on how to make a 'Typeable' dictionary.
@@ -399,12 +398,12 @@ data EvTypeable
     -- The 'EvTerm' is evidence of, e.g., @KnownNat 3@
     -- (see Trac #10348)
 
-  deriving ( Data.Data, Data.Typeable )
+  deriving Data.Data
 
 data EvLit
   = EvNum Integer
   | EvStr FastString
-    deriving( Data.Data, Data.Typeable )
+    deriving Data.Data
 
 -- | Evidence for @CallStack@ implicit parameters.
 data EvCallStack
@@ -413,7 +412,7 @@ data EvCallStack
   | EvCsPushCall Name RealSrcSpan EvTerm
     -- ^ @EvCsPushCall name loc stk@ represents a call to @name@, occurring at
     -- @loc@, in a calling context @stk@.
-  deriving( Data.Data, Data.Typeable )
+  deriving Data.Data
 
 {-
 Note [Typeable evidence terms]
@@ -606,6 +605,9 @@ in `g`, because `head` did not explicitly request a CallStack.
 Important Details:
 - GHC should NEVER report an insoluble CallStack constraint.
 
+- GHC should NEVER infer a CallStack constraint unless one was requested
+  with a partial type signature (See TcType.pickQuantifiablePreds).
+
 - A CallStack (defined in GHC.Stack.Types) is a [(String, SrcLoc)],
   where the String is the name of the binder that is used at the
   SrcLoc. SrcLoc is also defined in GHC.Stack.Types and contains the
@@ -685,15 +687,18 @@ evVarsOfTerms = mapUnionVarSet evVarsOfTerm
 
 -- | Do SCC analysis on a bag of 'EvBind's.
 sccEvBinds :: Bag EvBind -> [SCC EvBind]
-sccEvBinds bs = stronglyConnCompFromEdgedVertices edges
+sccEvBinds bs = stronglyConnCompFromEdgedVerticesUniq edges
   where
     edges :: [(EvBind, EvVar, [EvVar])]
     edges = foldrBag ((:) . mk_node) [] bs
 
     mk_node :: EvBind -> (EvBind, EvVar, [EvVar])
     mk_node b@(EvBind { eb_lhs = var, eb_rhs = term })
-      = (b, var, varSetElems (evVarsOfTerm term `unionVarSet`
-                              coVarsOfType (varType var)))
+      = (b, var, nonDetEltsUFM (evVarsOfTerm term `unionVarSet`
+                                coVarsOfType (varType var)))
+      -- It's OK to use nonDetEltsUFM here as stronglyConnCompFromEdgedVertices
+      -- is still deterministic even if the edges are in nondeterministic order
+      -- as explained in Note [Deterministic SCC] in Digraph.
 
 evVarsOfCallStack :: EvCallStack -> VarSet
 evVarsOfCallStack cs = case cs of

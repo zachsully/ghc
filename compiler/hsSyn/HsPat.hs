@@ -43,7 +43,7 @@ import {-# SOURCE #-} HsExpr            (SyntaxExpr, LHsExpr, HsSplice, pprLExpr
 -- friends:
 import HsBinds
 import HsLit
-import PlaceHolder -- ( PostRn,PostTc,DataId )
+import PlaceHolder
 import HsTypes
 import TcEvidence
 import BasicTypes
@@ -135,6 +135,16 @@ data Pat id
     -- ^ - 'ApiAnnotation.AnnKeywordId' :
     --            'ApiAnnotation.AnnOpen' @'('@ or @'(#'@,
     --            'ApiAnnotation.AnnClose' @')'@ or  @'#)'@
+
+  | SumPat      (LPat id)          -- Sum sub-pattern
+                ConTag             -- Alternative (one-based)
+                Arity              -- Arity
+                (PostTc id [Type]) -- PlaceHolder before typechecker, filled in
+                                   -- afterwards with the types of the
+                                   -- alternative
+    -- ^ - 'ApiAnnotation.AnnKeywordId' :
+    --            'ApiAnnotation.AnnOpen' @'(#'@,
+    --            'ApiAnnotation.AnnClose' @'#)'@
 
     -- For details on above see note [Api annotations] in ApiAnnotation
   | PArrPat     [LPat id]               -- Syntactic parallel array
@@ -228,7 +238,6 @@ data Pat id
                 Type                    -- Type of whole pattern, t1
         -- During desugaring a (CoPat co pat) turns into a cast with 'co' on
         -- the scrutinee, followed by a match on 'pat'
-  deriving (Typeable)
 deriving instance (DataId id) => Data (Pat id)
 
 type HsConPatDetails id = HsConDetails (LPat id) (HsRecFields id (LPat id))
@@ -246,7 +255,7 @@ data HsRecFields id arg         -- A bunch of record fields
         -- Used for both expressions and patterns
   = HsRecFields { rec_flds   :: [LHsRecField id arg],
                   rec_dotdot :: Maybe Int }  -- Note [DotDot fields]
-  deriving (Typeable, Functor, Foldable, Traversable)
+  deriving (Functor, Foldable, Traversable)
 deriving instance (DataId id, Data arg) => Data (HsRecFields id arg)
 
 
@@ -278,7 +287,7 @@ data HsRecField' id arg = HsRecField {
         hsRecFieldLbl :: Located id,
         hsRecFieldArg :: arg,           -- ^ Filled in by renamer when punning
         hsRecPun      :: Bool           -- ^ Note [Punning]
-  } deriving (Data, Typeable, Functor, Foldable, Traversable)
+  } deriving (Data, Functor, Foldable, Traversable)
 
 
 -- Note [Punning]
@@ -366,7 +375,7 @@ hsRecUpdFieldOcc = fmap unambiguousFieldOcc . hsRecFieldLbl
 ************************************************************************
 -}
 
-instance (OutputableBndr name) => Outputable (Pat name) where
+instance (OutputableBndrId name) => Outputable (Pat name) where
     ppr = pprPat
 
 pprPatBndr :: OutputableBndr name => name -> SDoc
@@ -378,10 +387,10 @@ pprPatBndr var                  -- Print with type info if -dppr-debug is on
     else
         pprPrefixOcc var
 
-pprParendLPat :: (OutputableBndr name) => LPat name -> SDoc
+pprParendLPat :: (OutputableBndrId name) => LPat name -> SDoc
 pprParendLPat (L _ p) = pprParendPat p
 
-pprParendPat :: (OutputableBndr name) => Pat name -> SDoc
+pprParendPat :: (OutputableBndrId name) => Pat name -> SDoc
 pprParendPat p = sdocWithDynFlags $ \ dflags ->
                  if need_parens dflags p
                  then parens (pprPat p)
@@ -395,7 +404,7 @@ pprParendPat p = sdocWithDynFlags $ \ dflags ->
       -- But otherwise the CoPat is discarded, so it
       -- is the pattern inside that matters.  Sigh.
 
-pprPat :: (OutputableBndr name) => Pat name -> SDoc
+pprPat :: (OutputableBndrId name) => Pat name -> SDoc
 pprPat (VarPat (L _ var))     = pprPatBndr var
 pprPat (WildPat _)            = char '_'
 pprPat (LazyPat pat)          = char '~' <> pprParendLPat pat
@@ -416,12 +425,15 @@ pprPat (SigPatOut pat ty)     = ppr pat <+> dcolon <+> ppr ty
 pprPat (ListPat pats _ _)     = brackets (interpp'SP pats)
 pprPat (PArrPat pats _)       = paBrackets (interpp'SP pats)
 pprPat (TuplePat pats bx _)   = tupleParens (boxityTupleSort bx) (pprWithCommas ppr pats)
+pprPat (SumPat pat alt arity _) = sumParens (pprAlternative ppr pat alt arity)
 pprPat (ConPatIn con details) = pprUserCon (unLoc con) details
 pprPat (ConPatOut { pat_con = con, pat_tvs = tvs, pat_dicts = dicts,
                     pat_binds = binds, pat_args = details })
-  = getPprStyle $ \ sty ->      -- Tiresome; in TcBinds.tcRhs we print out a
-    if debugStyle sty then      -- typechecked Pat in an error message,
-                                -- and we want to make sure it prints nicely
+  = sdocWithDynFlags $ \dflags ->
+       -- Tiresome; in TcBinds.tcRhs we print out a
+       -- typechecked Pat in an error message,
+       -- and we want to make sure it prints nicely
+    if gopt Opt_PrintTypecheckerElaboration dflags then
         ppr con
           <> braces (sep [ hsep (map pprPatBndr (tvs ++ dicts))
                          , ppr binds])
@@ -429,11 +441,12 @@ pprPat (ConPatOut { pat_con = con, pat_tvs = tvs, pat_dicts = dicts,
     else pprUserCon (unLoc con) details
 
 
-pprUserCon :: (OutputableBndr con, OutputableBndr id) => con -> HsConPatDetails id -> SDoc
+pprUserCon :: (OutputableBndr con, OutputableBndrId id)
+           => con -> HsConPatDetails id -> SDoc
 pprUserCon c (InfixCon p1 p2) = ppr p1 <+> pprInfixOcc c <+> ppr p2
 pprUserCon c details          = pprPrefixOcc c <+> pprConArgs details
 
-pprConArgs ::  OutputableBndr id => HsConPatDetails id -> SDoc
+pprConArgs :: (OutputableBndrId id) => HsConPatDetails id -> SDoc
 pprConArgs (PrefixCon pats) = sep (map pprParendLPat pats)
 pprConArgs (InfixCon p1 p2) = sep [pprParendLPat p1, pprParendLPat p2]
 pprConArgs (RecCon rpats)   = ppr rpats
@@ -511,10 +524,12 @@ The 1.3 report defines what ``irrefutable'' and ``failure-free'' patterns are.
 isUnliftedLPat :: LPat id -> Bool
 isUnliftedLPat (L _ (ParPat p))             = isUnliftedLPat p
 isUnliftedLPat (L _ (TuplePat _ Unboxed _)) = True
+isUnliftedLPat (L _ (SumPat _ _ _ _))       = True
 isUnliftedLPat _                            = False
 
 isUnliftedHsBind :: HsBind id -> Bool
--- A pattern binding with an outermost bang or unboxed tuple must be matched strictly
+-- A pattern binding with an outermost bang or unboxed tuple or sum must be
+-- matched strictly.
 -- Defined in this module because HsPat is above HsBinds in the import graph
 isUnliftedHsBind (PatBind { pat_lhs = p }) = isUnliftedLPat p
 isUnliftedHsBind _                         = False
@@ -541,11 +556,12 @@ looksLazyLPat (L _ (ParPat p))             = looksLazyLPat p
 looksLazyLPat (L _ (AsPat _ p))            = looksLazyLPat p
 looksLazyLPat (L _ (BangPat {}))           = False
 looksLazyLPat (L _ (TuplePat _ Unboxed _)) = False
+looksLazyLPat (L _ (SumPat _ _ _ _))       = False
 looksLazyLPat (L _ (VarPat {}))            = False
 looksLazyLPat (L _ (WildPat {}))           = False
 looksLazyLPat _                            = True
 
-isIrrefutableHsPat :: OutputableBndr id => LPat id -> Bool
+isIrrefutableHsPat :: (OutputableBndrId id) => LPat id -> Bool
 -- (isIrrefutableHsPat p) is true if matching against p cannot fail,
 -- in the sense of falling through to the next pattern.
 --      (NB: this is not quite the same as the (silly) defn
@@ -574,6 +590,7 @@ isIrrefutableHsPat pat
     go1 (SigPatIn pat _)    = go pat
     go1 (SigPatOut pat _)   = go pat
     go1 (TuplePat pats _ _) = all go pats
+    go1 (SumPat pat _ _  _) = go pat
     go1 (ListPat {}) = False
     go1 (PArrPat {})        = False     -- ?
 
@@ -612,6 +629,7 @@ hsPatNeedsParens (BangPat {})        = False
 hsPatNeedsParens (ParPat {})         = False
 hsPatNeedsParens (AsPat {})          = False
 hsPatNeedsParens (TuplePat {})       = False
+hsPatNeedsParens (SumPat {})         = False
 hsPatNeedsParens (ListPat {})        = False
 hsPatNeedsParens (PArrPat {})        = False
 hsPatNeedsParens (LitPat {})         = False
@@ -642,6 +660,7 @@ collectEvVarsPat pat =
     BangPat  p        -> collectEvVarsLPat p
     ListPat  ps _ _   -> unionManyBags $ map collectEvVarsLPat ps
     TuplePat ps _ _   -> unionManyBags $ map collectEvVarsLPat ps
+    SumPat p _ _ _    -> collectEvVarsLPat p
     PArrPat  ps _     -> unionManyBags $ map collectEvVarsLPat ps
     ConPatOut {pat_dicts = dicts, pat_args  = args}
                       -> unionBags (listToBag dicts)

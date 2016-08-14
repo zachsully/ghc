@@ -262,9 +262,6 @@ Then the top-level type for op is
               forall b. Ord b =>
               a -> b -> b
 
-This is unlike ordinary record selectors, which have all the for-alls
-at the outside.  When dealing with classes it's very convenient to
-recover the original type signature from the class op selector.
 -}
 
 mkDictSelId :: Name          -- Name of one of the *value* selectors
@@ -277,12 +274,14 @@ mkDictSelId name clas
     sel_names      = map idName (classAllSelIds clas)
     new_tycon      = isNewTyCon tycon
     [data_con]     = tyConDataCons tycon
-    tyvars         = dataConUnivTyVars data_con
+    tyvars         = dataConUnivTyVarBinders data_con
+    n_ty_args      = length tyvars
     arg_tys        = dataConRepArgTys data_con  -- Includes the dictionary superclasses
     val_index      = assoc "MkId.mkDictSelId" (sel_names `zip` [0..]) name
 
-    sel_ty = mkSpecForAllTys tyvars (mkFunTy (mkClassPred clas (mkTyVarTys tyvars))
-                                             (getNth arg_tys val_index))
+    sel_ty = mkForAllTys tyvars $
+             mkFunTy (mkClassPred clas (mkTyVarTys (binderVars tyvars))) $
+             getNth arg_tys val_index
 
     base_info = noCafIdInfo
                 `setArityInfo`         1
@@ -299,8 +298,6 @@ mkDictSelId name clas
                    -- Add a magic BuiltinRule, but no unfolding
                    -- so that the rule is always available to fire.
                    -- See Note [ClassOp/DFun selection] in TcInstDcls
-
-    n_ty_args = length tyvars
 
     -- This is the built-in rule that goes
     --      op (dfT d1 d2) --->  opT d1 d2
@@ -396,7 +393,7 @@ mkDataConWorkId wkr_name data_con
         -- the simplifier thinks that y is "sure to be evaluated" (because
         --  $wMkT is strict) and drops the case.  No, $wMkT is not strict.
         --
-        -- When the simplifer sees a pattern
+        -- When the simplifier sees a pattern
         --      case e of MkT x -> ...
         -- it uses the dataConRepStrictness of MkT to mark x as evaluated;
         -- but that's fine... dataConRepStrictness comes from the data con
@@ -500,7 +497,7 @@ mkDataConRep dflags fam_envs wrap_name mb_bangs data_con
                  -- The Cpr info can be important inside INLINE rhss, where the
                  -- wrapper constructor isn't inlined.
                  -- And the argument strictness can be important too; we
-                 -- may not inline a contructor when it is partially applied.
+                 -- may not inline a constructor when it is partially applied.
                  -- For example:
                  --      data W = C !Int !Int !Int
                  --      ...(let w = C x in ...(w p q)...)...
@@ -972,10 +969,9 @@ mkFCallId dflags uniq fcall ty
            `setArityInfo`         arity
            `setStrictnessInfo`    strict_sig
 
-    (bndrs, _)        = tcSplitPiTys ty
-    arity             = count isIdLikeBinder bndrs
-
-    strict_sig      = mkClosedStrictSig (replicate arity topDmd) topRes
+    (bndrs, _) = tcSplitPiTys ty
+    arity      = count isAnonTyBinder bndrs
+    strict_sig = mkClosedStrictSig (replicate arity topDmd) topRes
     -- the call does not claim to be strict in its arguments, since they
     -- may be lifted (foreign import prim) and the called code doesn't
     -- necessarily force them. See Trac #11076.
@@ -1070,22 +1066,17 @@ dollarId = pcMiscPrelId dollarName ty
              App (Var f) (Var x)
 
 ------------------------------------------------
--- proxy# :: forall a. Proxy# a
 proxyHashId :: Id
 proxyHashId
   = pcMiscPrelId proxyName ty
        (noCafIdInfo `setUnfoldingInfo` evaldUnfolding) -- Note [evaldUnfoldings]
   where
-    ty      = mkSpecForAllTys [kv, tv] (mkProxyPrimTy k t)
-    kv      = kKiVar
-    k       = mkTyVarTy kv
-    [tv]    = mkTemplateTyVars [k]
-    t       = mkTyVarTy tv
+    -- proxy# :: forall k (a:k). Proxy# k a
+    bndrs   = mkTemplateKiTyVars [liftedTypeKind] (\ks -> ks)
+    [k,t]   = mkTyVarTys bndrs
+    ty      = mkSpecForAllTys bndrs (mkProxyPrimTy k t)
 
 ------------------------------------------------
--- unsafeCoerce# :: forall (r1 :: RuntimeRep) (r2 :: RuntimeRep)
---                         (a :: TYPE r1) (b :: TYPE r2).
---                         a -> b
 unsafeCoerceId :: Id
 unsafeCoerceId
   = pcMiscPrelId unsafeCoerceName ty info
@@ -1093,14 +1084,19 @@ unsafeCoerceId
     info = noCafIdInfo `setInlinePragInfo` alwaysInlinePragma
                        `setUnfoldingInfo`  mkCompulsoryUnfolding rhs
 
-    tvs = [ runtimeRep1TyVar, runtimeRep2TyVar
-          , openAlphaTyVar, openBetaTyVar ]
+    -- unsafeCoerce# :: forall (r1 :: RuntimeRep) (r2 :: RuntimeRep)
+    --                         (a :: TYPE r1) (b :: TYPE r2).
+    --                         a -> b
+    bndrs = mkTemplateKiTyVars [runtimeRepTy, runtimeRepTy]
+                               (\ks -> map tYPE ks)
 
-    ty  = mkSpecForAllTys tvs $ mkFunTy openAlphaTy openBetaTy
+    [_, _, a, b] = mkTyVarTys bndrs
 
-    [x] = mkTemplateLocals [openAlphaTy]
-    rhs = mkLams (tvs ++ [x]) $
-          Cast (Var x) (mkUnsafeCo Representational openAlphaTy openBetaTy)
+    ty  = mkSpecForAllTys bndrs (mkFunTy a b)
+
+    [x] = mkTemplateLocals [a]
+    rhs = mkLams (bndrs ++ [x]) $
+          Cast (Var x) (mkUnsafeCo Representational a b)
 
 ------------------------------------------------
 nullAddrId :: Id
@@ -1324,23 +1320,46 @@ may fire.
 
 Note [lazyId magic]
 ~~~~~~~~~~~~~~~~~~~
-    lazy :: forall a?. a? -> a?   (i.e. works for unboxed types too)
+lazy :: forall a?. a? -> a?   (i.e. works for unboxed types too)
 
-Used to lazify pseq:   pseq a b = a `seq` lazy b
+'lazy' is used to make sure that a sub-expression, and its free variables,
+are truly used call-by-need, with no code motion.  Key examples:
 
-Also, no strictness: by being a built-in Id, all the info about lazyId comes from here,
-not from GHC.Base.hi.   This is important, because the strictness
-analyser will spot it as strict!
+* pseq:    pseq a b = a `seq` lazy b
+  We want to make sure that the free vars of 'b' are not evaluated
+  before 'a', even though the expression is plainly strict in 'b'.
 
-Also no unfolding in lazyId: it gets "inlined" by a HACK in CorePrep.
-It's very important to do this inlining *after* unfoldings are exposed
-in the interface file.  Otherwise, the unfolding for (say) pseq in the
-interface file will not mention 'lazy', so if we inline 'pseq' we'll totally
-miss the very thing that 'lazy' was there for in the first place.
-See Trac #3259 for a real world example.
+* catch:   catch a b = catch# (lazy a) b
+  Again, it's clear that 'a' will be evaluated strictly (and indeed
+  applied to a state token) but we want to make sure that any exceptions
+  arising from the evaluation of 'a' are caught by the catch (see
+  Trac #11555).
 
-lazyId is defined in GHC.Base, so we don't *have* to inline it.  If it
-appears un-applied, we'll end up just calling it.
+Implementing 'lazy' is a bit tricky:
+
+* It must not have a strictness signature: by being a built-in Id,
+  all the info about lazyId comes from here, not from GHC.Base.hi.
+  This is important, because the strictness analyser will spot it as
+  strict!
+
+* It must not have an unfolding: it gets "inlined" by a HACK in
+  CorePrep. It's very important to do this inlining *after* unfoldings
+  are exposed in the interface file.  Otherwise, the unfolding for
+  (say) pseq in the interface file will not mention 'lazy', so if we
+  inline 'pseq' we'll totally miss the very thing that 'lazy' was
+  there for in the first place. See Trac #3259 for a real world
+  example.
+
+* Suppose CorePrep sees (catch# (lazy e) b).  At all costs we must
+  avoid using call by value here:
+     case e of r -> catch# r b
+  Avoiding that is the whole point of 'lazy'.  So in CorePrep (which
+  generate the 'case' expression for a call-by-value call) we must
+  spot the 'lazy' on the arg (in CorePrep.cpeApp), and build a 'let'
+  instead.
+
+* lazyId is defined in GHC.Base, so we don't *have* to inline it.  If it
+  appears un-applied, we'll end up just calling it.
 
 Note [runRW magic]
 ~~~~~~~~~~~~~~~~~~

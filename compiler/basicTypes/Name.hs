@@ -5,7 +5,6 @@
 \section[Name]{@Name@: to transmit name info from renamer to typechecker}
 -}
 
-{-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE RecordWildCards #-}
 
 -- |
@@ -68,7 +67,7 @@ module Name (
 
         -- * Class 'NamedThing' and overloaded friends
         NamedThing(..),
-        getSrcLoc, getSrcSpan, getOccString,
+        getSrcLoc, getSrcSpan, getOccString, getOccFS,
 
         pprInfixName, pprPrefixName, pprModulePrefix,
         nameStableString,
@@ -91,6 +90,7 @@ import DynFlags
 import FastString
 import Outputable
 
+import Control.DeepSeq
 import Data.Data
 
 {-
@@ -101,7 +101,7 @@ import Data.Data
 ************************************************************************
 -}
 
--- | A unique, unambigious name for something, containing information about where
+-- | A unique, unambiguous name for something, containing information about where
 -- that thing originated.
 data Name = Name {
                 n_sort :: NameSort,     -- What sort of name it is
@@ -109,7 +109,6 @@ data Name = Name {
                 n_uniq :: {-# UNPACK #-} !Int,
                 n_loc  :: !SrcSpan      -- Definition site
             }
-    deriving Typeable
 
 -- NOTE: we make the n_loc field strict to eliminate some potential
 -- (and real!) space leaks, due to the fact that we don't look at
@@ -132,6 +131,18 @@ instance Outputable NameSort where
   ppr (WiredIn _ _ _) = text "wired-in"
   ppr  Internal       = text "internal"
   ppr  System         = text "system"
+
+instance NFData Name where
+  rnf Name{..} = rnf n_sort
+
+instance NFData NameSort where
+  rnf (External m) = rnf m
+  rnf (WiredIn m t b) = rnf m `seq` t `seq` b `seq` ()
+    -- XXX this is a *lie*, we're not going to rnf the TyThing, but
+    -- since the TyThings for WiredIn Names are all static they can't
+    -- be hiding space leaks or errors.
+  rnf Internal = ()
+  rnf System = ()
 
 -- | BuiltInSyntax is for things like @(:)@, @[]@ and tuples,
 -- which have special syntactic forms.  They aren't in scope
@@ -412,8 +423,10 @@ mkLocalisedOccName this_mod mk_occ name = mk_occ origin (nameOccName name)
 cmpName :: Name -> Name -> Ordering
 cmpName n1 n2 = n_uniq n1 `compare` n_uniq n2
 
+-- | Compare Names lexicographically
+-- This only works for Names that originate in the source code or have been
+-- tidied.
 stableNameCmp :: Name -> Name -> Ordering
--- Compare lexicographically
 stableNameCmp (Name { n_sort = s1, n_occ = occ1 })
               (Name { n_sort = s2, n_occ = occ2 })
   = (s1 `sort_cmp` s2) `thenCmp` (occ1 `compare` occ2)
@@ -630,13 +643,18 @@ class NamedThing a where
 
     getOccName n = nameOccName (getName n)      -- Default method
 
+instance NamedThing e => NamedThing (GenLocated l e) where
+    getName = getName . unLoc
+
 getSrcLoc           :: NamedThing a => a -> SrcLoc
 getSrcSpan          :: NamedThing a => a -> SrcSpan
 getOccString        :: NamedThing a => a -> String
+getOccFS            :: NamedThing a => a -> FastString
 
 getSrcLoc           = nameSrcLoc           . getName
 getSrcSpan          = nameSrcSpan          . getName
 getOccString        = occNameString        . getOccName
+getOccFS            = occNameFS            . getOccName
 
 pprInfixName :: (Outputable a, NamedThing a) => a -> SDoc
 -- See Outputable.pprPrefixVar, pprInfixVar;

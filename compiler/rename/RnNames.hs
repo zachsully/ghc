@@ -526,7 +526,7 @@ extendGlobalRdrEnvRn avails new_fixities
     getLocalDeclBindersd@ returns the names for an HsDecl
              It's used for source code.
 
-        *** See "THE NAMING STORY" in HsDecls ****
+        *** See Note [The Naming story] in HsDecls ****
 *                                                                      *
 ********************************************************************* -}
 
@@ -544,12 +544,13 @@ getLocalNonValBinders :: MiniFixityEnv -> HsGroup RdrName
 getLocalNonValBinders fixity_env
      (HsGroup { hs_valds  = binds,
                 hs_tyclds = tycl_decls,
-                hs_instds = inst_decls,
                 hs_fords  = foreign_decls })
   = do  { -- Process all type/class decls *except* family instances
+        ; let inst_decls = tycl_decls >>= group_instds
         ; overload_ok <- xoptM LangExt.DuplicateRecordFields
-        ; (tc_avails, tc_fldss) <- fmap unzip $ mapM (new_tc overload_ok)
-                                                     (tyClGroupConcat tycl_decls)
+        ; (tc_avails, tc_fldss)
+            <- fmap unzip $ mapM (new_tc overload_ok)
+                                 (tyClGroupTyClDecls tycl_decls)
         ; traceRn (text "getLocalNonValBinders 1" <+> ppr tc_avails)
         ; envs <- extendGlobalRdrEnvRn tc_avails fixity_env
         ; setEnvs envs $ do {
@@ -685,13 +686,20 @@ getLocalNonValBinders fixity_env
 
 newRecordSelector :: Bool -> [Name] -> LFieldOcc RdrName -> RnM FieldLabel
 newRecordSelector _ [] _ = error "newRecordSelector: datatype has no constructors!"
-newRecordSelector overload_ok (dc:_) (L loc (FieldOcc (L _ fld) _)) =
-  do { sel_name <- newTopSrcBinder $ L loc $ mkRdrUnqual sel_occ
-     ; return $ fl { flSelector = sel_name } }
+newRecordSelector overload_ok (dc:_) (L loc (FieldOcc (L _ fld) _))
+  = do { selName <- newTopSrcBinder $ L loc $ field
+       ; return $ qualFieldLbl { flSelector = selName } }
   where
-    lbl     = occNameFS $ rdrNameOcc fld
-    fl      = mkFieldLabelOccs lbl (nameOccName dc) overload_ok
-    sel_occ = flSelector fl
+    fieldOccName = occNameFS $ rdrNameOcc fld
+    qualFieldLbl = mkFieldLabelOccs fieldOccName (nameOccName dc) overload_ok
+    field | isExact fld = fld
+              -- use an Exact RdrName as is to preserve the bindings
+              -- of an already renamer-resolved field and its use
+              -- sites. This is needed to correctly support record
+              -- selectors in Template Haskell. See Note [Binders in
+              -- Template Haskell] in Convert.hs and Note [Looking up
+              -- Exact RdrNames] in RnEnv.hs.
+          | otherwise   = mkRdrUnqual (flSelector qualFieldLbl)
 
 {-
 Note [Looking up family names in family instances]
@@ -725,8 +733,8 @@ Note [Dealing with imports]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 For import M( ies ), we take the mi_exports of M, and make
    imp_occ_env :: OccEnv (Name, AvailInfo, Maybe Name)
-One entry for each Name that M exports; the AvailInfo describes just
-that Name.
+One entry for each Name that M exports; the AvailInfo is the
+AvailInfo exported from M that exports that Name.
 
 The situation is made more complicated by associated types. E.g.
    module M where
@@ -735,11 +743,18 @@ The situation is made more complicated by associated types. E.g.
      instance C Bool where { data T Int = T3 }
 Then M's export_avails are (recall the AvailTC invariant from Avails.hs)
   C(C,T), T(T,T1,T2,T3)
-Notice that T appears *twice*, once as a child and once as a parent.
-From this we construct the imp_occ_env
+Notice that T appears *twice*, once as a child and once as a parent. From
+this list we construt a raw list including
+   T -> (T, T( T1, T2, T3 ), Nothing)
+   T -> (C, C( C, T ),       Nothing)
+and we combine these (in function 'combine' in 'imp_occ_env' in
+'filterImports') to get
+   T  -> (T,  T(T,T1,T2,T3), Just C)
+
+So the overall imp_occ_env is
    C  -> (C,  C(C,T),        Nothing)
    T  -> (T,  T(T,T1,T2,T3), Just C)
-   T1 -> (T1, T(T1,T2,T3),   Nothing)   -- similarly T2,T3
+   T1 -> (T1, T(T,T1,T2,T3), Nothing)   -- similarly T2,T3
 
 If we say
    import M( T(T1,T2) )
@@ -789,12 +804,13 @@ filterImports iface decl_spec (Just (want_hiding, L l import_items))
     imp_occ_env = mkOccEnv_C combine [ (nameOccName n, (n, a, Nothing))
                                      | a <- all_avails, n <- availNames a]
       where
-        -- See example in Note [Dealing with imports]
-        -- 'combine' is only called for associated types which appear twice
-        -- in the all_avails. In the example, we combine
+        -- See Note [Dealing with imports]
+        -- 'combine' is only called for associated data types which appear
+        -- twice in the all_avails. In the example, we combine
         --    T(T,T1,T2,T3) and C(C,T)  to give   (T, T(T,T1,T2,T3), Just C)
-        combine (name1, a1@(AvailTC p1 _ []), mp1)
-                (name2, a2@(AvailTC p2 _ []), mp2)
+        -- NB: the AvailTC can have fields as well as data constructors (Trac #12127)
+        combine (name1, a1@(AvailTC p1 _ _), mp1)
+                (name2, a2@(AvailTC p2 _ _), mp2)
           = ASSERT( name1 == name2 && isNothing mp1 && isNothing mp2 )
             if p1 == name1 then (name1, a1, Just p2)
                            else (name1, a2, Just p1)
@@ -1264,14 +1280,12 @@ exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
         | let earlier_mods = [ mod
                              | (L _ (IEModuleContents (L _ mod))) <- ie_names ]
         , mod `elem` earlier_mods    -- Duplicate export of M
-        = do { warn_dup_exports <- woptM Opt_WarnDuplicateExports ;
-               warnIf (Reason Opt_WarnDuplicateExports) warn_dup_exports
+        = do { warnIf (Reason Opt_WarnDuplicateExports) True
                       (dupModuleExport mod) ;
                return acc }
 
         | otherwise
-        = do { warnDodgyExports <- woptM Opt_WarnDodgyExports
-             ; let { exportValid = (mod `elem` imported_modules)
+        = do { let { exportValid = (mod `elem` imported_modules)
                                 || (moduleName this_mod == mod)
                    ; gre_prs     = pickGREsModExp mod (globalRdrEnvElts rdr_env)
                    ; new_exports = map (availFromGRE . fst) gre_prs
@@ -1281,7 +1295,7 @@ exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
 
              ; checkErr exportValid (moduleNotImported mod)
              ; warnIf (Reason Opt_WarnDodgyExports)
-                      (warnDodgyExports && exportValid && null gre_prs)
+                      (exportValid && null gre_prs)
                       (nullModuleExport mod)
 
              ; traceRn (text "efa" <+> (ppr mod $$ ppr all_gres))
@@ -1351,7 +1365,7 @@ exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
     lookup_ie_with :: IE RdrName -> Located RdrName -> [Located RdrName]
                    -> RnM (Located Name, [Located Name], [Name], [FieldLabel])
     lookup_ie_with ie (L l rdr) sub_rdrs
-        = do name <- lookupGlobalOccRnExport rdr
+        = do name <- lookupGlobalOccRn rdr
              let gres = findChildren kids_env name
                  mchildren =
                   lookupChildren (map classifyGRE (gres ++ pat_syns)) sub_rdrs
@@ -1371,7 +1385,7 @@ exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
     lookup_ie_all :: IE RdrName -> Located RdrName
                   -> RnM (Located Name, [Name], [FieldLabel])
     lookup_ie_all ie (L l rdr) =
-          do name <- lookupGlobalOccRnExport rdr
+          do name <- lookupGlobalOccRn rdr
              let gres = findChildren kids_env name
                  (non_flds, flds) = classifyGREs gres
              addUsedKids rdr gres
@@ -1421,11 +1435,10 @@ check_occs ie occs names  -- 'names' are the entities specifed by 'ie'
             | name == name'   -- Duplicate export
             -- But we don't want to warn if the same thing is exported
             -- by two different module exports. See ticket #4478.
-            -> do unless (dupExport_ok name ie ie') $ do
-                      warn_dup_exports <- woptM Opt_WarnDuplicateExports
-                      warnIf (Reason Opt_WarnDuplicateExports) warn_dup_exports
-                             (dupExportWarn name_occ ie ie')
-                  return occs
+            -> do { warnIf (Reason Opt_WarnDuplicateExports)
+                           (not (dupExport_ok name ie ie'))
+                           (dupExportWarn name_occ ie ie')
+                  ; return occs }
 
             | otherwise    -- Same occ name but different names: an error
             ->  do { global_env <- getGlobalRdrEnv ;
@@ -1453,7 +1466,7 @@ dupExport_ok :: Name -> IE RdrName -> IE RdrName -> Bool
 -- Example of "yes" (Trac #2436)
 --    module M( C(..), T(..) ) where
 --         class C a where { data T a }
---         instace C Int where { data T Int = TInt }
+--         instance C Int where { data T Int = TInt }
 --
 -- Example of "yes" (Trac #2436)
 --    module Foo ( T ) where
@@ -1567,9 +1580,10 @@ warnUnusedImportDecls gbl_env
 warnMissingSignatures :: TcGblEnv -> RnM ()
 warnMissingSignatures gbl_env
   = do { let exports = availsToNameSet (tcg_exports gbl_env)
-             sig_ns = tcg_sigs gbl_env
-             all_binds = collectHsBindsBinders $ tcg_binds gbl_env
-             all_ps    = tcg_patsyns gbl_env
+             sig_ns  = tcg_sigs gbl_env
+               -- We use sig_ns to exclude top-level bindings that are generated by GHC
+             binds    = collectHsBindsBinders $ tcg_binds gbl_env
+             pat_syns = tcg_patsyns gbl_env
 
          -- Warn about missing signatures
          -- Do this only when we we have a type to offer
@@ -1584,27 +1598,32 @@ warnMissingSignatures gbl_env
                | otherwise          = return ()
 
              add_warns flag
-               = forM_ binders
-                 (\(name, ty) ->
-                    do { env <- tcInitTidyEnv
-                       ; let (_, tidy_ty) = tidyOpenType env ty
-                       ; addWarnAt (Reason flag) (getSrcSpan name)
-                                                 (get_msg name tidy_ty) })
+                = when warn_pat_syns
+                       (mapM_ add_pat_syn_warn pat_syns) >>
+                  when (warn_missing_sigs || warn_only_exported)
+                       (mapM_ add_bind_warn binds)
+                where
+                  add_pat_syn_warn p
+                    = add_warn (patSynName p) (pprPatSynType p)
 
-             binds   = if warn_missing_sigs || warn_only_exported then all_binds else []
-             ps      = if warn_pat_syns                           then all_ps    else []
-             binders = filter pred $
-                         [(patSynName p, patSynType p) | p <- ps   ] ++
-                         [(idName b, idType b)         | b <- binds]
+                  add_bind_warn id
+                    = do { env <- tcInitTidyEnv     -- Why not use emptyTidyEnv?
+                         ; let name    = idName id
+                               (_, ty) = tidyOpenType env (idType id)
+                               ty_msg  = ppr ty
+                         ; add_warn name ty_msg }
 
-             pred (name, _) = name `elemNameSet` sig_ns
-                              && (not warn_only_exported || name `elemNameSet` exports)
-               -- We use sig_ns to exclude top-level bindings that are
-               -- generated by GHC and that don't have signatures
+                  add_warn name ty_msg
+                    = when (name `elemNameSet` sig_ns && export_check name)
+                           (addWarnAt (Reason flag) (getSrcSpan name)
+                                                    (get_msg name ty_msg))
 
-             get_msg name ty
-               = sep [ text "Top-level binding with no type signature:",
-                       nest 2 $ pprPrefixName name <+> dcolon <+> ppr ty ]
+                  export_check name
+                    = not warn_only_exported || name `elemNameSet` exports
+
+                  get_msg name ty_msg
+                    = sep [ text "Top-level binding with no type signature:",
+                            nest 2 $ pprPrefixName name <+> dcolon <+> ty_msg ]
 
        ; add_sig_warns }
 
@@ -1644,7 +1663,7 @@ findImportUsage imports used_gres
       = foldr extendImportMap Map.empty used_gres
 
     unused_decl decl@(L loc (ImportDecl { ideclHiding = imps }))
-      = (decl, nubAvails used_avails, nameSetElems unused_imps)
+      = (decl, nubAvails used_avails, nameSetElemsStable unused_imps)
       where
         used_avails = Map.lookup (srcSpanEnd loc) import_usage `orElse` []
                       -- srcSpanEnd: see Note [The ImportMap]
@@ -1962,8 +1981,8 @@ exportClashErr global_env name1 name2 ie1 ie2
     -- get_gre finds a GRE for the Name, so that we can show its provenance
     get_gre name
         = case lookupGRE_Name global_env name of
-             (gre:_) -> gre
-             []      -> pprPanic "exportClashErr" (ppr name)
+             Just gre -> gre
+             Nothing  -> pprPanic "exportClashErr" (ppr name)
     get_loc name = greSrcSpan (get_gre name)
     (name1', ie1', name2', ie2') = if get_loc name1 < get_loc name2
                                    then (name1, ie1, name2, ie2)

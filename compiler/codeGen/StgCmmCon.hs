@@ -38,11 +38,13 @@ import DataCon
 import DynFlags
 import FastString
 import Id
+import RepType (countConRepArgs)
 import Literal
 import PrelInfo
 import Outputable
 import Platform
 import Util
+import MonadUtils (mapMaybeM)
 
 import Control.Monad
 import Data.Char
@@ -71,7 +73,7 @@ cgTopRhsCon dflags id con args =
         ; when (platformOS (targetPlatform dflags) == OSMinGW32) $
               -- Windows DLLs have a problem with static cross-DLL refs.
               ASSERT( not (isDllConApp dflags this_mod con args) ) return ()
-        ; ASSERT( args `lengthIs` dataConRepRepArity con ) return ()
+        ; ASSERT( args `lengthIs` countConRepArgs con ) return ()
 
         -- LAY IT OUT
         ; let
@@ -86,12 +88,13 @@ cgTopRhsCon dflags id con args =
              -- needs to poke around inside it.
             info_tbl = mkDataConInfoTable dflags con True ptr_wds nonptr_wds
 
-            get_lit (arg, _offset) = do { CmmLit lit <- getArgAmode arg
+            get_lit (arg, _offset) = do { CmmExprArg (CmmLit lit) <- getArgAmode arg
                                         ; return lit }
 
         ; payload <- mapM get_lit nv_args_w_offsets
                 -- NB1: nv_args_w_offsets is sorted into ptrs then non-ptrs
                 -- NB2: all the amodes should be Lits!
+                --      TODO (osa): Why?
 
         ; let closure_rep = mkStaticClosureFields
                              dflags
@@ -112,7 +115,8 @@ cgTopRhsCon dflags id con args =
 
 buildDynCon :: Id                 -- Name of the thing to which this constr will
                                   -- be bound
-            -> Bool   -- is it genuinely bound to that name, or just for profiling?
+            -> Bool               -- is it genuinely bound to that name, or just
+                                  -- for profiling?
             -> CostCentreStack    -- Where to grab cost centre from;
                                   -- current CCS if currentOrSubsumedCCS
             -> DataCon            -- The data constructor
@@ -154,6 +158,7 @@ premature looking at the args will cause the compiler to black-hole!
 -- at all.
 
 buildDynCon' dflags _ binder _ _cc con []
+  | isNullaryRepDataCon con
   = return (litIdInfo dflags binder (mkConLFInfo con)
                 (CmmLabel (mkClosureLabel (dataConName con) (idCafInfo binder))),
             return mkNop)
@@ -258,12 +263,18 @@ bindConArgs (DataAlt con) base args
 
            -- The binding below forces the masking out of the tag bits
            -- when accessing the constructor field.
-           bind_arg :: (NonVoid Id, VirtualHpOffset) -> FCode LocalReg
-           bind_arg (arg, offset)
-               = do emit $ mkTaggedObjectLoad dflags (idToReg dflags arg) base offset tag
-                    bindArgToReg arg
-       mapM bind_arg args_w_offsets
+           bind_arg :: (NonVoid Id, VirtualHpOffset) -> FCode (Maybe LocalReg)
+           bind_arg (arg@(NonVoid b), offset)
+             | isDeadBinder b =
+                 -- Do not load unused fields from objects to local variables.
+                 -- (CmmSink can optimize this, but it's cheap and common enough
+                 -- to handle here)
+                 return Nothing
+             | otherwise      = do
+                 emit $ mkTaggedObjectLoad dflags (idToReg dflags arg) base offset tag
+                 Just <$> bindArgToReg arg
+
+       mapMaybeM bind_arg args_w_offsets
 
 bindConArgs _other_con _base args
   = ASSERT( null args ) return []
-

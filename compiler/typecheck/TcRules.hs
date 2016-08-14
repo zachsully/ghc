@@ -101,11 +101,11 @@ tcRule (HsRule name act hs_bndrs lhs fv_lhs rhs fv_rhs)
         -- during zonking (see TcHsSyn.zonkRule)
 
        ; let tpl_ids     = lhs_evs ++ id_bndrs
-             forall_tkvs = splitDepVarsOfTypes $
-                           rule_ty : map idType tpl_ids
+       ; forall_tkvs <- zonkTcTypesAndSplitDepVars $
+                        rule_ty : map idType tpl_ids
        ; gbls  <- tcGetGlobalTyCoVars -- Even though top level, there might be top-level
                                       -- monomorphic bindings from the MR; test tc111
-       ; qtkvs <- quantifyTyVars gbls forall_tkvs
+       ; qtkvs <- quantifyZonkedTyVars gbls forall_tkvs
        ; traceTc "tcRule" (vcat [ pprFullRuleName name
                                 , ppr forall_tkvs
                                 , ppr qtkvs
@@ -145,7 +145,7 @@ tcRuleBndrs (L _ (RuleBndrSig (L _ name) rn_ty) : rule_bndrs)
 --  The tyvar 'a' is brought into scope first, just as if you'd written
 --              a::*, x :: a->a
   = do  { let ctxt = RuleSigCtxt name
-        ; (id_ty, tvs, _) <- tcHsPatSigType ctxt rn_ty
+        ; (_ , tvs, id_ty) <- tcHsPatSigType ctxt rn_ty
         ; let id  = mkLocalIdOrCoVar name id_ty
                     -- See Note [Pattern signature binders] in TcHsType
 

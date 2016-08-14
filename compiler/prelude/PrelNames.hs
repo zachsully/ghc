@@ -1530,7 +1530,7 @@ addrPrimTyConKey, arrayPrimTyConKey, arrayArrayPrimTyConKey, boolTyConKey,
     weakPrimTyConKey, mutableArrayPrimTyConKey, mutableArrayArrayPrimTyConKey,
     mutableByteArrayPrimTyConKey, orderingTyConKey, mVarPrimTyConKey,
     ratioTyConKey, rationalTyConKey, realWorldTyConKey, stablePtrPrimTyConKey,
-    stablePtrTyConKey, anyTyConKey, eqTyConKey, heqTyConKey,
+    stablePtrTyConKey, eqTyConKey, heqTyConKey,
     smallArrayPrimTyConKey, smallMutableArrayPrimTyConKey :: Unique
 addrPrimTyConKey                        = mkPreludeTyConUnique  1
 arrayPrimTyConKey                       = mkPreludeTyConUnique  3
@@ -1566,7 +1566,6 @@ rationalTyConKey                        = mkPreludeTyConUnique 33
 realWorldTyConKey                       = mkPreludeTyConUnique 34
 stablePtrPrimTyConKey                   = mkPreludeTyConUnique 35
 stablePtrTyConKey                       = mkPreludeTyConUnique 36
-anyTyConKey                             = mkPreludeTyConUnique 37
 eqTyConKey                              = mkPreludeTyConUnique 38
 heqTyConKey                             = mkPreludeTyConUnique 39
 arrayArrayPrimTyConKey                  = mkPreludeTyConUnique 40
@@ -1579,7 +1578,8 @@ statePrimTyConKey, stableNamePrimTyConKey, stableNameTyConKey,
     liftedConKey, unliftedConKey, anyBoxConKey, kindConKey, boxityConKey,
     typeConKey, threadIdPrimTyConKey, bcoPrimTyConKey, ptrTyConKey,
     funPtrTyConKey, tVarPrimTyConKey, eqPrimTyConKey,
-    eqReprPrimTyConKey, eqPhantPrimTyConKey, voidPrimTyConKey :: Unique
+    eqReprPrimTyConKey, eqPhantPrimTyConKey, voidPrimTyConKey,
+    compactPrimTyConKey :: Unique
 statePrimTyConKey                       = mkPreludeTyConUnique 50
 stableNamePrimTyConKey                  = mkPreludeTyConUnique 51
 stableNameTyConKey                      = mkPreludeTyConUnique 52
@@ -1608,6 +1608,7 @@ bcoPrimTyConKey                         = mkPreludeTyConUnique 74
 ptrTyConKey                             = mkPreludeTyConUnique 75
 funPtrTyConKey                          = mkPreludeTyConUnique 76
 tVarPrimTyConKey                        = mkPreludeTyConUnique 77
+compactPrimTyConKey                     = mkPreludeTyConUnique 78
 
 -- Parallel array type constructor
 parrTyConKey :: Unique
@@ -1723,21 +1724,24 @@ proxyPrimTyConKey = mkPreludeTyConUnique 176
 specTyConKey :: Unique
 specTyConKey = mkPreludeTyConUnique 177
 
-smallArrayPrimTyConKey        = mkPreludeTyConUnique  178
-smallMutableArrayPrimTyConKey = mkPreludeTyConUnique  179
+anyTyConKey :: Unique
+anyTyConKey = mkPreludeTyConUnique 178
+
+smallArrayPrimTyConKey        = mkPreludeTyConUnique  179
+smallMutableArrayPrimTyConKey = mkPreludeTyConUnique  180
 
 staticPtrTyConKey  :: Unique
-staticPtrTyConKey  = mkPreludeTyConUnique 180
+staticPtrTyConKey  = mkPreludeTyConUnique 181
 
 staticPtrInfoTyConKey :: Unique
-staticPtrInfoTyConKey = mkPreludeTyConUnique 181
+staticPtrInfoTyConKey = mkPreludeTyConUnique 182
 
 callStackTyConKey :: Unique
-callStackTyConKey = mkPreludeTyConUnique 182
+callStackTyConKey = mkPreludeTyConUnique 183
 
 -- Typeables
 typeRepTyConKey :: Unique
-typeRepTyConKey = mkPreludeTyConUnique 183
+typeRepTyConKey = mkPreludeTyConUnique 184
 
 ---------------- Template Haskell -------------------
 --      THNames.hs: USES TyConUniques 200-299
@@ -1872,17 +1876,17 @@ runtimeRepSimpleDataConKeys :: [Unique]
 ptrRepLiftedDataConKey, ptrRepUnliftedDataConKey :: Unique
 runtimeRepSimpleDataConKeys@(
   ptrRepLiftedDataConKey : ptrRepUnliftedDataConKey : _)
-  = map mkPreludeDataConUnique [72..82]
+  = map mkPreludeDataConUnique [72..83]
 
 -- See Note [Wiring in RuntimeRep] in TysWiredIn
 -- VecCount
 vecCountDataConKeys :: [Unique]
-vecCountDataConKeys = map mkPreludeDataConUnique [83..88]
+vecCountDataConKeys = map mkPreludeDataConUnique [84..89]
 
 -- See Note [Wiring in RuntimeRep] in TysWiredIn
 -- VecElem
 vecElemDataConKeys :: [Unique]
-vecElemDataConKeys = map mkPreludeDataConUnique [89..98]
+vecElemDataConKeys = map mkPreludeDataConUnique [90..99]
 
 ---------------- Template Haskell -------------------
 --      THNames.hs: USES DataUniques 100-150
@@ -1905,7 +1909,7 @@ wildCardKey, absentErrorIdKey, augmentIdKey, appendIdKey,
     realWorldPrimIdKey, recConErrorIdKey,
     unpackCStringUtf8IdKey, unpackCStringAppendIdKey,
     unpackCStringFoldrIdKey, unpackCStringIdKey,
-    typeErrorIdKey :: Unique
+    typeErrorIdKey, rubbishEntryErrorIdKey :: Unique
 
 wildCardKey                   = mkPreludeMiscIdUnique  0  -- See Note [WildCard binders]
 absentErrorIdKey              = mkPreludeMiscIdUnique  1
@@ -1930,6 +1934,7 @@ unpackCStringFoldrIdKey       = mkPreludeMiscIdUnique 19
 unpackCStringIdKey            = mkPreludeMiscIdUnique 20
 voidPrimIdKey                 = mkPreludeMiscIdUnique 21
 typeErrorIdKey                = mkPreludeMiscIdUnique 22
+rubbishEntryErrorIdKey        = mkPreludeMiscIdUnique 23
 
 unsafeCoerceIdKey, concatIdKey, filterIdKey, zipIdKey, bindIOIdKey,
     returnIOIdKey, newStablePtrIdKey,
@@ -2242,6 +2247,18 @@ derivableClassKeys :: [Unique]
 derivableClassKeys
   = [ eqClassKey, ordClassKey, enumClassKey, ixClassKey,
       boundedClassKey, showClassKey, readClassKey ]
+
+
+-- These are the "interactive classes" that are consulted when doing
+-- defaulting. Does not include Num or IsString, which have special
+-- handling.
+interactiveClassNames :: [Name]
+interactiveClassNames
+  = [ showClassName, eqClassName, ordClassName, foldableClassName
+    , traversableClassName ]
+
+interactiveClassKeys :: [Unique]
+interactiveClassKeys = map getUnique interactiveClassNames
 
 {-
 ************************************************************************

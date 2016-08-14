@@ -115,6 +115,12 @@ typedef struct Task_ {
 #if defined(THREADED_RTS)
     OSThreadId id;              // The OS Thread ID of this task
 
+    // The NUMA node this Task belongs to.  If this is a worker thread, then the
+    // OS thread will be bound to this node (see workerStart()).  If this is an
+    // external thread calling into Haskell, it can be bound to a node using
+    // rts_setInCallCapability().
+    uint32_t node;
+
     Condition cond;             // used for sleeping & waking up this task
     Mutex lock;                 // lock for the condition variable
 
@@ -125,24 +131,22 @@ typedef struct Task_ {
     rtsBool wakeup;
 #endif
 
-    // This points to the Capability that the Task "belongs" to.  If
-    // the Task owns a Capability, then task->cap points to it.  If
-    // the task does not own a Capability, then either (a) if the task
-    // is a worker, then task->cap points to the Capability it belongs
-    // to, or (b) it is returning from a foreign call, then task->cap
-    // points to the Capability with the returning_worker queue that this
-    // this Task is on.
+    // If the task owns a Capability, task->cap points to it.  (occasionally a
+    // task may own multiple capabilities, in which case task->cap may point to
+    // any of them.  We must be careful to set task->cap to the appropriate one
+    // when using Capability APIs.)
     //
-    // When a task goes to sleep, it may be migrated to a different
-    // Capability.  Hence, we always check task->cap on wakeup.  To
-    // syncrhonise between the migrater and the migratee, task->lock
-    // must be held when modifying task->cap.
+    // If the task is a worker, task->cap points to the Capability on which it
+    // is queued.
+    //
+    // If the task is in an unsafe foreign call, then task->cap can be used to
+    // retrieve the capability (see rts_unsafeGetMyCapability()).
     struct Capability_ *cap;
 
     // The current top-of-stack InCall
     struct InCall_ *incall;
 
-    nat n_spare_incalls;
+    uint32_t n_spare_incalls;
     struct InCall_ *spare_incalls;
 
     rtsBool    worker;          // == rtsTrue if this is a worker Task
@@ -150,6 +154,9 @@ typedef struct Task_ {
 
     // So that we can detect when a finalizer illegally calls back into Haskell
     rtsBool running_finalizers;
+
+    // if >= 0, this Capability will be used for in-calls
+    int preferred_capability;
 
     // Links tasks on the returning_tasks queue of a Capability, and
     // on spare_workers.
@@ -191,7 +198,7 @@ extern Mutex all_tasks_mutex;
 // Requires: sched_mutex.
 //
 void initTaskManager (void);
-nat  freeTaskManager (void);
+uint32_t  freeTaskManager (void);
 
 // Create a new Task for a bound thread.  This Task must be released
 // by calling boundTaskExiting.  The Task is cached in
@@ -246,9 +253,9 @@ void interruptWorkerTask (Task *task);
 #endif /* THREADED_RTS */
 
 // For stats
-extern nat taskCount;
-extern nat workerCount;
-extern nat peakWorkerCount;
+extern uint32_t taskCount;
+extern uint32_t workerCount;
+extern uint32_t peakWorkerCount;
 
 // -----------------------------------------------------------------------------
 // INLINE functions... private from here on down:
@@ -324,11 +331,7 @@ INLINE_HEADER TaskId serialiseTaskId (OSThreadId taskID) {
 // Get a serialisable Id for the Task's OS thread
 // Needed mainly for logging since the OSThreadId is an opaque type
 INLINE_HEADER TaskId
-serialisableTaskId (Task *task
-#if !defined(THREADED_RTS)
-                               STG_UNUSED
-#endif
-                                         )
+serialisableTaskId (Task *task)
 {
 #if defined(THREADED_RTS)
     return serialiseTaskId(task->id);

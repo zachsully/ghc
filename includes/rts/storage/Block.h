@@ -57,7 +57,7 @@
  * own and treat it as an immovable object during GC, expressed as a
  * fraction of BLOCK_SIZE.
  */
-#define LARGE_OBJECT_THRESHOLD ((nat)(BLOCK_SIZE * 8 / 10))
+#define LARGE_OBJECT_THRESHOLD ((uint32_t)(BLOCK_SIZE * 8 / 10))
 
 /*
  * Note [integer overflow]
@@ -89,7 +89,8 @@ typedef struct bdescr_ {
 
     StgPtr start;              // [READ ONLY] start addr of memory
 
-    StgPtr free;               // first free byte of memory.
+    StgPtr free;               // First free byte of memory.
+                               // allocGroup() sets this to the value of start.
                                // NB. during use this value should lie
                                // between start and start + blocks *
                                // BLOCK_SIZE.  Values outside this
@@ -110,7 +111,7 @@ typedef struct bdescr_ {
 
     StgWord16 gen_no;          // gen->no, cached
     StgWord16 dest_no;         // number of destination generation
-    StgWord16 _pad1;
+    StgWord16 node;            // which memory node does this block live on?
 
     StgWord16 flags;           // block flags, see below
 
@@ -153,6 +154,10 @@ typedef struct bdescr_ {
 #define BF_KNOWN     128
 /* Block was swept in the last generation */
 #define BF_SWEPT     256
+/* Block is part of a Compact */
+#define BF_COMPACT   512
+/* Maximum flag value (do not define anything higher than this!) */
+#define BF_FLAG_MAX  (1 << 15)
 
 /* Finding the block descriptor for a given block -------------------------- */
 
@@ -279,11 +284,27 @@ extern void initBlockAllocator(void);
 /* Allocation -------------------------------------------------------------- */
 
 bdescr *allocGroup(W_ n);
-bdescr *allocBlock(void);
+
+EXTERN_INLINE bdescr* allocBlock(void);
+EXTERN_INLINE bdescr* allocBlock(void)
+{
+    return allocGroup(1);
+}
+
+bdescr *allocGroupOnNode(uint32_t node, W_ n);
+
+EXTERN_INLINE bdescr* allocBlockOnNode(uint32_t node);
+EXTERN_INLINE bdescr* allocBlockOnNode(uint32_t node)
+{
+    return allocGroupOnNode(node,1);
+}
 
 // versions that take the storage manager lock for you:
 bdescr *allocGroup_lock(W_ n);
 bdescr *allocBlock_lock(void);
+
+bdescr *allocGroupOnNode_lock(uint32_t node, W_ n);
+bdescr *allocBlockOnNode_lock(uint32_t node);
 
 /* De-Allocation ----------------------------------------------------------- */
 
@@ -294,7 +315,7 @@ void freeChain(bdescr *p);
 void freeGroup_lock(bdescr *p);
 void freeChain_lock(bdescr *p);
 
-bdescr * splitBlockGroup (bdescr *bd, nat blocks);
+bdescr * splitBlockGroup (bdescr *bd, uint32_t blocks);
 
 /* Round a value to megablocks --------------------------------------------- */
 

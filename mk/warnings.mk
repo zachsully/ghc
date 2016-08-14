@@ -21,7 +21,13 @@ ifeq "$(GccLT46)" "NO"
 ifneq "$(HostOS_CPP)" "mingw32"
 SRC_CC_WARNING_OPTS += -Werror=unused-but-set-variable
 endif
-# gcc 4.6 gives 3 warning for giveCapabilityToTask not being inlined
+endif
+
+ifeq "$(GccLT44)" "NO"
+# Suppress the warning about __sync_fetch_and_nand (#9678).
+libraries/ghc-prim/cbits/atomic_CC_OPTS += -Wno-sync-nand
+# gcc 4.6 gives 3 warnings for giveCapabilityToTask not being inlined
+# gcc 4.4 gives 2 warnings for lockClosure not being inlined
 SRC_CC_WARNING_OPTS += -Wno-error=inline
 endif
 
@@ -50,6 +56,7 @@ libraries/bytestring_dist-install_EXTRA_HC_OPTS += -Wno-inline-rule-shadowing
 # Turn off import warnings for bad unused imports
 utils/haddock_dist_EXTRA_HC_OPTS += -Wno-unused-imports
 libraries/vector_dist-install_EXTRA_HC_OPTS += -Wno-unused-imports
+libraries/directory_dist-install_EXTRA_HC_OPTS += -Wno-unused-imports
 
 # haddock's attoparsec uses deprecated `inlinePerformIO`
 utils/haddock_dist_EXTRA_HC_OPTS += -Wno-deprecations
@@ -70,6 +77,7 @@ endif
 libraries/haskeline_dist-install_EXTRA_HC_OPTS += -Wno-deprecations
 libraries/haskeline_dist-install_EXTRA_HC_OPTS += -Wno-unused-imports
 libraries/haskeline_dist-install_EXTRA_HC_OPTS += -Wno-redundant-constraints
+libraries/haskeline_dist-install_EXTRA_HC_OPTS += -Wno-simplifiable-class-constraints
 
 
 # temporarily turn off unused-imports warnings for pretty

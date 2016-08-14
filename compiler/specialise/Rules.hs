@@ -33,13 +33,13 @@ import Module           ( Module, ModuleSet, elemModuleSet )
 import CoreSubst
 import OccurAnal        ( occurAnalyseExpr )
 import CoreFVs          ( exprFreeVars, exprsFreeVars, bindFreeVars
-                        , rulesFreeVarsDSet, exprsOrphNames )
+                        , rulesFreeVarsDSet, exprsOrphNames, exprFreeVarsList )
 import CoreUtils        ( exprType, eqExpr, mkTick, mkTicks,
                           stripTicksTopT, stripTicksTopE )
 import PprCore          ( pprRules )
 import Type             ( Type, substTy, mkTCvSubst )
 import TcType           ( tcSplitTyConApp_maybe )
-import TysPrim          ( anyTypeOfKind )
+import TysWiredIn       ( anyTypeOfKind )
 import Coercion
 import CoreTidy         ( tidyRules )
 import Id
@@ -50,6 +50,7 @@ import VarSet
 import Name             ( Name, NamedThing(..), nameIsLocalOrFrom )
 import NameSet
 import NameEnv
+import UniqFM
 import Unify            ( ruleMatchTyX )
 import BasicTypes       ( Activation, CompilerPhase, isActive, pprRuleName )
 import StaticFlags      ( opt_PprStyle_Debug )
@@ -180,13 +181,13 @@ mkRule this_mod is_auto is_local name act fn bndrs args rhs
         -- Compute orphanhood.  See Note [Orphans] in InstEnv
         -- A rule is an orphan only if none of the variables
         -- mentioned on its left-hand side are locally defined
-    lhs_names = nameSetElems (extendNameSet (exprsOrphNames args) fn)
+    lhs_names = extendNameSet (exprsOrphNames args) fn
 
         -- Since rules get eventually attached to one of the free names
         -- from the definition when compiling the ABI hash, we should make
         -- it deterministic. This chooses the one with minimal OccName
         -- as opposed to uniq value.
-    local_lhs_names = filter (nameIsLocalOrFrom this_mod) lhs_names
+    local_lhs_names = filterNameSet (nameIsLocalOrFrom this_mod) lhs_names
     orph = chooseOrphanAnchor local_lhs_names
 
 --------------
@@ -357,8 +358,9 @@ extendRuleBase rule_base rule
   = extendNameEnv_Acc (:) singleton rule_base (ruleIdName rule) rule
 
 pprRuleBase :: RuleBase -> SDoc
-pprRuleBase rules = vcat [ pprRules (tidyRules emptyTidyEnv rs)
-                         | rs <- nameEnvElts rules ]
+pprRuleBase rules = pprUFM rules $ \rss ->
+  vcat [ pprRules (tidyRules emptyTidyEnv rs)
+       | rs <- rss ]
 
 {-
 ************************************************************************
@@ -566,7 +568,9 @@ matchN (in_scope, id_unf) rule_name tmpl_vars tmpl_es target_es
           kind = Type.substTy (mkTCvSubst in_scope (tv_subst, cv_subst))
                               (tyVarKind tmpl_var)
 
-          to_co_env env = foldVarEnv_Directly to_co emptyVarEnv env
+          to_co_env env = nonDetFoldUFM_Directly to_co emptyVarEnv env
+            -- It's OK to use nonDetFoldUFM_Directly because we forget the
+            -- order immediately by creating a new env
           to_co uniq expr env
             | Just co <- exprToCoercion_maybe expr
             = extendVarEnv_Directly env uniq co
@@ -855,7 +859,7 @@ match_alts _ _ _ _
 ------------------------------------------
 okToFloat :: RnEnv2 -> VarSet -> Bool
 okToFloat rn_env bind_fvs
-  = foldVarSet ((&&) . not_captured) True bind_fvs
+  = varSetAll not_captured bind_fvs
   where
     not_captured fv = not (inRnEnvR rn_env fv)
 
@@ -898,7 +902,7 @@ match_tmpl_var :: RuleMatchEnv
 match_tmpl_var renv@(RV { rv_lcl = rn_env, rv_fltR = flt_env })
                subst@(RS { rs_id_subst = id_subst, rs_bndrs = let_bndrs })
                v1' e2
-  | any (inRnEnvR rn_env) (varSetElems (exprFreeVars e2))
+  | any (inRnEnvR rn_env) (exprFreeVarsList e2)
   = Nothing     -- Occurs check failure
                 -- e.g. match forall a. (\x-> a x) against (\y. y y)
 

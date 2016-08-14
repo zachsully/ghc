@@ -22,15 +22,13 @@ module UniqSet (
         unionUniqSets, unionManyUniqSets,
         minusUniqSet,
         intersectUniqSets,
-        foldUniqSet,
-        mapUniqSet,
+        uniqSetAny, uniqSetAll,
         elementOfUniqSet,
         elemUniqSet_Directly,
         filterUniqSet,
         sizeUniqSet,
         isEmptyUniqSet,
         lookupUniqSet,
-        uniqSetToList,
         partitionUniqSet
     ) where
 
@@ -62,8 +60,6 @@ unionManyUniqSets :: [UniqSet a] -> UniqSet a
 minusUniqSet  :: UniqSet a -> UniqSet a -> UniqSet a
 intersectUniqSets :: UniqSet a -> UniqSet a -> UniqSet a
 
-foldUniqSet :: (a -> b -> b) -> b -> UniqSet a -> b
-mapUniqSet :: (a -> b) -> UniqSet a -> UniqSet b
 elementOfUniqSet :: Uniquable a => a -> UniqSet a -> Bool
 elemUniqSet_Directly :: Unique -> UniqSet a -> Bool
 filterUniqSet :: (a -> Bool) -> UniqSet a -> UniqSet a
@@ -72,7 +68,6 @@ partitionUniqSet :: (a -> Bool) -> UniqSet a -> (UniqSet a, UniqSet a)
 sizeUniqSet :: UniqSet a -> Int
 isEmptyUniqSet :: UniqSet a -> Bool
 lookupUniqSet :: Uniquable a => UniqSet b -> a -> Maybe b
-uniqSetToList :: UniqSet a -> [a]
 
 {-
 ************************************************************************
@@ -81,6 +76,15 @@ uniqSetToList :: UniqSet a -> [a]
 *                                                                      *
 ************************************************************************
 -}
+
+-- Note [Unsound mapUniqSet]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~
+-- UniqSet has the following invariant:
+--   The keys in the map are the uniques of the values
+-- It means that to implement mapUniqSet you'd have to update
+-- both the keys and the values. There used to be an implementation
+-- that only updated the values and it's been removed, because it broke
+-- the invariant.
 
 type UniqSet a = UniqFM a
 
@@ -102,8 +106,6 @@ unionManyUniqSets sets = foldr1 unionUniqSets sets
 minusUniqSet = minusUFM
 intersectUniqSets = intersectUFM
 
-foldUniqSet = foldUFM
-mapUniqSet = mapUFM
 elementOfUniqSet = elemUFM
 elemUniqSet_Directly = elemUFM_Directly
 filterUniqSet = filterUFM
@@ -112,4 +114,9 @@ partitionUniqSet = partitionUFM
 sizeUniqSet = sizeUFM
 isEmptyUniqSet = isNullUFM
 lookupUniqSet = lookupUFM
-uniqSetToList = eltsUFM
+
+uniqSetAny :: (a -> Bool) -> UniqSet a -> Bool
+uniqSetAny = anyUFM
+
+uniqSetAll :: (a -> Bool) -> UniqSet a -> Bool
+uniqSetAll = allUFM

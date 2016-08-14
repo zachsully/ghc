@@ -19,10 +19,11 @@ module Outputable (
         docToSDoc,
         interppSP, interpp'SP,
         pprQuotedList, pprWithCommas, quotedListWithOr, quotedListWithNor,
+        pprWithBars,
         empty, isEmpty, nest,
         char,
         text, ftext, ptext, ztext,
-        int, intWithCommas, integer, float, double, rational,
+        int, intWithCommas, integer, float, double, rational, doublePrec,
         parens, cparen, brackets, braces, quotes, quote,
         doubleQuotes, angleBrackets, paBrackets,
         semi, comma, colon, dcolon, space, equals, dot, vbar,
@@ -111,7 +112,9 @@ import Data.Word
 import System.IO        ( Handle )
 import System.FilePath
 import Text.Printf
+import Numeric (showFFloat)
 import Data.Graph (SCC(..))
+import Data.List (intersperse)
 
 import GHC.Fingerprint
 import GHC.Show         ( showMultiLineString )
@@ -508,6 +511,11 @@ float n     = docToSDoc $ Pretty.float n
 double n    = docToSDoc $ Pretty.double n
 rational n  = docToSDoc $ Pretty.rational n
 
+-- | @doublePrec p n@ shows a floating point number @n@ with @p@
+-- digits of precision after the decimal point.
+doublePrec :: Int -> Double -> SDoc
+doublePrec p n = text (showFFloat (Just p) n "")
+
 parens, braces, brackets, quotes, quote,
         paBrackets, doubleQuotes, angleBrackets :: SDoc -> SDoc
 
@@ -831,7 +839,12 @@ instance Outputable Extension where
 -- | 'BindingSite' is used to tell the thing that prints binder what
 -- language construct is binding the identifier.  This can be used
 -- to decide how much info to print.
-data BindingSite = LambdaBind | CaseBind | LetBind
+-- Also see Note [Binding-site specific printing] in PprCore
+data BindingSite
+    = LambdaBind  -- ^ The x in   (\x. e)
+    | CaseBind    -- ^ The x in   case scrut of x { (y,z) -> ... }
+    | CasePatBind -- ^ The y,z in case scrut of x { (y,z) -> ... }
+    | LetBind     -- ^ The x in   (let x = rhs in e)
 
 -- | When we print a binder, we often want to print its type too.
 -- The @OutputableBndr@ class encapsulates this idea.
@@ -924,6 +937,12 @@ pprWithCommas :: (a -> SDoc) -- ^ The pretty printing function to use
               -> SDoc        -- ^ 'SDoc' where the things have been pretty printed,
                              -- comma-separated and finally packed into a paragraph.
 pprWithCommas pp xs = fsep (punctuate comma (map pp xs))
+
+pprWithBars :: (a -> SDoc) -- ^ The pretty printing function to use
+            -> [a]         -- ^ The things to be pretty printed
+            -> SDoc        -- ^ 'SDoc' where the things have been pretty printed,
+                           -- bar-separated and finally packed into a paragraph.
+pprWithBars pp xs = fsep (intersperse vbar (map pp xs))
 
 -- | Returns the separated concatenation of the pretty printed things.
 interppSP  :: Outputable a => [a] -> SDoc

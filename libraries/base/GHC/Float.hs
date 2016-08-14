@@ -27,9 +27,15 @@
 
 #include "ieee-flpt.h"
 
-module GHC.Float( module GHC.Float, Float(..), Double(..), Float#, Double#
-                , double2Int, int2Double, float2Int, int2Float )
-    where
+module GHC.Float
+   ( module GHC.Float
+   , Float(..), Double(..), Float#, Double#
+   , double2Int, int2Double, float2Int, int2Float
+
+    -- * Monomorphic equality operators
+    -- | See GHC.Classes#matching_overloaded_methods_in_rules
+   , eqFloat, eqDouble
+   ) where
 
 import Data.Maybe
 
@@ -233,6 +239,7 @@ class  (RealFrac a, Floating a) => RealFloat a  where
 -- Float
 ------------------------------------------------------------------------
 
+-- | @since 2.01
 instance  Num Float  where
     (+)         x y     =  plusFloat x y
     (-)         x y     =  minusFloat x y
@@ -248,6 +255,7 @@ instance  Num Float  where
     {-# INLINE fromInteger #-}
     fromInteger i = F# (floatFromInteger i)
 
+-- | @since 2.01
 instance  Real Float  where
     toRational (F# x#)  =
         case decodeFloat_Int# x# of
@@ -260,6 +268,7 @@ instance  Real Float  where
             | otherwise                                         ->
                     smallInteger m# :% shiftLInteger 1 (negateInt# e#)
 
+-- | @since 2.01
 instance  Fractional Float  where
     (/) x y             =  divideFloat x y
     {-# INLINE fromRational #-}
@@ -293,6 +302,7 @@ rationalToFloat n d
 "ceiling/Float->Int"                ceiling = ceilingFloatInt
 "round/Float->Int"                  round = roundFloatInt
   #-}
+-- | @since 2.01
 instance  RealFrac Float  where
 
         -- ceiling, floor, and truncate are all small
@@ -336,6 +346,7 @@ instance  RealFrac Float  where
     floor x     = case properFraction x of
                     (n,r) -> if r < 0.0 then n - 1 else n
 
+-- | @since 2.01
 instance  Floating Float  where
     pi                  =  3.141592653589793238
     exp x               =  expFloat x
@@ -370,6 +381,7 @@ instance  Floating Float  where
       | otherwise = a
     {-# INLINE log1pexp #-}
 
+-- | @since 2.01
 instance  RealFloat Float  where
     floatRadix _        =  FLT_RADIX        -- from float.h
     floatDigits _       =  FLT_MANT_DIG     -- ditto
@@ -400,6 +412,7 @@ instance  RealFloat Float  where
     isNegativeZero x = 0 /= isFloatNegativeZero x
     isIEEE _         = True
 
+-- | @since 2.01
 instance  Show Float  where
     showsPrec   x = showSignedFloat showFloat x
     showList = showList__ (showsPrec 0)
@@ -408,6 +421,7 @@ instance  Show Float  where
 -- Double
 ------------------------------------------------------------------------
 
+-- | @since 2.01
 instance  Num Double  where
     (+)         x y     =  plusDouble x y
     (-)         x y     =  minusDouble x y
@@ -425,6 +439,7 @@ instance  Num Double  where
     fromInteger i = D# (doubleFromInteger i)
 
 
+-- | @since 2.01
 instance  Real Double  where
     toRational (D# x#)  =
         case decodeDoubleInteger x# of
@@ -437,6 +452,7 @@ instance  Real Double  where
             | otherwise                                            ->
                 m :% shiftLInteger 1 (negateInt# e#)
 
+-- | @since 2.01
 instance  Fractional Double  where
     (/) x y             =  divideDouble x y
     {-# INLINE fromRational #-}
@@ -457,6 +473,7 @@ rationalToDouble n d
         minEx       = DBL_MIN_EXP
         mantDigs    = DBL_MANT_DIG
 
+-- | @since 2.01
 instance  Floating Double  where
     pi                  =  3.141592653589793238
     exp x               =  expDouble x
@@ -504,6 +521,7 @@ instance  Floating Double  where
 "ceiling/Double->Int"               ceiling = ceilingDoubleInt
 "round/Double->Int"                 round = roundDoubleInt
   #-}
+-- | @since 2.01
 instance  RealFrac Double  where
 
         -- ceiling, floor, and truncate are all small
@@ -540,6 +558,7 @@ instance  RealFrac Double  where
     floor x     = case properFraction x of
                     (n,r) -> if r < 0.0 then n - 1 else n
 
+-- | @since 2.01
 instance  RealFloat Double  where
     floatRadix _        =  FLT_RADIX        -- from float.h
     floatDigits _       =  DBL_MANT_DIG     -- ditto
@@ -571,6 +590,7 @@ instance  RealFloat Double  where
     isNegativeZero x    = 0 /= isDoubleNegativeZero x
     isIEEE _            = True
 
+-- | @since 2.01
 instance  Show Double  where
     showsPrec   x = showSignedFloat showFloat x
     showList = showList__ (showsPrec 0)
@@ -595,6 +615,7 @@ a `non-lossy' conversion to and from Ints. Instead we make use of the
 for these (@numericEnumFromTo@ and @numericEnumFromThenTo@ below.)
 -}
 
+-- | @since 2.01
 instance  Enum Float  where
     succ x         = x + 1
     pred x         = x - 1
@@ -605,6 +626,7 @@ instance  Enum Float  where
     enumFromThen   = numericEnumFromThen
     enumFromThenTo = numericEnumFromThenTo
 
+-- | @since 2.01
 instance  Enum Double  where
     succ x         = x + 1
     pred x         = x - 1
@@ -1059,11 +1081,9 @@ divideFloat (F# x) (F# y) = F# (divideFloat# x y)
 negateFloat :: Float -> Float
 negateFloat (F# x)        = F# (negateFloat# x)
 
-gtFloat, geFloat, eqFloat, neFloat, ltFloat, leFloat :: Float -> Float -> Bool
+gtFloat, geFloat, ltFloat, leFloat :: Float -> Float -> Bool
 gtFloat     (F# x) (F# y) = isTrue# (gtFloat# x y)
 geFloat     (F# x) (F# y) = isTrue# (geFloat# x y)
-eqFloat     (F# x) (F# y) = isTrue# (eqFloat# x y)
-neFloat     (F# x) (F# y) = isTrue# (neFloat# x y)
 ltFloat     (F# x) (F# y) = isTrue# (ltFloat# x y)
 leFloat     (F# x) (F# y) = isTrue# (leFloat# x y)
 
@@ -1099,11 +1119,9 @@ divideDouble (D# x) (D# y) = D# (x /## y)
 negateDouble :: Double -> Double
 negateDouble (D# x)        = D# (negateDouble# x)
 
-gtDouble, geDouble, eqDouble, neDouble, leDouble, ltDouble :: Double -> Double -> Bool
+gtDouble, geDouble, leDouble, ltDouble :: Double -> Double -> Bool
 gtDouble    (D# x) (D# y) = isTrue# (x >##  y)
 geDouble    (D# x) (D# y) = isTrue# (x >=## y)
-eqDouble    (D# x) (D# y) = isTrue# (x ==## y)
-neDouble    (D# x) (D# y) = isTrue# (x /=## y)
 ltDouble    (D# x) (D# y) = isTrue# (x <##  y)
 leDouble    (D# x) (D# y) = isTrue# (x <=## y)
 

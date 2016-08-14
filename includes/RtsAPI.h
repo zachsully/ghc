@@ -90,7 +90,7 @@ typedef struct {
     void (* outOfHeapHook) (W_ request_size, W_ heap_size);
 
     // Called when malloc() fails, before exiting
-    void (* mallocFailHook) (W_ request_size /* in bytes */, char *msg);
+    void (* mallocFailHook) (W_ request_size /* in bytes */, const char *msg);
 
     // Called for every GC
     void (* gcDoneHook) (unsigned int gen,
@@ -171,6 +171,19 @@ void rts_unlock (Capability *token);
 // WARNING: There is *no* guarantee this returns anything sensible (eg NULL)
 // when there is no current capability.
 Capability *rts_unsafeGetMyCapability (void);
+
+// Specify the Capability that the current OS thread should run on when it calls
+// into Haskell.  The actual capability will be calculated as the supplied
+// value modulo the number of enabled Capabilities.
+//
+// Note that the thread may still be migrated by the RTS scheduler, but that
+// will only happen if there are multiple threads running on one Capability and
+// another Capability is free.
+//
+// If affinity is non-zero, the current thread will be bound to
+// specific CPUs according to the prevailing affinity policy for the
+// specified capability, set by either +RTS -qa or +RTS --numa.
+void rts_setInCallCapability (int preferred_capability, int affinity);
 
 /* ----------------------------------------------------------------------------
    Building Haskell objects from C datatypes.

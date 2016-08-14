@@ -30,6 +30,7 @@ import NameSet
 import Name
 import NameEnv
 import FastString
+import UniqDFM
 
 
 import Data.Maybe
@@ -86,7 +87,7 @@ data GlobalEnv
           -- ^Mapping from global variables to their vectorised versions — aka the /vectorisation
           -- map/.
 
-        , global_parallel_vars        :: VarSet
+        , global_parallel_vars        :: DVarSet
           -- ^The domain of 'global_vars'.
           --
           -- This information is not redundant as it is impossible to extract the domain from a
@@ -148,7 +149,7 @@ initGlobalEnv :: Bool
 initGlobalEnv vectAvoid info vectDecls instEnvs famInstEnvs
   = GlobalEnv
   { global_vect_avoid           = vectAvoid
-  , global_vars                 = mapVarEnv snd $ vectInfoVar info
+  , global_vars                 = mapVarEnv snd $ udfmToUfm $ vectInfoVar info
   , global_vect_decls           = mkVarEnv vects
   , global_parallel_vars        = vectInfoParallelVars info
   , global_parallel_tycons      = vectInfoParallelTyCons info
@@ -205,11 +206,11 @@ setPRFunsEnv ps genv = genv { global_pr_funs = mkNameEnv ps }
 modVectInfo :: GlobalEnv -> [Id] -> [TyCon] -> [CoreVect]-> VectInfo -> VectInfo
 modVectInfo env mg_ids mg_tyCons vectDecls info
   = info
-    { vectInfoVar            = mk_env ids      (global_vars     env)
+    { vectInfoVar            = mk_denv ids     (global_vars     env)
     , vectInfoTyCon          = mk_env tyCons   (global_tycons   env)
     , vectInfoDataCon        = mk_env dataCons (global_datacons env)
-    , vectInfoParallelVars   = (global_parallel_vars   env `minusVarSet`  vectInfoParallelVars   info)
-                               `intersectVarSet` (mkVarSet ids)
+    , vectInfoParallelVars   = (global_parallel_vars   env `minusDVarSet`  vectInfoParallelVars   info)
+                               `udfmIntersectUFM` (mkVarSet ids)
     , vectInfoParallelTyCons =  global_parallel_tycons env `minusNameSet` vectInfoParallelTyCons info
     }
   where
@@ -227,8 +228,10 @@ modVectInfo env mg_ids mg_tyCons vectDecls info
                              , cls <- maybeToList . tyConClass_maybe $ tycon]
 
     -- Produce an entry for every declaration that is mentioned in the domain of the 'inspectedEnv'
-    mk_env decls inspectedEnv
-      = mkNameEnv [(name, (decl, to))
-                  | decl     <- decls
-                  , let name = getName decl
-                  , Just to  <- [lookupNameEnv inspectedEnv name]]
+    mk_env decls inspectedEnv = mkNameEnv $ mk_assoc_env decls inspectedEnv
+    mk_denv decls inspectedEnv = listToUDFM $ mk_assoc_env decls inspectedEnv
+    mk_assoc_env decls inspectedEnv
+      = [(name, (decl, to))
+        | decl     <- decls
+        , let name = getName decl
+        , Just to  <- [lookupNameEnv inspectedEnv name]]

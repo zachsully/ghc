@@ -1,12 +1,11 @@
-{-# LANGUAGE CPP, DeriveDataTypeable, PolymorphicComponents,
+{-# LANGUAGE CPP, DeriveDataTypeable,
              DeriveGeneric, FlexibleInstances, DefaultSignatures,
-             ScopedTypeVariables, Rank2Types #-}
+             RankNTypes, RoleAnnotations, ScopedTypeVariables #-}
 
-{-# LANGUAGE RoleAnnotations #-}
 {-# OPTIONS_GHC -fno-warn-inline-rule-shadowing #-}
 
-#if MIN_VERSION_base(4,8,0)
-#define HAS_NATURAL
+#if MIN_VERSION_base(4,9,0)
+# define HAS_MONADFAIL 1
 #endif
 
 -----------------------------------------------------------------------------
@@ -41,9 +40,10 @@ import Data.Ratio
 import GHC.Generics     ( Generic )
 import GHC.Lexeme       ( startsVarSym, startsVarId )
 import Language.Haskell.TH.LanguageExtensions
-
-#ifdef HAS_NATURAL
 import Numeric.Natural
+
+#if HAS_MONADFAIL
+import qualified Control.Monad.Fail as Fail
 #endif
 
 -----------------------------------------------------
@@ -52,7 +52,11 @@ import Numeric.Natural
 --
 -----------------------------------------------------
 
+#if HAS_MONADFAIL
+class Fail.MonadFail m => Quasi m where
+#else
 class Monad m => Quasi m where
+#endif
   qNewName :: String -> m Name
         -- ^ Fresh names
 
@@ -170,7 +174,14 @@ runQ (Q m) = m
 instance Monad Q where
   Q m >>= k  = Q (m >>= \x -> unQ (k x))
   (>>) = (*>)
+#if !HAS_MONADFAIL
   fail s     = report True s >> Q (fail "Q monad failure")
+#else
+  fail       = Fail.fail
+
+instance Fail.MonadFail Q where
+  fail s     = report True s >> Q (Fail.fail "Q monad failure")
+#endif
 
 instance Functor Q where
   fmap f (Q x) = Q (fmap f x)
@@ -447,6 +458,10 @@ addTopDecls ds = Q (qAddTopDecls ds)
 
 -- | Add a finalizer that will run in the Q monad after the current module has
 -- been type checked. This only makes sense when run within a top-level splice.
+--
+-- The finalizer is given the local type environment at the splice point. Thus
+-- 'reify' is able to find the local definitions when executed inside the
+-- finalizer.
 addModFinalizer :: Q () -> Q ()
 addModFinalizer act = Q (qAddModFinalizer (unQ act))
 
@@ -571,10 +586,8 @@ instance Lift Word32 where
 instance Lift Word64 where
   lift x = return (LitE (IntegerL (fromIntegral x)))
 
-#ifdef HAS_NATURAL
 instance Lift Natural where
   lift x = return (LitE (IntegerL (fromIntegral x)))
-#endif
 
 instance Integral a => Lift (Ratio a) where
   lift x = return (LitE (RationalL (toRational x)))
@@ -781,17 +794,17 @@ dataToPatQ = dataToQa id litP conP
 -----------------------------------------------------
 
 newtype ModName = ModName String        -- Module name
- deriving (Show,Eq,Ord,Typeable,Data,Generic)
+ deriving (Show,Eq,Ord,Data,Generic)
 
 newtype PkgName = PkgName String        -- package name
- deriving (Show,Eq,Ord,Typeable,Data,Generic)
+ deriving (Show,Eq,Ord,Data,Generic)
 
 -- | Obtained from 'reifyModule' and 'thisModule'.
 data Module = Module PkgName ModName -- package qualified module name
- deriving (Show,Eq,Ord,Typeable,Data,Generic)
+ deriving (Show,Eq,Ord,Data,Generic)
 
 newtype OccName = OccName String
- deriving (Show,Eq,Ord,Typeable,Data,Generic)
+ deriving (Show,Eq,Ord,Data,Generic)
 
 mkModName :: String -> ModName
 mkModName s = ModName s
@@ -902,7 +915,7 @@ Names constructed using @newName@ and @mkName@ may be used in bindings
 (such as @let x = ...@ or @\x -> ...@), but names constructed using
 @lookupValueName@, @lookupTypeName@, @'f@, @''T@ may not.
 -}
-data Name = Name OccName NameFlavour deriving (Typeable, Data, Eq, Generic)
+data Name = Name OccName NameFlavour deriving (Data, Eq, Generic)
 
 instance Ord Name where
     -- check if unique is different before looking at strings
@@ -918,13 +931,13 @@ data NameFlavour
                 -- An original name (occurrences only, not binders)
                 -- Need the namespace too to be sure which
                 -- thing we are naming
-  deriving ( Typeable, Data, Eq, Ord, Show, Generic )
+  deriving ( Data, Eq, Ord, Show, Generic )
 
 data NameSpace = VarName        -- ^ Variables
                | DataName       -- ^ Data constructors
                | TcClsName      -- ^ Type constructors and classes; Haskell has them
                                 -- in the same name space for now.
-               deriving( Eq, Ord, Show, Data, Typeable, Generic )
+               deriving( Eq, Ord, Show, Data, Generic )
 
 type Uniq = Int
 
@@ -1175,7 +1188,7 @@ data Loc
         , loc_module   :: String
         , loc_start    :: CharPos
         , loc_end      :: CharPos }
-   deriving( Show, Eq, Ord, Data, Typeable, Generic )
+   deriving( Show, Eq, Ord, Data, Generic )
 
 type CharPos = (Int, Int)       -- ^ Line and character position
 
@@ -1222,6 +1235,11 @@ data Info
        Type
        ParentName
 
+  -- | A pattern synonym.
+  | PatSynI
+       Name
+       PatSynType
+
   {- |
   A \"value\" variable (as opposed to a type variable, see 'TyVarI').
 
@@ -1247,13 +1265,13 @@ data Info
   | TyVarI      -- Scoped type variable
         Name
         Type    -- What it is bound to
-  deriving( Show, Eq, Ord, Data, Typeable, Generic )
+  deriving( Show, Eq, Ord, Data, Generic )
 
 -- | Obtained from 'reifyModule' in the 'Q' Monad.
 data ModuleInfo =
   -- | Contains the import list of the module.
   ModuleInfo [Module]
-  deriving( Show, Eq, Ord, Data, Typeable, Generic )
+  deriving( Show, Eq, Ord, Data, Generic )
 
 {- |
 In 'ClassOpI' and 'DataConI', name of the parent class or type
@@ -1277,9 +1295,9 @@ type Unlifted = Bool
 type InstanceDec = Dec
 
 data Fixity          = Fixity Int FixityDirection
-    deriving( Eq, Ord, Show, Data, Typeable, Generic )
+    deriving( Eq, Ord, Show, Data, Generic )
 data FixityDirection = InfixL | InfixR | InfixN
-    deriving( Eq, Ord, Show, Data, Typeable, Generic )
+    deriving( Eq, Ord, Show, Data, Generic )
 
 -- | Highest allowed operator precedence for 'Fixity' constructor (answer: 9)
 maxPrecedence :: Int
@@ -1372,7 +1390,7 @@ data Lit = CharL Char
          | DoublePrimL Rational
          | StringPrimL [Word8]  -- ^ A primitive C-style string, type Addr#
          | CharPrimL Char
-    deriving( Show, Eq, Ord, Data, Typeable, Generic )
+    deriving( Show, Eq, Ord, Data, Generic )
 
     -- We could add Int, Float, Double etc, as we do in HsLit,
     -- but that could complicate the
@@ -1400,15 +1418,15 @@ data Pat
   | ListP [ Pat ]                 -- ^ @{ [1,2,3] }@
   | SigP Pat Type                 -- ^ @{ p :: t }@
   | ViewP Exp Pat                 -- ^ @{ e -> p }@
-  deriving( Show, Eq, Ord, Data, Typeable, Generic )
+  deriving( Show, Eq, Ord, Data, Generic )
 
 type FieldPat = (Name,Pat)
 
 data Match = Match Pat Body [Dec] -- ^ @case e of { pat -> body where decs }@
-    deriving( Show, Eq, Ord, Data, Typeable, Generic )
+    deriving( Show, Eq, Ord, Data, Generic )
 data Clause = Clause [Pat] Body [Dec]
                                   -- ^ @f { p1 p2 = body where decs }@
-    deriving( Show, Eq, Ord, Data, Typeable, Generic )
+    deriving( Show, Eq, Ord, Data, Generic )
 
 data Exp
   = VarE Name                          -- ^ @{ x }@
@@ -1457,7 +1475,7 @@ data Exp
   | RecUpdE Exp [FieldExp]             -- ^ @{ (f x) { z = w } }@
   | StaticE Exp                        -- ^ @{ static e }@
   | UnboundVarE Name                   -- ^ @{ _x }@ (hole)
-  deriving( Show, Eq, Ord, Data, Typeable, Generic )
+  deriving( Show, Eq, Ord, Data, Generic )
 
 type FieldExp = (Name,Exp)
 
@@ -1468,23 +1486,23 @@ data Body
                                  --      | e3 = e4 }
                                  -- where ds@
   | NormalB Exp              -- ^ @f p { = e } where ds@
-  deriving( Show, Eq, Ord, Data, Typeable, Generic )
+  deriving( Show, Eq, Ord, Data, Generic )
 
 data Guard
   = NormalG Exp -- ^ @f x { | odd x } = x@
   | PatG [Stmt] -- ^ @f x { | Just y <- x, Just z <- y } = z@
-  deriving( Show, Eq, Ord, Data, Typeable, Generic )
+  deriving( Show, Eq, Ord, Data, Generic )
 
 data Stmt
   = BindS Pat Exp
   | LetS [ Dec ]
   | NoBindS Exp
   | ParS [[Stmt]]
-  deriving( Show, Eq, Ord, Data, Typeable, Generic )
+  deriving( Show, Eq, Ord, Data, Generic )
 
 data Range = FromR Exp | FromThenR Exp Exp
            | FromToR Exp Exp | FromThenToR Exp Exp Exp
-          deriving( Show, Eq, Ord, Data, Typeable, Generic )
+          deriving( Show, Eq, Ord, Data, Generic )
 
 data Dec
   = FunD Name [Clause]            -- ^ @{ f p1 p2 = b where decs }@
@@ -1501,8 +1519,9 @@ data Dec
   | TySynD Name [TyVarBndr] Type  -- ^ @{ type T x = (x,x) }@
   | ClassD Cxt Name [TyVarBndr]
          [FunDep] [Dec]           -- ^ @{ class Eq a => Ord a where ds }@
-  | InstanceD Cxt Type [Dec]      -- ^ @{ instance Show w => Show [w]
-                                  --       where ds }@
+  | InstanceD (Maybe Overlap) Cxt Type [Dec]
+                                  -- ^ @{ instance {\-\# OVERLAPS \#-\}
+                                  --        Show w => Show [w] where ds }@
   | SigD Name Type                -- ^ @{ length :: [a] -> Int }@
   | ForeignD Foreign              -- ^ @{ foreign import ... }
                                   --{ foreign export ... }@
@@ -1535,42 +1554,110 @@ data Dec
   | ClosedTypeFamilyD TypeFamilyHead [TySynEqn]
        -- ^ @{ type family F a b = (r :: *) | r -> a where ... }@
 
-  | RoleAnnotD Name [Role]        -- ^ @{ type role T nominal representational }@
-  | StandaloneDerivD Cxt Type     -- ^ @{ deriving instance Ord a => Ord (Foo a) }@
-  | DefaultSigD Name Type         -- ^ @{ default size :: Data a => a -> Int }@
-  deriving( Show, Eq, Ord, Data, Typeable, Generic )
+  | RoleAnnotD Name [Role]     -- ^ @{ type role T nominal representational }@
+  | StandaloneDerivD Cxt Type  -- ^ @{ deriving instance Ord a => Ord (Foo a) }@
+  | DefaultSigD Name Type      -- ^ @{ default size :: Data a => a -> Int }@
 
--- | Common elements of 'OpenTypeFamilyD' and 'ClosedTypeFamilyD'.
--- By analogy with with "head" for type classes and type class instances as
+  -- | Pattern Synonyms
+  | PatSynD Name PatSynArgs PatSynDir Pat
+      -- ^ @{ pattern P v1 v2 .. vn <- p }@  unidirectional           or
+      --   @{ pattern P v1 v2 .. vn = p  }@  implicit bidirectional   or
+      --   @{ pattern P v1 v2 .. vn <- p
+      --        where P v1 v2 .. vn = e  }@  explicit bidirectional
+      --
+      -- also, besides prefix pattern synonyms, both infix and record
+      -- pattern synonyms are supported. See 'PatSynArgs' for details
+
+  | PatSynSigD Name PatSynType  -- ^ A pattern synonym's type signature.
+  deriving( Show, Eq, Ord, Data, Generic )
+
+-- | Varieties of allowed instance overlap.
+data Overlap = Overlappable   -- ^ May be overlapped by more specific instances
+             | Overlapping    -- ^ May overlap a more general instance
+             | Overlaps       -- ^ Both 'Overlapping' and 'Overlappable'
+             | Incoherent     -- ^ Both 'Overlappable' and 'Overlappable', and
+                              -- pick an arbitrary one if multiple choices are
+                              -- available.
+  deriving( Show, Eq, Ord, Data, Generic )
+
+-- | A Pattern synonym's type. Note that a pattern synonym's *fully*
+-- specified type has a peculiar shape coming with two forall
+-- quantifiers and two constraint contexts. For example, consider the
+-- pattern synonym
+--
+--   pattern P x1 x2 ... xn = <some-pattern>
+--
+-- P's complete type is of the following form
+--
+--   forall universals. required constraints
+--     => forall existentials. provided constraints
+--     => t1 -> t2 -> ... -> tn -> t
+--
+-- consisting of four parts:
+--
+--   1) the (possibly empty lists of) universally quantified type
+--      variables and required constraints on them.
+--   2) the (possibly empty lists of) existentially quantified
+--      type variables and the provided constraints on them.
+--   3) the types t1, t2, .., tn of x1, x2, .., xn, respectively
+--   4) the type t of <some-pattern>, mentioning only universals.
+--
+-- Pattern synonym types interact with TH when (a) reifying a pattern
+-- synonym, (b) pretty printing, or (c) specifying a pattern synonym's
+-- type signature explicitly:
+--
+-- (a) Reification always returns a pattern synonym's *fully* specified
+--     type in abstract syntax.
+--
+-- (b) Pretty printing via 'pprPatSynType' abbreviates a pattern
+--     synonym's type unambiguously in concrete syntax: The rule of
+--     thumb is to print initial empty universals and the required
+--     context as `() =>`, if existentials and a provided context
+--     follow. If only universals and their required context, but no
+--     existentials are specified, only the universals and their
+--     required context are printed. If both or none are specified, so
+--     both (or none) are printed.
+--
+-- (c) When specifying a pattern synonym's type explicitly with
+--     'PatSynSigD' either one of the universals, the existentials, or
+--     their contexts may be left empty.
+--
+-- See the GHC users guide for more information on pattern synonyms
+-- and their types: https://downloads.haskell.org/~ghc/latest/docs/html/
+-- users_guide/syntax-extns.html#pattern-synonyms.
+type PatSynType = Type
+
+-- | Common elements of 'OpenTypeFamilyD' and 'ClosedTypeFamilyD'. By
+-- analogy with "head" for type classes and type class instances as
 -- defined in /Type classes: an exploration of the design space/, the
--- @TypeFamilyHead@ is defined to be the elements of the declaration between
--- @type family@ and @where@.
+-- @TypeFamilyHead@ is defined to be the elements of the declaration
+-- between @type family@ and @where@.
 data TypeFamilyHead =
   TypeFamilyHead Name [TyVarBndr] FamilyResultSig (Maybe InjectivityAnn)
-  deriving( Show, Eq, Ord, Data, Typeable, Generic )
+  deriving( Show, Eq, Ord, Data, Generic )
 
 -- | One equation of a type family instance or closed type family. The
 -- arguments are the left-hand-side type patterns and the right-hand-side
 -- result.
 data TySynEqn = TySynEqn [Type] Type
-  deriving( Show, Eq, Ord, Data, Typeable, Generic )
+  deriving( Show, Eq, Ord, Data, Generic )
 
 data FunDep = FunDep [Name] [Name]
-  deriving( Show, Eq, Ord, Data, Typeable, Generic )
+  deriving( Show, Eq, Ord, Data, Generic )
 
 data FamFlavour = TypeFam | DataFam
-  deriving( Show, Eq, Ord, Data, Typeable, Generic )
+  deriving( Show, Eq, Ord, Data, Generic )
 
 data Foreign = ImportF Callconv Safety String Name Type
              | ExportF Callconv        String Name Type
-         deriving( Show, Eq, Ord, Data, Typeable, Generic )
+         deriving( Show, Eq, Ord, Data, Generic )
 
 -- keep Callconv in sync with module ForeignCall in ghc/compiler/prelude/ForeignCall.hs
 data Callconv = CCall | StdCall | CApi | Prim | JavaScript
-          deriving( Show, Eq, Ord, Data, Typeable, Generic )
+          deriving( Show, Eq, Ord, Data, Generic )
 
 data Safety = Unsafe | Safe | Interruptible
-        deriving( Show, Eq, Ord, Data, Typeable, Generic )
+        deriving( Show, Eq, Ord, Data, Generic )
 
 data Pragma = InlineP         Name Inline RuleMatch Phases
             | SpecialiseP     Name Type (Maybe Inline) Phases
@@ -1578,30 +1665,30 @@ data Pragma = InlineP         Name Inline RuleMatch Phases
             | RuleP           String [RuleBndr] Exp Exp Phases
             | AnnP            AnnTarget Exp
             | LineP           Int String
-        deriving( Show, Eq, Ord, Data, Typeable, Generic )
+        deriving( Show, Eq, Ord, Data, Generic )
 
 data Inline = NoInline
             | Inline
             | Inlinable
-            deriving (Show, Eq, Ord, Data, Typeable, Generic)
+            deriving (Show, Eq, Ord, Data, Generic)
 
 data RuleMatch = ConLike
                | FunLike
-               deriving (Show, Eq, Ord, Data, Typeable, Generic)
+               deriving (Show, Eq, Ord, Data, Generic)
 
 data Phases = AllPhases
             | FromPhase Int
             | BeforePhase Int
-            deriving (Show, Eq, Ord, Data, Typeable, Generic)
+            deriving (Show, Eq, Ord, Data, Generic)
 
 data RuleBndr = RuleVar Name
               | TypedRuleVar Name Type
-              deriving (Show, Eq, Ord, Data, Typeable, Generic)
+              deriving (Show, Eq, Ord, Data, Generic)
 
 data AnnTarget = ModuleAnnotation
                | TypeAnnotation Name
                | ValueAnnotation Name
-              deriving (Show, Eq, Ord, Data, Typeable, Generic)
+              deriving (Show, Eq, Ord, Data, Generic)
 
 type Cxt = [Pred]                 -- ^ @(Eq a, Ord b)@
 
@@ -1614,12 +1701,12 @@ data SourceUnpackedness
   = NoSourceUnpackedness -- ^ @C a@
   | SourceNoUnpack       -- ^ @C { {\-\# NOUNPACK \#-\} } a@
   | SourceUnpack         -- ^ @C { {\-\# UNPACK \#-\} } a@
-        deriving (Show, Eq, Ord, Data, Typeable, Generic)
+        deriving (Show, Eq, Ord, Data, Generic)
 
 data SourceStrictness = NoSourceStrictness    -- ^ @C a@
                       | SourceLazy            -- ^ @C {~}a@
                       | SourceStrict          -- ^ @C {!}a@
-        deriving (Show, Eq, Ord, Data, Typeable, Generic)
+        deriving (Show, Eq, Ord, Data, Generic)
 
 -- | Unlike 'SourceStrictness' and 'SourceUnpackedness', 'DecidedStrictness'
 -- refers to the strictness that the compiler chooses for a data constructor
@@ -1628,7 +1715,7 @@ data SourceStrictness = NoSourceStrictness    -- ^ @C a@
 data DecidedStrictness = DecidedLazy
                        | DecidedStrict
                        | DecidedUnpack
-        deriving (Show, Eq, Ord, Data, Typeable, Generic)
+        deriving (Show, Eq, Ord, Data, Generic)
 
 data Con = NormalC Name [BangType]       -- ^ @C Int a@
          | RecC Name [VarBangType]       -- ^ @C { v :: Int, w :: a }@
@@ -1640,7 +1727,7 @@ data Con = NormalC Name [BangType]       -- ^ @C Int a@
          | RecGadtC [Name] [VarBangType]
                     Type                 -- See Note [GADT return type]
                                          -- ^ @C :: { v :: Int } -> T b Int@
-        deriving (Show, Eq, Ord, Data, Typeable, Generic)
+        deriving (Show, Eq, Ord, Data, Generic)
 
 -- Note [GADT return type]
 -- ~~~~~~~~~~~~~~~~~~~~~~~
@@ -1672,7 +1759,7 @@ data Con = NormalC Name [BangType]       -- ^ @C Int a@
 
 data Bang = Bang SourceUnpackedness SourceStrictness
          -- ^ @C { {\-\# UNPACK \#-\} !}a@
-        deriving (Show, Eq, Ord, Data, Typeable, Generic)
+        deriving (Show, Eq, Ord, Data, Generic)
 
 type BangType    = (Bang, Type)
 type VarBangType = (Name, Bang, Type)
@@ -1687,6 +1774,20 @@ type StrictType    = BangType
 -- | As of @template-haskell-2.11.0.0@, 'VarStrictType' has been replaced by
 -- 'VarBangType'.
 type VarStrictType = VarBangType
+
+-- | A pattern synonym's directionality.
+data PatSynDir
+  = Unidir             -- ^ @pattern P x {<-} p@
+  | ImplBidir          -- ^ @pattern P x {=} p@
+  | ExplBidir [Clause] -- ^ @pattern P x {<-} p where P x = e@
+  deriving( Show, Eq, Ord, Data, Generic )
+
+-- | A pattern synonym's argument type.
+data PatSynArgs
+  = PrefixPatSyn [Name]        -- ^ @pattern P {x y z} = p@
+  | InfixPatSyn Name Name      -- ^ @pattern {x P y} = p@
+  | RecordPatSyn [Name]        -- ^ @pattern P { {x,y,z} } = p@
+  deriving( Show, Eq, Ord, Data, Generic )
 
 data Type = ForallT [TyVarBndr] Cxt Type  -- ^ @forall \<vars\>. \<ctxt\> -> \<type\>@
           | AppT Type Type                -- ^ @T a b@
@@ -1713,37 +1814,37 @@ data Type = ForallT [TyVarBndr] Cxt Type  -- ^ @forall \<vars\>. \<ctxt\> -> \<t
           | ConstraintT                   -- ^ @Constraint@
           | LitT TyLit                    -- ^ @0,1,2, etc.@
           | WildCardT                     -- ^ @_,
-      deriving( Show, Eq, Ord, Data, Typeable, Generic )
+      deriving( Show, Eq, Ord, Data, Generic )
 
 data TyVarBndr = PlainTV  Name            -- ^ @a@
                | KindedTV Name Kind       -- ^ @(a :: k)@
-      deriving( Show, Eq, Ord, Data, Typeable, Generic )
+      deriving( Show, Eq, Ord, Data, Generic )
 
 -- | Type family result signature
 data FamilyResultSig = NoSig              -- ^ no signature
                      | KindSig  Kind      -- ^ @k@
                      | TyVarSig TyVarBndr -- ^ @= r, = (r :: k)@
-      deriving( Show, Eq, Ord, Data, Typeable, Generic )
+      deriving( Show, Eq, Ord, Data, Generic )
 
 -- | Injectivity annotation
 data InjectivityAnn = InjectivityAnn Name [Name]
-  deriving ( Show, Eq, Ord, Data, Typeable, Generic )
+  deriving ( Show, Eq, Ord, Data, Generic )
 
 data TyLit = NumTyLit Integer             -- ^ @2@
            | StrTyLit String              -- ^ @"Hello"@
-  deriving ( Show, Eq, Ord, Data, Typeable, Generic )
+  deriving ( Show, Eq, Ord, Data, Generic )
 
 -- | Role annotations
 data Role = NominalR            -- ^ @nominal@
           | RepresentationalR   -- ^ @representational@
           | PhantomR            -- ^ @phantom@
           | InferR              -- ^ @_@
-  deriving( Show, Eq, Ord, Data, Typeable, Generic )
+  deriving( Show, Eq, Ord, Data, Generic )
 
 -- | Annotation target for reifyAnnotations
 data AnnLookup = AnnLookupModule Module
                | AnnLookupName Name
-               deriving( Show, Eq, Ord, Data, Typeable, Generic )
+               deriving( Show, Eq, Ord, Data, Generic )
 
 -- | To avoid duplication between kinds and types, they
 -- are defined to be the same. Naturally, you would never

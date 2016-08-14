@@ -25,6 +25,8 @@
 #include "Storage.h"
 #include "Threads.h"
 
+#include "sm/GCUtils.h"
+#include "sm/MarkWeak.h"
 #include "sm/Sanity.h"
 
 /* -----------------------------------------------------------------------------
@@ -89,7 +91,7 @@ static void    tidyThreadList (generation *gen);
 void
 initWeakForGC(void)
 {
-    nat g;
+    uint32_t g;
 
     for (g = 0; g <= N; g++) {
         generation *gen = &generations[g];
@@ -118,7 +120,7 @@ traverseWeakPtrList(void)
        * become garbage, we wake them up and administer an exception.
        */
   {
-      nat g;
+      uint32_t g;
 
       for (g = 0; g <= N; g++) {
           tidyThreadList(&generations[g]);
@@ -156,7 +158,7 @@ traverseWeakPtrList(void)
 
   case WeakPtrs:
   {
-      nat g;
+      uint32_t g;
 
       // resurrecting threads might have made more weak pointers
       // alive, so traverse those lists again:
@@ -265,10 +267,19 @@ static rtsBool tidyWeakList(generation *gen)
 
                 new_gen = Bdescr((P_)w)->gen;
                 gct->evac_gen_no = new_gen->no;
+                gct->failed_to_evac = rtsFalse;
 
-                // evacuate the value and finalizer
-                evacuate(&w->value);
-                evacuate(&w->finalizer);
+                // evacuate the fields of the weak ptr
+                scavengeLiveWeak(w);
+
+                if (gct->failed_to_evac) {
+                    debugTrace(DEBUG_weak,
+                               "putting weak pointer %p into mutable list",
+                               w);
+                    gct->failed_to_evac = rtsFalse;
+                    recordMutableGen_GC((StgClosure *)w, new_gen->no);
+                }
+
                 // remove this weak ptr from the old_weak_ptr list
                 *last_w = w->link;
                 next_w  = w->link;
@@ -365,7 +376,7 @@ static void checkWeakPtrSanity(StgWeak *hd, StgWeak *tl)
 
 void collectFreshWeakPtrs()
 {
-    nat i;
+    uint32_t i;
     generation *gen = &generations[0];
     // move recently allocated weak_ptr_list to the old list as well
     for (i = 0; i < n_capabilities; i++) {
@@ -390,7 +401,7 @@ void collectFreshWeakPtrs()
 void
 markWeakPtrList ( void )
 {
-    nat g;
+    uint32_t g;
 
     for (g = 0; g <= N; g++) {
         generation *gen = &generations[g];
@@ -413,12 +424,24 @@ markWeakPtrList ( void )
 
             evacuate((StgClosure **)last_w);
             w = *last_w;
-            if (w->header.info == &stg_DEAD_WEAK_info) {
-                last_w = &(w->link);
-            } else {
-                last_w = &(w->link);
-            }
+            last_w = &(w->link);
         }
     }
 }
 
+/* -----------------------------------------------------------------------------
+   Fully scavenge a known-to-be-alive weak pointer.
+
+   In scavenge_block, we only partially scavenge a weak pointer because it may
+   turn out to be dead. This function should be called when we decide that the
+   weak pointer is alive after this GC.
+   -------------------------------------------------------------------------- */
+
+void
+scavengeLiveWeak(StgWeak *w)
+{
+    evacuate(&w->value);
+    evacuate(&w->key);
+    evacuate(&w->finalizer);
+    evacuate(&w->cfinalizers);
+}

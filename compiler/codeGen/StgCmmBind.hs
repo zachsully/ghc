@@ -112,8 +112,7 @@ cgTopRhsClosure dflags rec id ccs _ upd_flag args body =
                  -- BUILD THE OBJECT, AND GENERATE INFO TABLE (IF NECESSARY)
         ; emitDataLits closure_label closure_rep
         ; let fv_details :: [(NonVoid Id, VirtualHpOffset)]
-              (_, _, fv_details) = mkVirtHeapOffsets dflags (isLFThunk lf_info)
-                                               (addIdReps [])
+              (_, _, fv_details) = mkVirtHeapOffsets dflags (isLFThunk lf_info) []
         -- Don't drop the non-void args until the closure info has been made
         ; forkClosureBody (closureCodeBody True id closure_info ccs
                                 (nonVoidIds args) (length args) body fv_details)
@@ -206,13 +205,13 @@ cgRhs :: Id
                )
 
 cgRhs id (StgRhsCon cc con args)
-  = withNewTickyCounterThunk False (idName id) $ -- False for "not static"
+  = withNewTickyCounterCon (idName id) $
     buildDynCon id True cc con args
 
 {- See Note [GC recovery] in compiler/codeGen/StgCmmClosure.hs -}
-cgRhs name (StgRhsClosure cc bi fvs upd_flag args body)
+cgRhs id (StgRhsClosure cc bi fvs upd_flag args body)
   = do dflags <- getDynFlags
-       mkRhsClosure dflags name cc bi (nonVoidIds fvs) upd_flag args body
+       mkRhsClosure dflags id cc bi (nonVoidIds fvs) upd_flag args body
 
 ------------------------------------------------------------------------
 --              Non-constructor right hand sides
@@ -299,24 +298,30 @@ mkRhsClosure    dflags bndr _cc _bi
                 []                      -- No args; a thunk
                 (StgApp fun_id args)
 
-  | args `lengthIs` (arity-1)
-        && all (isGcPtrRep . idPrimRep . unsafe_stripNV) fvs
-        && isUpdatable upd_flag
-        && arity <= mAX_SPEC_AP_SIZE dflags
-        && not (gopt Opt_SccProfilingOn dflags)
-                                  -- not when profiling: we don't want to
-                                  -- lose information about this particular
-                                  -- thunk (e.g. its type) (#949)
+  -- We are looking for an "ApThunk"; see data con ApThunk in StgCmmClosure
+  -- of form (x1 x2 .... xn), where all the xi are locals (not top-level)
+  -- So the xi will all be free variables
+  | args `lengthIs` (n_fvs-1)  -- This happens only if the fun_id and
+                               -- args are all distinct local variables
+                               -- The "-1" is for fun_id
+    -- Missed opportunity:   (f x x) is not detected
+  , all (isGcPtrRep . idPrimRep . unsafe_stripNV) fvs
+  , isUpdatable upd_flag
+  , n_fvs <= mAX_SPEC_AP_SIZE dflags
+  , not (gopt Opt_SccProfilingOn dflags)
+                         -- not when profiling: we don't want to
+                         -- lose information about this particular
+                         -- thunk (e.g. its type) (#949)
 
-                   -- Ha! an Ap thunk
+          -- Ha! an Ap thunk
   = cgRhsStdThunk bndr lf_info payload
 
   where
-        lf_info = mkApLFInfo bndr upd_flag arity
-        -- the payload has to be in the correct order, hence we can't
-        -- just use the fvs.
-        payload = StgVarArg fun_id : args
-        arity   = length fvs
+    n_fvs   = length fvs
+    lf_info = mkApLFInfo bndr upd_flag n_fvs
+    -- the payload has to be in the correct order, hence we can't
+    -- just use the fvs.
+    payload = StgVarArg fun_id : args
 
 ---------- Default case ------------------
 mkRhsClosure dflags bndr cc _ fvs upd_flag args body
@@ -333,12 +338,7 @@ mkRhsClosure dflags bndr cc _ fvs upd_flag args body
         -- _was_ a free var of its RHS, mkClosureLFInfo thinks it *is*
         -- stored in the closure itself, so it will make sure that
         -- Node points to it...
-        ; let
-                is_elem      = isIn "cgRhsClosure"
-                bndr_is_a_fv = (NonVoid bndr) `is_elem` fvs
-                reduced_fvs | bndr_is_a_fv = fvs `minusList` [NonVoid bndr]
-                            | otherwise    = fvs
-
+        ; let   reduced_fvs = filter (NonVoid bndr /=) fvs
 
         -- MAKE CLOSURE INFO FOR THIS CLOSURE
         ; mod_name <- getModuleName
@@ -386,7 +386,7 @@ cgRhsStdThunk bndr lf_info payload
        }
  where
  gen_code reg  -- AHA!  A STANDARD-FORM THUNK
-  = withNewTickyCounterStdThunk False (idName bndr) $ -- False for "not static"
+  = withNewTickyCounterStdThunk (lfUpdatable lf_info) (idName bndr) $
     do
   {     -- LAY OUT THE OBJECT
     mod_name <- getModuleName
@@ -402,7 +402,6 @@ cgRhsStdThunk bndr lf_info payload
 --  ; (use_cc, blame_cc) <- chooseDynCostCentres cc [{- no args-}] body
   ; let use_cc = curCCS; blame_cc = curCCS
 
-  ; tickyEnterStdThunk closure_info
 
         -- BUILD THE OBJECT
   ; let info_tbl = mkCmmInfo closure_info
@@ -453,7 +452,10 @@ closureCodeBody :: Bool            -- whether this is a top-level binding
 
 closureCodeBody top_lvl bndr cl_info cc _args arity body fv_details
   | arity == 0 -- No args i.e. thunk
-  = withNewTickyCounterThunk (isStaticClosure cl_info) (closureName cl_info) $
+  = withNewTickyCounterThunk
+        (isStaticClosure cl_info)
+        (closureUpdReqd cl_info)
+        (closureName cl_info) $
     emitClosureProcAndInfoTable top_lvl bndr lf_info info_tbl [] $
       \(_, node, _) -> thunkCode cl_info fv_details cc node arity body
    where
@@ -462,7 +464,10 @@ closureCodeBody top_lvl bndr cl_info cc _args arity body fv_details
 
 closureCodeBody top_lvl bndr cl_info cc args arity body fv_details
   = -- Note: args may be [], if all args are Void
-    withNewTickyCounterFun (closureName cl_info) args $ do {
+    withNewTickyCounterFun
+        (closureSingleEntry cl_info)
+        (closureName cl_info)
+        args $ do {
 
         ; let
              lf_info  = closureLFInfo cl_info
@@ -546,7 +551,7 @@ mkSlowEntryCode bndr cl_info arg_regs -- function closure is already in `Node'
            -- mkDirectJump does not clobber `Node' containing function closure
            jump = mkJump dflags NativeNodeCall
                                 (mkLblExpr fast_lbl)
-                                (map (CmmReg . CmmLocal) (node : arg_regs))
+                                (map (CmmExprArg . CmmReg . CmmLocal) (node : arg_regs))
                                 (initUpdFrameOff dflags)
        tscope <- getTickScope
        emitProcWithConvention Slow Nothing slow_lbl
@@ -576,8 +581,7 @@ thunkCode cl_info fv_details _cc node arity body
             -- that cc of enclosing scope will be recorded
             -- in update frame CAF/DICT functions will be
             -- subsumed by this enclosing cc
-            do { tickyEnterThunk cl_info
-               ; enterCostCentreThunk (CmmReg nodeReg)
+            do { enterCostCentreThunk (CmmReg nodeReg)
                ; let lf_info = closureLFInfo cl_info
                ; fv_bindings <- mapM bind_fv fv_details
                ; load_fvs node lf_info fv_bindings

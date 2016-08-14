@@ -131,7 +131,17 @@ Dumping out compiler intermediate structures
 
     .. ghc-flag:: -ddump-cmm
 
-        Print the C-- code out.
+        Dump the result of the C-- pipeline processing
+
+    .. ghc-flag:: -ddump-cmm-from-stg
+
+        Dump the result of STG-to-C-- conversion
+
+    .. ghc-flag:: -ddump-cmm-verbose
+
+        Dump output from all C-- pipeline stages. In case of
+        ``.cmm`` compilation this also dumps the result of
+        file parsing.
 
     .. ghc-flag:: -ddump-opt-cmm
 
@@ -201,7 +211,15 @@ Dumping out compiler intermediate structures
 
 .. ghc-flag:: -dshow-passes
 
-    Print out each pass name as it happens.
+    Print out each pass name, its runtime and heap allocations as it happens.
+    Note that this may come at a slight performance cost as the compiler will
+    be a bit more eager in forcing pass results to more accurately account for
+    their costs.
+
+    Two types of messages are produced: Those beginning with ``***`` are
+    denote the beginning of a compilation phase whereas those starting with
+    ``!!!`` mark the end of a pass and are accompanied by allocation and
+    runtime statistics.
 
 .. ghc-flag:: -ddump-core-stats
 

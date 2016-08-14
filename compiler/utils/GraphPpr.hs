@@ -25,7 +25,7 @@ dumpGraph
 
 dumpGraph graph
         =  text "Graph"
-        $$ (vcat $ map dumpNode $ eltsUFM $ graphMap graph)
+        $$ pprUFM (graphMap graph) (vcat . map dumpNode)
 
 dumpNode
         :: (Outputable k, Outputable color)
@@ -65,7 +65,8 @@ dotGraph
         -> Graph k cls color -> SDoc
 
 dotGraph colorMap triv graph
- = let  nodes   = eltsUFM $ graphMap graph
+ = let  nodes   = nonDetEltsUFM $ graphMap graph
+                  -- See Note [Unique Determinism and code generation]
    in   vcat
                 (  [ text "graph G {" ]
                 ++ map (dotNode colorMap triv) nodes
@@ -86,7 +87,8 @@ dotNode colorMap triv node
         excludes
                 = hcat $ punctuate space
                 $ map (\n -> text "-" <> ppr n)
-                $ uniqSetToList $ nodeExclusions node
+                $ nonDetEltsUFM $ nodeExclusions node
+                -- See Note [Unique Determinism and code generation]
 
         preferences
                 = hcat $ punctuate space
@@ -144,12 +146,14 @@ dotNodeEdges visited node
         | otherwise
         = let   dconflicts
                         = map (dotEdgeConflict (nodeId node))
-                        $ uniqSetToList
+                        $ nonDetEltsUFM
+                        -- See Note [Unique Determinism and code generation]
                         $ minusUniqSet (nodeConflicts node) visited
 
                 dcoalesces
                         = map (dotEdgeCoalesce (nodeId node))
-                        $ uniqSetToList
+                        $ nonDetEltsUFM
+                        -- See Note [Unique Determinism and code generation]
                         $ minusUniqSet (nodeCoalesce node) visited
 
                 out     =  vcat dconflicts

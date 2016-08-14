@@ -27,6 +27,8 @@ module UniqDFM (
         emptyUDFM,
         unitUDFM,
         addToUDFM,
+        addToUDFM_C,
+        addListToUDFM,
         delFromUDFM,
         delListFromUDFM,
         adjustUDFM,
@@ -34,21 +36,26 @@ module UniqDFM (
         mapUDFM,
         plusUDFM,
         plusUDFM_C,
-        lookupUDFM,
+        lookupUDFM, lookupUDFM_Directly,
         elemUDFM,
         foldUDFM,
         eltsUDFM,
-        filterUDFM,
+        filterUDFM, filterUDFM_Directly,
         isNullUDFM,
         sizeUDFM,
-        intersectUDFM,
+        intersectUDFM, udfmIntersectUFM,
         intersectsUDFM,
-        disjointUDFM,
+        disjointUDFM, disjointUdfmUfm,
         minusUDFM,
+        listToUDFM,
+        udfmMinusUFM,
         partitionUDFM,
+        anyUDFM, allUDFM,
+        pprUDFM,
 
         udfmToList,
         udfmToUfm,
+        nonDetFoldUDFM,
         alwaysUnsafeUfmToUdfm,
     ) where
 
@@ -56,11 +63,10 @@ import Unique           ( Uniquable(..), Unique, getKey )
 import Outputable
 
 import qualified Data.IntMap as M
-import Data.Typeable
 import Data.Data
 import Data.List (sortBy)
 import Data.Function (on)
-import UniqFM (UniqFM, listToUFM_Directly, ufmToList)
+import UniqFM (UniqFM, listToUFM_Directly, nonDetUFMToList, ufmToIntMap)
 
 -- Note [Deterministic UniqFM]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -105,7 +111,7 @@ data TaggedVal val =
   TaggedVal
     val
     {-# UNPACK #-} !Int -- ^ insertion time
-  deriving (Data, Typeable)
+  deriving Data
 
 taggedFst :: TaggedVal val -> val
 taggedFst (TaggedVal v _) = v
@@ -128,7 +134,7 @@ data UniqDFM ele =
                                 -- be distinct within a single map
     {-# UNPACK #-} !Int         -- Upper bound on the values' insertion
                                 -- time. See Note [Overflow on plusUDFM]
-  deriving (Data, Typeable, Functor)
+  deriving (Data, Functor)
 
 emptyUDFM :: UniqDFM elt
 emptyUDFM = UDFM M.empty 0
@@ -144,22 +150,44 @@ addToUDFM_Directly :: UniqDFM elt -> Unique -> elt -> UniqDFM elt
 addToUDFM_Directly (UDFM m i) u v =
   UDFM (M.insert (getKey u) (TaggedVal v i) m) (i + 1)
 
+addToUDFM_Directly_C
+  :: (elt -> elt -> elt) -> UniqDFM elt -> Unique -> elt -> UniqDFM elt
+addToUDFM_Directly_C f (UDFM m i) u v =
+  UDFM (M.insertWith tf (getKey u) (TaggedVal v i) m) (i + 1)
+  where
+  tf (TaggedVal a j) (TaggedVal b _) = TaggedVal (f a b) j
+
+addListToUDFM :: Uniquable key => UniqDFM elt -> [(key,elt)] -> UniqDFM elt
+addListToUDFM = foldl (\m (k, v) -> addToUDFM m k v)
+
+addToUDFM_C
+  :: Uniquable key => (elt -> elt -> elt) -- old -> new -> result
+  -> UniqDFM elt -- old
+  -> key -> elt -- new
+  -> UniqDFM elt -- result
+addToUDFM_C f (UDFM m i) k v =
+  UDFM (M.insertWith tf (getKey $ getUnique k) (TaggedVal v i) m) (i + 1)
+  where
+  tf (TaggedVal a j) (TaggedVal b _) = TaggedVal (f b a) j
+                                       -- Flip the arguments, just like
+                                       -- addToUFM_C does.
+
 addListToUDFM_Directly :: UniqDFM elt -> [(Unique,elt)] -> UniqDFM elt
 addListToUDFM_Directly = foldl (\m (k, v) -> addToUDFM_Directly m k v)
 
-addToUDFM_Directly_C :: (elt -> elt -> elt)
-                     -> UniqDFM elt -> Unique -> elt -> UniqDFM elt
-addToUDFM_Directly_C f (UDFM m i) u v =
-  UDFM (M.insertWith f' (getKey u) (TaggedVal v i) m) (i + 1)
-  where
-  f' (TaggedVal v1 i1) (TaggedVal v2 i2) = TaggedVal (f v1 v2) (min i1 i2)
-
-addListToUDFM_Directly_C :: (elt -> elt -> elt)
-                         -> UniqDFM elt -> [(Unique,elt)] -> UniqDFM elt
+addListToUDFM_Directly_C
+  :: (elt -> elt -> elt) -> UniqDFM elt -> [(Unique,elt)] -> UniqDFM elt
 addListToUDFM_Directly_C f = foldl (\m (k, v) -> addToUDFM_Directly_C f m k v)
 
 delFromUDFM :: Uniquable key => UniqDFM elt -> key -> UniqDFM elt
 delFromUDFM (UDFM m i) k = UDFM (M.delete (getKey $ getUnique k) m) i
+
+plusUDFM_C :: (elt -> elt -> elt) -> UniqDFM elt -> UniqDFM elt -> UniqDFM elt
+plusUDFM_C f udfml@(UDFM _ i) udfmr@(UDFM _ j)
+  -- we will use the upper bound on the tag as a proxy for the set size,
+  -- to insert the smaller one into the bigger one
+  | i > j = insertUDFMIntoLeft_C f udfml udfmr
+  | otherwise = insertUDFMIntoLeft_C f udfmr udfml
 
 -- Note [Overflow on plusUDFM]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -204,18 +232,16 @@ plusUDFM udfml@(UDFM _ i) udfmr@(UDFM _ j)
 insertUDFMIntoLeft :: UniqDFM elt -> UniqDFM elt -> UniqDFM elt
 insertUDFMIntoLeft udfml udfmr = addListToUDFM_Directly udfml $ udfmToList udfmr
 
-plusUDFM_C :: (elt -> elt -> elt) -> UniqDFM elt -> UniqDFM elt -> UniqDFM elt
-plusUDFM_C f udfml@(UDFM _ i) udfmr@(UDFM _ j)
-  | i > j = insertUDFMIntoLeft_C f udfml udfmr
-  | otherwise = insertUDFMIntoLeft_C f udfmr udfml
-
-insertUDFMIntoLeft_C :: (elt -> elt -> elt)
-                     -> UniqDFM elt -> UniqDFM elt -> UniqDFM elt
-insertUDFMIntoLeft_C f udfml udfmr
-  = addListToUDFM_Directly_C f udfml $ udfmToList udfmr
+insertUDFMIntoLeft_C
+  :: (elt -> elt -> elt) -> UniqDFM elt -> UniqDFM elt -> UniqDFM elt
+insertUDFMIntoLeft_C f udfml udfmr =
+  addListToUDFM_Directly_C f udfml $ udfmToList udfmr
 
 lookupUDFM :: Uniquable key => UniqDFM elt -> key -> Maybe elt
 lookupUDFM (UDFM m _i) k = taggedFst `fmap` M.lookup (getKey $ getUnique k) m
+
+lookupUDFM_Directly :: UniqDFM elt -> Unique -> Maybe elt
+lookupUDFM_Directly (UDFM m _i) k = taggedFst `fmap` M.lookup (getKey k) m
 
 elemUDFM :: Uniquable key => key -> UniqDFM elt -> Bool
 elemUDFM k (UDFM m _i) = M.member (getKey $ getUnique k) m
@@ -225,12 +251,24 @@ elemUDFM k (UDFM m _i) = M.member (getKey $ getUnique k) m
 foldUDFM :: (elt -> a -> a) -> a -> UniqDFM elt -> a
 foldUDFM k z m = foldr k z (eltsUDFM m)
 
+-- | Performs a nondeterministic fold over the UniqDFM.
+-- It's O(n), same as the corresponding function on `UniqFM`.
+-- If you use this please provide a justification why it doesn't introduce
+-- nondeterminism.
+nonDetFoldUDFM :: (elt -> a -> a) -> a -> UniqDFM elt -> a
+nonDetFoldUDFM k z (UDFM m _i) = foldr k z $ map taggedFst $ M.elems m
+
 eltsUDFM :: UniqDFM elt -> [elt]
 eltsUDFM (UDFM m _i) =
   map taggedFst $ sortBy (compare `on` taggedSnd) $ M.elems m
 
 filterUDFM :: (elt -> Bool) -> UniqDFM elt -> UniqDFM elt
 filterUDFM p (UDFM m i) = UDFM (M.filter (\(TaggedVal v _) -> p v) m) i
+
+filterUDFM_Directly :: (Unique -> elt -> Bool) -> UniqDFM elt -> UniqDFM elt
+filterUDFM_Directly p (UDFM m i) = UDFM (M.filterWithKey p' m) i
+  where
+  p' k (TaggedVal v _) = p (getUnique k) v
 
 -- | Converts `UniqDFM` to a list, with elements in deterministic order.
 -- It's O(n log n) while the corresponding function on `UniqFM` is O(n).
@@ -250,14 +288,27 @@ intersectUDFM (UDFM x i) (UDFM y _j) = UDFM (M.intersection x y) i
   -- M.intersection is left biased, that means the result will only have
   -- a subset of elements from the left set, so `i` is a good upper bound.
 
+udfmIntersectUFM :: UniqDFM elt -> UniqFM elt -> UniqDFM elt
+udfmIntersectUFM (UDFM x i) y = UDFM (M.intersection x (ufmToIntMap y)) i
+  -- M.intersection is left biased, that means the result will only have
+  -- a subset of elements from the left set, so `i` is a good upper bound.
+
 intersectsUDFM :: UniqDFM elt -> UniqDFM elt -> Bool
 intersectsUDFM x y = isNullUDFM (x `intersectUDFM` y)
 
 disjointUDFM :: UniqDFM elt -> UniqDFM elt -> Bool
 disjointUDFM (UDFM x _i) (UDFM y _j) = M.null (M.intersection x y)
 
+disjointUdfmUfm :: UniqDFM elt -> UniqFM elt2 -> Bool
+disjointUdfmUfm (UDFM x _i) y = M.null (M.intersection x (ufmToIntMap y))
+
 minusUDFM :: UniqDFM elt1 -> UniqDFM elt2 -> UniqDFM elt1
 minusUDFM (UDFM x i) (UDFM y _j) = UDFM (M.difference x y) i
+  -- M.difference returns a subset of a left set, so `i` is a good upper
+  -- bound.
+
+udfmMinusUFM :: UniqDFM elt1 -> UniqFM elt2 -> UniqDFM elt1
+udfmMinusUFM (UDFM x i) y = UDFM (M.difference x (ufmToIntMap y)) i
   -- M.difference returns a subset of a left set, so `i` is a good upper
   -- bound.
 
@@ -275,6 +326,9 @@ delListFromUDFM = foldl delFromUDFM
 udfmToUfm :: UniqDFM elt -> UniqFM elt
 udfmToUfm (UDFM m _i) =
   listToUFM_Directly [(getUnique k, taggedFst tv) | (k, tv) <- M.toList m]
+
+listToUDFM :: Uniquable key => [(key,elt)] -> UniqDFM elt
+listToUDFM = foldl (\m (k, v) -> addToUDFM m k v) emptyUDFM
 
 listToUDFM_Directly :: [(Unique, elt)] -> UniqDFM elt
 listToUDFM_Directly = foldl (\m (u, v) -> addToUDFM_Directly m u v) emptyUDFM
@@ -305,10 +359,20 @@ alterUDFM f (UDFM m i) k =
 mapUDFM :: (elt1 -> elt2) -> UniqDFM elt1 -> UniqDFM elt2
 mapUDFM f (UDFM m i) = UDFM (M.map (fmap f) m) i
 
+anyUDFM :: (elt -> Bool) -> UniqDFM elt -> Bool
+anyUDFM p (UDFM m _i) = M.fold ((||) . p . taggedFst) False m
+
+allUDFM :: (elt -> Bool) -> UniqDFM elt -> Bool
+allUDFM p (UDFM m _i) = M.fold ((&&) . p . taggedFst) True m
+
+instance Monoid (UniqDFM a) where
+  mempty = emptyUDFM
+  mappend = plusUDFM
+
 -- This should not be used in commited code, provided for convenience to
 -- make ad-hoc conversions when developing
 alwaysUnsafeUfmToUdfm :: UniqFM elt -> UniqDFM elt
-alwaysUnsafeUfmToUdfm = listToUDFM_Directly . ufmToList
+alwaysUnsafeUfmToUdfm = listToUDFM_Directly . nonDetUFMToList
 
 -- Output-ery
 
@@ -320,3 +384,9 @@ pprUniqDFM ppr_elt ufm
   = brackets $ fsep $ punctuate comma $
     [ ppr uq <+> text ":->" <+> ppr_elt elt
     | (uq, elt) <- udfmToList ufm ]
+
+pprUDFM :: UniqDFM a    -- ^ The things to be pretty printed
+       -> ([a] -> SDoc) -- ^ The pretty printing function to use on the elements
+       -> SDoc          -- ^ 'SDoc' where the things have been pretty
+                        -- printed
+pprUDFM ufm pp = pp (eltsUDFM ufm)

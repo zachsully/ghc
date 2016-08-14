@@ -427,8 +427,8 @@ output it generates.
  ')'            { L _ ITcparen }
  '(#'           { L _ IToubxparen }
  '#)'           { L _ ITcubxparen }
- '(|'           { L _ IToparenbar }
- '|)'           { L _ ITcparenbar }
+ '(|'           { L _ (IToparenbar _) }
+ '|)'           { L _ (ITcparenbar _) }
  ';'            { L _ ITsemi }
  ','            { L _ ITcomma }
  '`'            { L _ ITbackquote }
@@ -464,11 +464,11 @@ output it generates.
  DOCSECTION     { L _ (ITdocSection _ _) }
 
 -- Template Haskell
-'[|'            { L _ (ITopenExpQuote _) }
+'[|'            { L _ (ITopenExpQuote _ _) }
 '[p|'           { L _ ITopenPatQuote  }
 '[t|'           { L _ ITopenTypQuote  }
 '[d|'           { L _ ITopenDecQuote  }
-'|]'            { L _ ITcloseQuote    }
+'|]'            { L _ (ITcloseQuote _) }
 '[||'           { L _ (ITopenTExpQuote _) }
 '||]'           { L _ ITcloseTExpQuote  }
 TH_ID_SPLICE    { L _ (ITidEscape _)  }     -- $x
@@ -673,7 +673,9 @@ qcname_ext :: { Located RdrName }
                                             [mj AnnType $1,mj AnnVal $2] }
 
 qcname  :: { Located RdrName }  -- Variable or type constructor
-        :  qvar                 { $1 }
+        :  qvar                 { $1 } -- Things which look like functions
+                                       -- Note: This includes record selectors but
+                                       -- also (-.->), see #11432
         |  oqtycon_no_varcon    { $1 } -- see Note [Type constructors in export list]
 
 -----------------------------------------------------------------------------
@@ -833,7 +835,7 @@ topdecl :: { LHsDecl RdrName }
         -- The $(..) form is one possible form of infixexp
         -- but we treat an arbitrary expression just as if
         -- it had a $(..) wrapped around it
-        | infixexp                              { sLL $1 $> $ mkSpliceDecl $1 }
+        | infixexp_top                          { sLL $1 $> $ mkSpliceDecl $1 }
 
 -- Type classes
 --
@@ -1192,8 +1194,8 @@ where_decls :: { Located ([AddAnn]
                                           ,sL1 $3 (snd $ unLoc $3)) }
 
 pattern_synonym_sig :: { LSig RdrName }
-        : 'pattern' con '::' sigtype
-                   {% ams (sLL $1 $> $ PatSynSig $2 (mkLHsSigType $4))
+        : 'pattern' con_list '::' sigtype
+                   {% ams (sLL $1 $> $ PatSynSig (unLoc $2) (mkLHsSigType $4))
                           [mj AnnPattern $1, mu AnnDcolon $3] }
 
 -----------------------------------------------------------------------------
@@ -1640,7 +1642,7 @@ btype :: { LHsType RdrName }
 -- Used for parsing Haskell98-style data constructors,
 -- in order to forbid the blasphemous
 -- > data Foo = Int :+ Char :* Bool
--- See also Note [Parsing data constructors is hard].
+-- See also Note [Parsing data constructors is hard] in RdrHsSyn
 btype_no_ops :: { LHsType RdrName }
         : btype_no_ops atype            { sLL $1 $> $ HsAppTy $1 $2 }
         | atype                         { $1 }
@@ -1679,6 +1681,8 @@ atype :: { LHsType RdrName }
         | '(#' '#)'                   {% ams (sLL $1 $> $ HsTupleTy HsUnboxedTuple [])
                                              [mo $1,mc $2] }
         | '(#' comma_types1 '#)'      {% ams (sLL $1 $> $ HsTupleTy HsUnboxedTuple $2)
+                                             [mo $1,mc $3] }
+        | '(#' bar_types2 '#)'        {% ams (sLL $1 $> $ HsSumTy $2)
                                              [mo $1,mc $3] }
         | '[' ctype ']'               {% ams (sLL $1 $> $ HsListTy  $2) [mos $1,mcs $3] }
         | '[:' ctype ':]'             {% ams (sLL $1 $> $ HsPArrTy  $2) [mo $1,mc $3] }
@@ -1725,9 +1729,9 @@ inst_type :: { LHsSigType RdrName }
         : sigtype                       { mkLHsSigType $1 }
 
 deriv_types :: { [LHsSigType RdrName] }
-        : type                          { [mkLHsSigType $1] }
+        : typedoc                       { [mkLHsSigType $1] }
 
-        | type ',' deriv_types          {% addAnnotation (gl $1) AnnComma (gl $2)
+        | typedoc ',' deriv_types       {% addAnnotation (gl $1) AnnComma (gl $2)
                                            >> return (mkLHsSigType $1 : $3) }
 
 comma_types0  :: { [LHsType RdrName] }  -- Zero or more:  ty,ty,ty
@@ -1737,6 +1741,12 @@ comma_types0  :: { [LHsType RdrName] }  -- Zero or more:  ty,ty,ty
 comma_types1    :: { [LHsType RdrName] }  -- One or more:  ty,ty,ty
         : ctype                        { [$1] }
         | ctype  ',' comma_types1      {% addAnnotation (gl $1) AnnComma (gl $2)
+                                          >> return ($1 : $3) }
+
+bar_types2    :: { [LHsType RdrName] }  -- Two or more:  ty|ty|ty
+        : ctype  '|' ctype             {% addAnnotation (gl $1) AnnVbar (gl $2)
+                                          >> return [$1,$3] }
+        | ctype  '|' bar_types2        {% addAnnotation (gl $1) AnnVbar (gl $2)
                                           >> return ($1 : $3) }
 
 tv_bndrs :: { [LHsTyVarBndr RdrName] }
@@ -1896,22 +1906,11 @@ forall :: { Located ([AddAnn], Maybe [LHsTyVarBndr RdrName]) }
         | {- empty -}                 { noLoc ([], Nothing) }
 
 constr_stuff :: { Located (Located RdrName, HsConDeclDetails RdrName) }
-    -- see Note [Parsing data constructors is hard]
+    -- See Note [Parsing data constructors is hard] in RdrHsSyn
         : btype_no_ops                         {% do { c <- splitCon $1
                                                      ; return $ sLL $1 $> c } }
         | btype_no_ops conop btype_no_ops      {% do { ty <- splitTilde $1
                                                      ; return $ sLL $1 $> ($2, InfixCon ty $3) } }
-
-{- Note [Parsing data constructors is hard]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-We parse the constructor declaration
-     C t1 t2
-as a btype_no_ops (treating C as a type constructor) and then convert C to be
-a data constructor.  Reason: it might continue like this:
-     C t1 t2 :% D Int
-in which case C really would be a type constructor.  We can't resolve this
-ambiguity till we come across the constructor oprerator :% (or not, more usually)
--}
 
 fielddecls :: { [LConDeclField RdrName] }
         : {- empty -}     { [] }
@@ -1934,10 +1933,9 @@ fielddecl :: { LConDeclField RdrName }
 -- know the rightmost extremity of the 'deriving' clause
 deriving :: { Located (HsDeriving RdrName) }
         : {- empty -}             { noLoc Nothing }
-        | 'deriving' qtycon       {% let { L tv_loc tv = $2
-                                         ; full_loc = comb2 $1 $> }
+        | 'deriving' qtycondoc    {% let { full_loc = comb2 $1 $> }
                                       in ams (L full_loc $ Just $ L full_loc $
-                                                 [mkLHsSigType (L tv_loc (HsTyVar $2))])
+                                                 [mkLHsSigType $2])
                                              [mj AnnDeriving $1] }
 
         | 'deriving' '(' ')'      {% let { full_loc = comb2 $1 $> }
@@ -1999,7 +1997,7 @@ decl_no_th :: { LHsDecl RdrName }
                                 -- Turn it all into an expression so that
                                 -- checkPattern can check that bangs are enabled
 
-        | infixexp opt_sig rhs  {% do { (ann,r) <- checkValDef empty $1 (snd $2) $3;
+        | infixexp_top opt_sig rhs  {% do { (ann,r) <- checkValDef empty $1 (snd $2) $3;
                                         let { l = comb2 $1 $> };
                                         case r of {
                                           (FunBind n _ _ _ _) ->
@@ -2039,7 +2037,7 @@ gdrh :: { LGRHS RdrName (LHsExpr RdrName) }
 sigdecl :: { LHsDecl RdrName }
         :
         -- See Note [Declaration/signature overlap] for why we need infixexp here
-          infixexp '::' sigtypedoc
+          infixexp_top '::' sigtypedoc
                         {% do v <- checkValSigLhs $1
                         ; _ <- ams (sLL $1 $> ()) [mu AnnDcolon $2]
                         ; return (sLL $1 $> $ SigD $
@@ -2065,6 +2063,16 @@ sigdecl :: { LHsDecl RdrName }
                             (mkInlinePragma (getINLINE_PRAGs $1) (getINLINE $1)
                                             (snd $2)))))
                        ((mo $1:fst $2) ++ [mc $4]) }
+
+        | '{-# SCC' qvar '#-}'
+          {% ams (sLL $1 $> (SigD (SCCFunSig (getSCC_PRAGs $1) $2 Nothing)))
+                 [mo $1, mc $3] }
+
+        | '{-# SCC' qvar STRING '#-}'
+          {% do { scc <- getSCC $3
+                ; let str_lit = StringLiteral (getSTRINGs $3) scc
+                ; ams (sLL $1 $> (SigD (SCCFunSig (getSCC_PRAGs $1) $2 (Just str_lit))))
+                      [mo $1, mc $4] } }
 
         | '{-# SPECIALISE' activation qvar '::' sigtypes1 '#-}'
              {% ams (
@@ -2131,17 +2139,21 @@ exp   :: { LHsExpr RdrName }
         | infixexp              { $1 }
 
 infixexp :: { LHsExpr RdrName }
-        : exp10                   { $1 }
-        | infixexp qop exp10      {% ams (sLL $1 $>
-                                             (OpApp $1 $2 placeHolderFixity $3))
-                                         [mj AnnVal $2] }
+        : exp10 { $1 }
+        | infixexp qop exp10  {% ams (sLL $1 $> (OpApp $1 $2 placeHolderFixity $3))
+                                     [mj AnnVal $2] }
                  -- AnnVal annotation for NPlusKPat, which discards the operator
 
+infixexp_top :: { LHsExpr RdrName }
+        : exp10_top               { $1 }
+        | infixexp_top qop exp10_top
+                                  {% ams (sLL $1 $> (OpApp $1 $2 placeHolderFixity $3))
+                                         [mj AnnVal $2] }
 
-exp10 :: { LHsExpr RdrName }
+exp10_top :: { LHsExpr RdrName }
         : '\\' apat apats opt_asig '->' exp
                    {% ams (sLL $1 $> $ HsLam (mkMatchGroup FromSource
-                            [sLL $1 $> $ Match { m_fixity = NonFunBindMatch
+                            [sLL $1 $> $ Match { m_ctxt = LambdaExpr
                                                , m_pats = $2:$3
                                                , m_type = snd $4
                                                , m_grhss = unguardedGRHSs $6 }]))
@@ -2151,7 +2163,7 @@ exp10 :: { LHsExpr RdrName }
                                                (mj AnnLet $1:mj AnnIn $3
                                                  :(fst $ unLoc $2)) }
         | '\\' 'lcase' altslist
-            {% ams (sLL $1 $> $ HsLamCase placeHolderType
+            {% ams (sLL $1 $> $ HsLamCase
                                    (mkMatchGroup FromSource (snd $ unLoc $3)))
                    (mj AnnLam $1:mj AnnCase $2:(fst $ unLoc $3)) }
         | 'if' exp optSemi 'then' exp optSemi 'else' exp
@@ -2180,9 +2192,6 @@ exp10 :: { LHsExpr RdrName }
                                               (mkHsDo MDoExpr (snd $ unLoc $2)))
                                            (mj AnnMdo $1:(fst $ unLoc $2)) }
 
-        | scc_annot exp        {% ams (sLL $1 $> $ HsSCC (snd $ fst $ unLoc $1) (snd $ unLoc $1) $2)
-                                      (fst $ fst $ unLoc $1) }
-
         | hpc_annot exp        {% ams (sLL $1 $> $ HsTickPragma (snd $ fst $ fst $ unLoc $1)
                                                                 (snd $ fst $ unLoc $1) (snd $ unLoc $1) $2)
                                       (fst $ fst $ fst $ unLoc $1) }
@@ -2200,6 +2209,11 @@ exp10 :: { LHsExpr RdrName }
                                               ,mc $3] }
                                           -- hdaume: core annotation
         | fexp                         { $1 }
+
+exp10 :: { LHsExpr RdrName }
+        : exp10_top            { $1 }
+        | scc_annot exp        {% ams (sLL $1 $> $ HsSCC (snd $ fst $ unLoc $1) (snd $ unLoc $1) $2)
+                                      (fst $ fst $ unLoc $1) }
 
 optSemi :: { ([Located a],Bool) }
         : ';'         { ([$1],True) }
@@ -2241,10 +2255,12 @@ hpc_annot :: { Located ( (([AddAnn],SourceText),(StringLiteral,(Int,Int),(Int,In
                                          }
 
 fexp    :: { LHsExpr RdrName }
-        : fexp aexp                             { sLL $1 $> $ HsApp $1 $2 }
-        | 'static' aexp                         {% ams (sLL $1 $> $ HsStatic $2)
-                                                       [mj AnnStatic $1] }
-        | aexp                                  { $1 }
+        : fexp aexp                  { sLL $1 $> $ HsApp $1 $2 }
+        | fexp TYPEAPP atype         {% ams (sLL $1 $> $ HsAppType $1 (mkHsWildCardBndrs $3))
+                                            [mj AnnAt $2] }
+        | 'static' aexp              {% ams (sLL $1 $> $ HsStatic placeHolderNames $2)
+                                            [mj AnnStatic $1] }
+        | aexp                       { $1 }
 
 aexp    :: { LHsExpr RdrName }
         : qvar '@' aexp         {% ams (sLL $1 $> $ EAsPat $1 $3) [mj AnnAt $2] }
@@ -2252,7 +2268,6 @@ aexp    :: { LHsExpr RdrName }
             -- Note [Lexing type applications] in Lexer.x
 
         | '~' aexp              {% ams (sLL $1 $> $ ELazyPat $2) [mj AnnTilde $1] }
-        | TYPEAPP atype         {% ams (sLL $1 $> $ HsType (mkHsWildCardBndrs $2)) [mj AnnAt $1] }
         | aexp1                 { $1 }
 
 aexp1   :: { LHsExpr RdrName }
@@ -2282,14 +2297,14 @@ aexp2   :: { LHsExpr RdrName }
         -- correct Haskell (you'd have to write '((+ 3), (4 -))')
         -- but the less cluttered version fell out of having texps.
         | '(' texp ')'                  {% ams (sLL $1 $> (HsPar $2)) [mop $1,mcp $3] }
-        | '(' tup_exprs ')'             {% ams (sLL $1 $> (ExplicitTuple $2 Boxed))
-                                               [mop $1,mcp $3] }
+        | '(' tup_exprs ')'             {% do { e <- mkSumOrTuple Boxed (comb2 $1 $3) $2
+                                              ; ams (sLL $1 $> e) [mop $1,mcp $3] } }
 
         | '(#' texp '#)'                {% ams (sLL $1 $> (ExplicitTuple [L (gl $2)
                                                          (Present $2)] Unboxed))
                                                [mo $1,mc $3] }
-        | '(#' tup_exprs '#)'           {% ams (sLL $1 $> (ExplicitTuple $2 Unboxed))
-                                               [mo $1,mc $3] }
+        | '(#' tup_exprs '#)'           {% do { e <- mkSumOrTuple Unboxed (comb2 $1 $3) $2
+                                              ; ams (sLL $1 $> e) [mo $1,mc $3] } }
 
         | '[' list ']'      {% ams (sLL $1 $> (snd $2)) (mos $1:mcs $3:(fst $2)) }
         | '[:' parr ':]'    {% ams (sLL $1 $> (snd $2)) (mo $1:mc $3:(fst $2)) }
@@ -2377,16 +2392,25 @@ texp :: { LHsExpr RdrName }
        -- View patterns get parenthesized above
         | exp '->' texp   {% ams (sLL $1 $> $ EViewPat $1 $3) [mu AnnRarrow $2] }
 
--- Always at least one comma
-tup_exprs :: { [LHsTupArg RdrName] }
+-- Always at least one comma or bar.
+tup_exprs :: { SumOrTuple }
            : texp commas_tup_tail
                           {% do { addAnnotation (gl $1) AnnComma (fst $2)
-                                ; return ((sL1 $1 (Present $1)) : snd $2) } }
+                                ; return (Tuple ((sL1 $1 (Present $1)) : snd $2)) } }
+
+           | texp bars
+                          {% do { mapM_ (\ll -> addAnnotation ll AnnVbar ll) (fst $2)
+                                ; return (Sum 1  (snd $2 + 1) $1) } }
 
            | commas tup_tail
                 {% do { mapM_ (\ll -> addAnnotation ll AnnComma ll) (fst $1)
                       ; return
-                           (map (\l -> L l missingTupArg) (fst $1) ++ $2) } }
+                           (Tuple (map (\l -> L l missingTupArg) (fst $1) ++ $2)) } }
+
+           | bars texp bars0
+                {% do { mapM_ (\ll -> addAnnotation ll AnnVbar ll) (fst $1)
+                      ; mapM_ (\ll -> addAnnotation ll AnnVbar ll) (fst $3)
+                      ; return (Sum (snd $1 + 1) (snd $1 + snd $3 + 1) $2) } }
 
 -- Always starts with commas; always follows an expr
 commas_tup_tail :: { (SrcSpan,[LHsTupArg RdrName]) }
@@ -2559,7 +2583,7 @@ alts1   :: { Located ([AddAnn],[LMatch RdrName (LHsExpr RdrName)]) }
         | alt                   { sL1 $1 ([],[$1]) }
 
 alt     :: { LMatch RdrName (LHsExpr RdrName) }
-        : pat opt_asig alt_rhs  {%ams (sLL $1 $> (Match { m_fixity = NonFunBindMatch
+        : pat opt_asig alt_rhs  {%ams (sLL $1 $> (Match { m_ctxt = CaseAlt
                                                         , m_pats = [$1]
                                                         , m_type = snd $2
                                                         , m_grhss = snd $ unLoc $3 }))
@@ -2865,17 +2889,22 @@ oqtycon_no_varcon :: { Located RdrName }  -- Type constructor which cannot be mi
 
 {- Note [Type constructors in export list]
 ~~~~~~~~~~~~~~~~~~~~~
-Mixing type constructors and variable constructors in export lists introduces
+Mixing type constructors and data constructors in export lists introduces
 ambiguity in grammar: e.g. (*) may be both a type constructor and a function.
 
 -XExplicitNamespaces allows to disambiguate by explicitly prefixing type
 constructors with 'type' keyword.
 
 This ambiguity causes reduce/reduce conflicts in parser, which are always
-resolved in favour of variable constructors. To get rid of conflicts we demand
+resolved in favour of data constructors. To get rid of conflicts we demand
 that ambiguous type constructors (those, which are formed by the same
 productions as variable constructors) are always prefixed with 'type' keyword.
 Unambiguous type constructors may occur both with or without 'type' keyword.
+
+Note that in the parser we still parse data constructors as type
+constructors. As such, they still end up in the type constructor namespace
+until after renaming when we resolve the proper namespace for each exported
+child.
 -}
 
 qtyconop :: { Located RdrName } -- Qualified or unqualified
@@ -2887,6 +2916,10 @@ qtyconop :: { Located RdrName } -- Qualified or unqualified
 qtycon :: { Located RdrName }   -- Qualified or unqualified
         : QCONID            { sL1 $1 $! mkQual tcClsName (getQCONID $1) }
         | tycon             { $1 }
+
+qtycondoc :: { LHsType RdrName } -- Qualified or unqualified
+        : qtycon            { sL1 $1                     (HsTyVar $1)      }
+        | qtycon docprev    { sLL $1 $> (HsDocTy (sL1 $1 (HsTyVar $1)) $2) }
 
 tycon   :: { Located RdrName }  -- Unqualified
         : CONID                   { sL1 $1 $! mkUnqual tcClsName (getCONID $1) }
@@ -3105,6 +3138,14 @@ commas :: { ([SrcSpan],Int) }   -- One or more commas
         : commas ','             { ((fst $1)++[gl $2],snd $1 + 1) }
         | ','                    { ([gl $1],1) }
 
+bars0 :: { ([SrcSpan],Int) }     -- Zero or more bars
+        : bars                   { $1 }
+        |                        { ([], 0) }
+
+bars :: { ([SrcSpan],Int) }     -- One or more bars
+        : bars '|'               { ((fst $1)++[gl $2],snd $1 + 1) }
+        | '|'                    { ([gl $1],1) }
+
 -----------------------------------------------------------------------------
 -- Documentation comments
 
@@ -3206,20 +3247,24 @@ getCTYPEs             (L _ (ITctype             src)) = src
 getStringLiteral l = StringLiteral (getSTRINGs l) (getSTRING l)
 
 isUnicode :: Located Token -> Bool
-isUnicode (L _ (ITforall     iu)) = iu == UnicodeSyntax
-isUnicode (L _ (ITdarrow     iu)) = iu == UnicodeSyntax
-isUnicode (L _ (ITdcolon     iu)) = iu == UnicodeSyntax
-isUnicode (L _ (ITlarrow     iu)) = iu == UnicodeSyntax
-isUnicode (L _ (ITrarrow     iu)) = iu == UnicodeSyntax
-isUnicode (L _ (ITrarrow     iu)) = iu == UnicodeSyntax
-isUnicode (L _ (ITlarrowtail iu)) = iu == UnicodeSyntax
-isUnicode (L _ (ITrarrowtail iu)) = iu == UnicodeSyntax
-isUnicode (L _ (ITLarrowtail iu)) = iu == UnicodeSyntax
-isUnicode (L _ (ITRarrowtail iu)) = iu == UnicodeSyntax
-isUnicode _                       = False
+isUnicode (L _ (ITforall         iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITdarrow         iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITdcolon         iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITlarrow         iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITrarrow         iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITrarrow         iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITlarrowtail     iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITrarrowtail     iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITLarrowtail     iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITRarrowtail     iu)) = iu == UnicodeSyntax
+isUnicode (L _ (IToparenbar      iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITcparenbar      iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITopenExpQuote _ iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITcloseQuote     iu)) = iu == UnicodeSyntax
+isUnicode _                           = False
 
 hasE :: Located Token -> Bool
-hasE (L _ (ITopenExpQuote HasE))  = True
+hasE (L _ (ITopenExpQuote HasE _))  = True
 hasE (L _ (ITopenTExpQuote HasE)) = True
 hasE _                            = False
 
@@ -3312,14 +3357,14 @@ fileSrcSpan = do
 -- Hint about the MultiWayIf extension
 hintMultiWayIf :: SrcSpan -> P ()
 hintMultiWayIf span = do
-  mwiEnabled <- liftM ((LangExt.MultiWayIf `xopt`) . dflags) getPState
+  mwiEnabled <- liftM ((LangExt.MultiWayIf `extopt`) . options) getPState
   unless mwiEnabled $ parseErrorSDoc span $
     text "Multi-way if-expressions need MultiWayIf turned on"
 
 -- Hint about if usage for beginners
 hintIf :: SrcSpan -> String -> P (LHsExpr RdrName)
 hintIf span msg = do
-  mwiEnabled <- liftM ((LangExt.MultiWayIf `xopt`) . dflags) getPState
+  mwiEnabled <- liftM ((LangExt.MultiWayIf `extopt`) . options) getPState
   if mwiEnabled
     then parseErrorSDoc span $ text $ "parse error in if statement"
     else parseErrorSDoc span $ text $ "parse error in if statement: "++msg

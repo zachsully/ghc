@@ -54,6 +54,7 @@ module Data.Foldable (
 import Data.Bool
 import Data.Either
 import Data.Eq
+import Data.Functor.Utils (Max(..), Min(..), (#.))
 import qualified GHC.List as List
 import Data.Maybe
 import Data.Monoid
@@ -268,6 +269,7 @@ class Foldable t where
 
 -- instances for Prelude types
 
+-- | @since 2.01
 instance Foldable Maybe where
     foldr _ z Nothing = z
     foldr f z (Just x) = f x z
@@ -275,6 +277,7 @@ instance Foldable Maybe where
     foldl _ z Nothing = z
     foldl f z (Just x) = f z x
 
+-- | @since 2.01
 instance Foldable [] where
     elem    = List.elem
     foldl   = List.foldl
@@ -290,6 +293,7 @@ instance Foldable [] where
     sum     = List.sum
     toList  = id
 
+-- | @since 4.7.0.0
 instance Foldable (Either a) where
     foldMap _ (Left _) = mempty
     foldMap f (Right y) = f y
@@ -302,11 +306,13 @@ instance Foldable (Either a) where
 
     null             = isLeft
 
+-- | @since 4.7.0.0
 instance Foldable ((,) a) where
     foldMap f (_, y) = f y
 
     foldr f z (_, y) = f y z
 
+-- | @since 4.8.0.0
 instance Foldable (Array i) where
     foldr = foldrElems
     foldl = foldlElems
@@ -318,6 +324,7 @@ instance Foldable (Array i) where
     length = numElements
     null a = numElements a == 0
 
+-- | @since 4.7.0.0
 instance Foldable Proxy where
     foldMap _ _ = mempty
     {-# INLINE foldMap #-}
@@ -335,6 +342,7 @@ instance Foldable Proxy where
     sum _      = 0
     product _  = 1
 
+-- | @since 4.8.0.0
 instance Foldable Dual where
     foldMap            = coerce
 
@@ -353,6 +361,7 @@ instance Foldable Dual where
     sum                = getDual
     toList (Dual x)    = [x]
 
+-- | @since 4.8.0.0
 instance Foldable Sum where
     foldMap            = coerce
 
@@ -371,6 +380,7 @@ instance Foldable Sum where
     sum                = getSum
     toList (Sum x)     = [x]
 
+-- | @since 4.8.0.0
 instance Foldable Product where
     foldMap               = coerce
 
@@ -389,42 +399,16 @@ instance Foldable Product where
     sum                   = getProduct
     toList (Product x)    = [x]
 
+-- | @since 4.8.0.0
 instance Foldable First where
     foldMap f = foldMap f . getFirst
 
+-- | @since 4.8.0.0
 instance Foldable Last where
     foldMap f = foldMap f . getLast
 
--- We don't export Max and Min because, as Edward Kmett pointed out to me,
--- there are two reasonable ways to define them. One way is to use Maybe, as we
--- do here; the other way is to impose a Bounded constraint on the Monoid
--- instance. We may eventually want to add both versions, but we don't want to
--- trample on anyone's toes by imposing Max = MaxMaybe.
-
-newtype Max a = Max {getMax :: Maybe a}
-newtype Min a = Min {getMin :: Maybe a}
-
-instance Ord a => Monoid (Max a) where
-  mempty = Max Nothing
-
-  {-# INLINE mappend #-}
-  m `mappend` Max Nothing = m
-  Max Nothing `mappend` n = n
-  (Max m@(Just x)) `mappend` (Max n@(Just y))
-    | x >= y    = Max m
-    | otherwise = Max n
-
-instance Ord a => Monoid (Min a) where
-  mempty = Min Nothing
-
-  {-# INLINE mappend #-}
-  m `mappend` Min Nothing = m
-  Min Nothing `mappend` n = n
-  (Min m@(Just x)) `mappend` (Min n@(Just y))
-    | x <= y    = Min m
-    | otherwise = Min n
-
 -- Instances for GHC.Generics
+-- | @since 4.9.0.0
 instance Foldable U1 where
     foldMap _ _ = mempty
     {-# INLINE foldMap #-}
@@ -589,35 +573,3 @@ notElem x = not . elem x
 -- 'Nothing' if there is no such element.
 find :: Foldable t => (a -> Bool) -> t a -> Maybe a
 find p = getFirst . foldMap (\ x -> First (if p x then Just x else Nothing))
-
--- See Note [Function coercion]
-(#.) :: Coercible b c => (b -> c) -> (a -> b) -> (a -> c)
-(#.) _f = coerce
-{-# INLINE (#.) #-}
-
-{-
-Note [Function coercion]
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-Several functions here use (#.) instead of (.) to avoid potential efficiency
-problems relating to #7542. The problem, in a nutshell:
-
-If N is a newtype constructor, then N x will always have the same
-representation as x (something similar applies for a newtype deconstructor).
-However, if f is a function,
-
-N . f = \x -> N (f x)
-
-This looks almost the same as f, but the eta expansion lifts it--the lhs could
-be _|_, but the rhs never is. This can lead to very inefficient code.  Thus we
-steal a technique from Shachaf and Edward Kmett and adapt it to the current
-(rather clean) setting. Instead of using  N . f,  we use  N .## f, which is
-just
-
-coerce f `asTypeOf` (N . f)
-
-That is, we just *pretend* that f has the right type, and thanks to the safety
-of coerce, the type checker guarantees that nothing really goes wrong. We still
-have to be a bit careful, though: remember that #. completely ignores the
-*value* of its left operand.
--}

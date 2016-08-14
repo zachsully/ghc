@@ -12,12 +12,16 @@
 module TysPrim(
         mkPrimTyConName, -- For implicit parameters in TysWiredIn only
 
-        mkTemplateTyVars,
+        mkTemplateKindVars, mkTemplateTyVars, mkTemplateTyVarsFrom,
+        mkTemplateKiTyVars,
+
+        mkTemplateTyConBinders, mkTemplateKindTyConBinders,
+        mkTemplateAnonTyConBinders,
+
         alphaTyVars, alphaTyVar, betaTyVar, gammaTyVar, deltaTyVar,
         alphaTys, alphaTy, betaTy, gammaTy, deltaTy,
         runtimeRep1TyVar, runtimeRep2TyVar, runtimeRep1Ty, runtimeRep2Ty,
         openAlphaTy, openBetaTy, openAlphaTyVar, openBetaTyVar,
-        kKiVar,
 
         -- Kind constructors...
         tYPETyConName, unliftedTypeKindTyConName,
@@ -55,6 +59,7 @@ module TysPrim(
         tVarPrimTyCon,                  mkTVarPrimTy,
         stablePtrPrimTyCon,             mkStablePtrPrimTy,
         stableNamePrimTyCon,            mkStableNamePrimTy,
+        compactPrimTyCon,               compactPrimTy,
         bcoPrimTyCon,                   bcoPrimTy,
         weakPrimTyCon,                  mkWeakPrimTy,
         threadIdPrimTyCon,              threadIdPrimTy,
@@ -68,9 +73,6 @@ module TysPrim(
         eqPrimTyCon,            -- ty1 ~# ty2
         eqReprPrimTyCon,        -- ty1 ~R# ty2  (at role Representational)
         eqPhantPrimTyCon,       -- ty1 ~P# ty2  (at role Phantom)
-
-        -- * Any
-        anyTy, anyTyCon, anyTypeOfKind,
 
         -- * SIMD
 #include "primop-vector-tys-exports.hs-incl"
@@ -91,7 +93,7 @@ import {-# SOURCE #-} TysWiredIn
   , word32ElemRepDataConTy, word64ElemRepDataConTy, floatElemRepDataConTy
   , doubleElemRepDataConTy )
 
-import Var              ( TyVar, KindVar, mkTyVar )
+import Var              ( TyVar, mkTyVar )
 import Name
 import TyCon
 import SrcLoc
@@ -99,8 +101,8 @@ import Unique
 import PrelNames
 import FastString
 import Outputable
-import TyCoRep   -- doesn't need special access, but this is easier to avoid
-                 -- import loops
+import TyCoRep   -- Doesn't need special access, but this is easier to avoid
+                 -- import loops which show up if you import Type instead
 
 import Data.Char
 
@@ -137,6 +139,7 @@ primTyCons
     , realWorldTyCon
     , stablePtrPrimTyCon
     , stableNamePrimTyCon
+    , compactPrimTyCon
     , statePrimTyCon
     , voidPrimTyCon
     , proxyPrimTyCon
@@ -144,7 +147,6 @@ primTyCons
     , wordPrimTyCon
     , word32PrimTyCon
     , word64PrimTyCon
-    , anyTyCon
     , eqPrimTyCon
     , eqReprPrimTyCon
     , eqPhantPrimTyCon
@@ -170,7 +172,7 @@ mkBuiltInPrimTc fs unique tycon
                   BuiltInSyntax
 
 
-charPrimTyConName, intPrimTyConName, int32PrimTyConName, int64PrimTyConName, wordPrimTyConName, word32PrimTyConName, word64PrimTyConName, addrPrimTyConName, floatPrimTyConName, doublePrimTyConName, statePrimTyConName, proxyPrimTyConName, realWorldTyConName, arrayPrimTyConName, arrayArrayPrimTyConName, smallArrayPrimTyConName, byteArrayPrimTyConName, mutableArrayPrimTyConName, mutableByteArrayPrimTyConName, mutableArrayArrayPrimTyConName, smallMutableArrayPrimTyConName, mutVarPrimTyConName, mVarPrimTyConName, tVarPrimTyConName, stablePtrPrimTyConName, stableNamePrimTyConName, bcoPrimTyConName, weakPrimTyConName, threadIdPrimTyConName, eqPrimTyConName, eqReprPrimTyConName, eqPhantPrimTyConName, voidPrimTyConName :: Name
+charPrimTyConName, intPrimTyConName, int32PrimTyConName, int64PrimTyConName, wordPrimTyConName, word32PrimTyConName, word64PrimTyConName, addrPrimTyConName, floatPrimTyConName, doublePrimTyConName, statePrimTyConName, proxyPrimTyConName, realWorldTyConName, arrayPrimTyConName, arrayArrayPrimTyConName, smallArrayPrimTyConName, byteArrayPrimTyConName, mutableArrayPrimTyConName, mutableByteArrayPrimTyConName, mutableArrayArrayPrimTyConName, smallMutableArrayPrimTyConName, mutVarPrimTyConName, mVarPrimTyConName, tVarPrimTyConName, stablePtrPrimTyConName, stableNamePrimTyConName, compactPrimTyConName, bcoPrimTyConName, weakPrimTyConName, threadIdPrimTyConName, eqPrimTyConName, eqReprPrimTyConName, eqPhantPrimTyConName, voidPrimTyConName :: Name
 charPrimTyConName             = mkPrimTc (fsLit "Char#") charPrimTyConKey charPrimTyCon
 intPrimTyConName              = mkPrimTc (fsLit "Int#") intPrimTyConKey  intPrimTyCon
 int32PrimTyConName            = mkPrimTc (fsLit "Int32#") int32PrimTyConKey int32PrimTyCon
@@ -201,6 +203,7 @@ mVarPrimTyConName             = mkPrimTc (fsLit "MVar#") mVarPrimTyConKey mVarPr
 tVarPrimTyConName             = mkPrimTc (fsLit "TVar#") tVarPrimTyConKey tVarPrimTyCon
 stablePtrPrimTyConName        = mkPrimTc (fsLit "StablePtr#") stablePtrPrimTyConKey stablePtrPrimTyCon
 stableNamePrimTyConName       = mkPrimTc (fsLit "StableName#") stableNamePrimTyConKey stableNamePrimTyCon
+compactPrimTyConName          = mkPrimTc (fsLit "Compact#") compactPrimTyConKey compactPrimTyCon
 bcoPrimTyConName              = mkPrimTc (fsLit "BCO#") bcoPrimTyConKey bcoPrimTyCon
 weakPrimTyConName             = mkPrimTc (fsLit "Weak#") weakPrimTyConKey weakPrimTyCon
 threadIdPrimTyConName         = mkPrimTc (fsLit "ThreadId#") threadIdPrimTyConKey threadIdPrimTyCon
@@ -216,16 +219,76 @@ alphaTyVars is a list of type variables for use in templates:
         ["a", "b", ..., "z", "t1", "t2", ... ]
 -}
 
+mkTemplateKindVars :: [Kind] -> [TyVar]
+-- k0  with unique (mkAlphaTyVarUnique 0)
+-- k1  with unique (mkAlphaTyVarUnique 1)
+-- ... etc
+mkTemplateKindVars kinds
+  = [ mkTyVar name kind
+    | (kind, u) <- kinds `zip` [0..]
+    , let occ = mkTyVarOccFS (mkFastString ('k' : show u))
+          name = mkInternalName (mkAlphaTyVarUnique u) occ noSrcSpan
+    ]
+
+mkTemplateTyVarsFrom :: Int -> [Kind] -> [TyVar]
+-- a  with unique (mkAlphaTyVarUnique n)
+-- b  with unique (mkAlphaTyVarUnique n+1)
+-- ... etc
+-- Typically called as
+--   mkTemplateTyVarsFrom (legth kv_bndrs) kinds
+-- where kv_bndrs are the kind-level binders of a TyCon
+mkTemplateTyVarsFrom n kinds
+  = [ mkTyVar name kind
+    | (kind, index) <- zip kinds [0..],
+      let ch_ord = index + ord 'a'
+          name_str | ch_ord <= ord 'z' = [chr ch_ord]
+                   | otherwise         = 't':show index
+          uniq = mkAlphaTyVarUnique (index + n)
+          name = mkInternalName uniq occ noSrcSpan
+          occ  = mkTyVarOccFS (mkFastString name_str)
+    ]
+
 mkTemplateTyVars :: [Kind] -> [TyVar]
-mkTemplateTyVars kinds =
-  [ mkTyVar (mkInternalName (mkAlphaTyVarUnique u)
-                            (mkTyVarOccFS (mkFastString name))
-                            noSrcSpan) k
-  | (k,u) <- zip kinds [2..],
-    let name | c <= 'z'  = [c]
-             | otherwise = 't':show u
-          where c = chr (u-2 + ord 'a')
-  ]
+mkTemplateTyVars = mkTemplateTyVarsFrom 1
+
+mkTemplateTyConBinders
+    :: [Kind]                -- [k1, .., kn]   Kinds of kind-forall'd vars
+    -> ([Kind] -> [Kind])    -- Arg is [kv1:k1, ..., kvn:kn]
+                             --     same length as first arg
+                             -- Result is anon arg kinds
+    -> [TyConBinder]
+mkTemplateTyConBinders kind_var_kinds mk_anon_arg_kinds
+  = kv_bndrs ++ tv_bndrs
+  where
+    kv_bndrs   = mkTemplateKindTyConBinders kind_var_kinds
+    anon_kinds = mk_anon_arg_kinds (mkTyVarTys (binderVars kv_bndrs))
+    tv_bndrs   = mkTemplateAnonTyConBindersFrom (length kv_bndrs) anon_kinds
+
+mkTemplateKiTyVars
+    :: [Kind]                -- [k1, .., kn]   Kinds of kind-forall'd vars
+    -> ([Kind] -> [Kind])    -- Arg is [kv1:k1, ..., kvn:kn]
+                             --     same length as first arg
+                             -- Result is anon arg kinds [ak1, .., akm]
+    -> [TyVar]   -- [kv1:k1, ..., kvn:kn, av1:ak1, ..., avm:akm]
+-- Example: if you want the tyvars for
+--   forall (r:RuntimeRep) (a:TYPE r) (b:*). blah
+-- call mkTemplateKiTyVars [RuntimeRep] (\[r]. [TYPE r, *)
+mkTemplateKiTyVars kind_var_kinds mk_arg_kinds
+  = kv_bndrs ++ tv_bndrs
+  where
+    kv_bndrs   = mkTemplateKindVars kind_var_kinds
+    anon_kinds = mk_arg_kinds (mkTyVarTys kv_bndrs)
+    tv_bndrs   = mkTemplateTyVarsFrom (length kv_bndrs) anon_kinds
+
+mkTemplateKindTyConBinders :: [Kind] -> [TyConBinder]
+-- Makes named, Specified binders
+mkTemplateKindTyConBinders kinds = [mkNamedTyConBinder Specified tv | tv <- mkTemplateKindVars kinds]
+
+mkTemplateAnonTyConBinders :: [Kind] -> [TyConBinder]
+mkTemplateAnonTyConBinders kinds = map mkAnonTyConBinder (mkTemplateTyVars kinds)
+
+mkTemplateAnonTyConBindersFrom :: Int -> [Kind] -> [TyConBinder]
+mkTemplateAnonTyConBindersFrom n kinds = map mkAnonTyConBinder (mkTemplateTyVarsFrom n kinds)
 
 alphaTyVars :: [TyVar]
 alphaTyVars = mkTemplateTyVars $ repeat liftedTypeKind
@@ -254,10 +317,6 @@ openAlphaTy, openBetaTy :: Type
 openAlphaTy = mkTyVarTy openAlphaTyVar
 openBetaTy  = mkTyVarTy openBetaTyVar
 
-kKiVar :: KindVar
-kKiVar = (mkTemplateTyVars $ repeat liftedTypeKind) !! 10
-  -- the 10 selects the 11th letter in the alphabet: 'k'
-
 {-
 ************************************************************************
 *                                                                      *
@@ -270,9 +329,10 @@ funTyConName :: Name
 funTyConName = mkPrimTyConName (fsLit "(->)") funTyConKey funTyCon
 
 funTyCon :: TyCon
-funTyCon = mkFunTyCon funTyConName (map Anon [liftedTypeKind, liftedTypeKind])
-                                   tc_rep_nm
+funTyCon = mkFunTyCon funTyConName tc_bndrs tc_rep_nm
   where
+    tc_bndrs = mkTemplateAnonTyConBinders [liftedTypeKind, liftedTypeKind]
+
         -- You might think that (->) should have type (?? -> ? -> *), and you'd be right
         -- But if we do that we get kind errors when saying
         --      instance Control.Arrow (->)
@@ -291,43 +351,91 @@ funTyCon = mkFunTyCon funTyConName (map Anon [liftedTypeKind, liftedTypeKind])
 *                                                                      *
 ************************************************************************
 
-Note [TYPE]
-~~~~~~~~~~~
-There are a few places where we wish to be able to deal interchangeably
-with kind * and kind #. unsafeCoerce#, error, and (->) are some of these
-places. The way we do this is to use runtime-representation polymorphism.
+Note [TYPE and RuntimeRep]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+All types that classify values have a kind of the form (TYPE rr), where
 
-We have
+    data RuntimeRep     -- Defined in ghc-prim:GHC.Types
+      = PtrRepLifted
+      | PtrRepUnlifted
+      | IntRep
+      | FloatRep
+      .. etc ..
 
-    data RuntimeRep = PtrRepLifted | PtrRepUnlifted | ...
+    rr :: RuntimeRep
 
-and a magical constant (tYPETyCon)
+    TYPE :: RuntimeRep -> TYPE 'PtrRepLifted  -- Built in
 
-    TYPE :: RuntimeRep -> TYPE PtrRepLifted
+So for example:
+    Int        :: TYPE 'PtrRepLifted
+    Array# Int :: TYPE 'PtrRepUnlifted
+    Int#       :: TYPE 'IntRep
+    Float#     :: TYPE 'FloatRep
+    Maybe      :: TYPE 'PtrRepLifted -> TYPE 'PtrRepLifted
 
-We then have synonyms (liftedTypeKindTyCon, unliftedTypeKindTyCon)
+We abbreviate '*' specially:
+    type * = TYPE 'PtrRepLifted
 
-    type * = TYPE PtrRepLifted
-    type # = TYPE PtrRepUnlifted
+The 'rr' parameter tells us how the value is represented at runime.
 
-The (...) in the definition for RuntimeRep includes possibilities for
-the unboxed, unlifted representations, isomorphic to the PrimRep type
-in TyCon. RuntimeRep is itself declared in GHC.Types.
+Generally speaking, you can't be polymorphic in 'rr'.  E.g
+   f :: forall (rr:RuntimeRep) (a:TYPE rr). a -> [a]
+   f = /\(rr:RuntimeRep) (a:rr) \(a:rr). ...
+This is no good: we could not generate code code for 'f', because the
+calling convention for 'f' varies depending on whether the argument is
+a a Int, Int#, or Float#.  (You could imagine generating specialised
+code, one for each instantiation of 'rr', but we don't do that.)
 
-An alternative design would be to have
+Certain functions CAN be runtime-rep-polymorphic, because the code
+generator never has to manipulate a value of type 'a :: TYPE rr'.
 
-  data RuntimeRep = PtrRep Levity | ...
-  data Levity = Lifted | Unlifted
+* error :: forall (rr:RuntimeRep) (a:TYPE rr). String -> a
+  Code generator never has to manipulate the return value.
 
-but this slowed down GHC because every time we looked at *, we had to
-follow a bunch of pointers. When we have unpackable sums, we should
-go back to the stratified representation. This would allow, for example:
+* unsafeCoerce#, defined in MkId.unsafeCoerceId:
+  Always inlined to be a no-op
+     unsafeCoerce# :: forall (r1 :: RuntimeRep) (r2 :: RuntimeRep)
+                             (a :: TYPE r1) (b :: TYPE r2).
+                             a -> b
 
-    unsafeCoerce# :: forall (r1 :: RuntimeRep) (v2 :: Levity)
-                            (a :: TYPE v1) (b :: TYPE v2). a -> b
+* Unboxed tuples, and unboxed sums, defined in TysWiredIn
+  Always inlined, and hence specialised to the call site
+     (#,#) :: forall (r1 :: RuntimeRep) (r2 :: RuntimeRep)
+                     (a :: TYPE r1) (b :: TYPE r2).
+                     a -> b -> TYPE 'UnboxedTupleRep
+     See Note [Unboxed tuple kinds]
 
-TYPE replaces the old sub-kinding machinery. We call variables `a` and `b`
-above "runtime-representation polymorphic".
+Note [Unboxed tuple kinds]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+What kind does (# Int, Float# #) have?
+The "right" answer would be
+    TYPE ('UnboxedTupleRep [PtrRepLifted, FloatRep])
+Currently we do not do this.  We just have
+    (# Int, Float# #) :: TYPE 'UnboxedTupleRep
+which does not tell us exactly how is is represented.
+
+Note [PrimRep and kindPrimRep]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+As part of its source code, in TyCon, GHC has
+  data PrimRep = PtrRep | IntRep | FloatRep | ...etc...
+
+Notice that
+ * RuntimeRep is part of the syntax tree of the program being compiled
+     (defined in a library: ghc-prim:GHC.Types)
+ * PrimRep is part of GHC's source code.
+     (defined in TyCon)
+
+We need to get from one to the other; that is what kindPrimRep does.
+Suppose we have a value
+   (v :: t) where (t :: k)
+Given this kind
+    k = TyConApp "TYPE" [rep]
+GHC needs to be able to figure out how 'v' is represented at runtime.
+It expects 'rep' to be form
+    TyConApp rr_dc args
+where 'rr_dc' is a promoteed data constructor from RuntimeRep. So
+now we need to go from 'dc' to the correponding PrimRep.  We store this
+PrimRep in the promoted data constructor itself: see TyCon.promDcRepInfo.
 
 -}
 
@@ -335,17 +443,16 @@ tYPETyCon, unliftedTypeKindTyCon :: TyCon
 tYPETyConName, unliftedTypeKindTyConName :: Name
 
 tYPETyCon = mkKindTyCon tYPETyConName
-                        [Anon runtimeRepTy]
+                        (mkTemplateAnonTyConBinders [runtimeRepTy])
                         liftedTypeKind
                         [Nominal]
                         (mkPrelTyConRepName tYPETyConName)
 
-   -- See Note [TYPE]
+   -- See Note [TYPE and RuntimeRep]
    -- NB: unlifted is wired in because there is no way to parse it in
    -- Haskell. That's the only reason for wiring it in.
 unliftedTypeKindTyCon = mkSynonymTyCon unliftedTypeKindTyConName
-                          [] liftedTypeKind
-                          [] []
+                          [] liftedTypeKind []
                           (tYPE (TyConApp ptrRepUnliftedDataConTyCon []))
 
 --------------------------
@@ -366,7 +473,8 @@ mkPrimTcName built_in_syntax occ key tycon
   = mkWiredInName gHC_PRIM (mkTcOccFS occ) key (ATyCon tycon) built_in_syntax
 
 -----------------------------
--- | Given a RuntimeRep, applies TYPE to it. See Note [TYPE].
+-- | Given a RuntimeRep, applies TYPE to it.
+-- see Note [TYPE and RuntimeRep]
 tYPE :: Type -> Type
 tYPE rr = TyConApp tYPETyCon [rr]
 
@@ -383,7 +491,7 @@ pcPrimTyCon :: Name -> [Role] -> PrimRep -> TyCon
 pcPrimTyCon name roles rep
   = mkPrimTyCon name binders result_kind roles
   where
-    binders     = map (const (Anon liftedTypeKind)) roles
+    binders     = mkTemplateAnonTyConBinders (map (const liftedTypeKind) roles)
     result_kind = tYPE rr
 
     rr = case rep of
@@ -686,11 +794,10 @@ mkProxyPrimTy k ty = TyConApp proxyPrimTyCon [k, ty]
 
 proxyPrimTyCon :: TyCon
 proxyPrimTyCon = mkPrimTyCon proxyPrimTyConName binders res_kind [Nominal,Nominal]
-  where binders  = [ Named kv Specified
-                   , Anon k ]
-        res_kind = tYPE voidRepDataConTy
-        kv       = kKiVar
-        k        = mkTyVarTy kv
+  where
+     -- Kind: forall k. k -> Void#
+     binders = mkTemplateTyConBinders [liftedTypeKind] (\ks-> ks)
+     res_kind = tYPE voidRepDataConTy
 
 
 {- *********************************************************************
@@ -703,46 +810,33 @@ proxyPrimTyCon = mkPrimTyCon proxyPrimTyConName binders res_kind [Nominal,Nomina
 eqPrimTyCon :: TyCon  -- The representation type for equality predicates
                       -- See Note [The equality types story]
 eqPrimTyCon  = mkPrimTyCon eqPrimTyConName binders res_kind roles
-  where binders = [ Named kv1 Specified
-                  , Named kv2 Specified
-                  , Anon k1
-                  , Anon k2 ]
-        res_kind = tYPE voidRepDataConTy
-        [kv1, kv2] = mkTemplateTyVars [liftedTypeKind, liftedTypeKind]
-        k1 = mkTyVarTy kv1
-        k2 = mkTyVarTy kv2
-        roles = [Nominal, Nominal, Nominal, Nominal]
+  where
+    -- Kind :: forall k1 k2. k1 -> k2 -> Void#
+    binders  = mkTemplateTyConBinders [liftedTypeKind, liftedTypeKind] (\ks -> ks)
+    res_kind = tYPE voidRepDataConTy
+    roles    = [Nominal, Nominal, Nominal, Nominal]
 
 -- like eqPrimTyCon, but the type for *Representational* coercions
 -- this should only ever appear as the type of a covar. Its role is
 -- interpreted in coercionRole
 eqReprPrimTyCon :: TyCon   -- See Note [The equality types story]
 eqReprPrimTyCon = mkPrimTyCon eqReprPrimTyConName binders res_kind roles
-  where binders = [ Named kv1 Specified
-                  , Named kv2 Specified
-                  , Anon k1
-                  , Anon k2 ]
-        res_kind = tYPE voidRepDataConTy
-        [kv1, kv2]    = mkTemplateTyVars [liftedTypeKind, liftedTypeKind]
-        k1            = mkTyVarTy kv1
-        k2            = mkTyVarTy kv2
-        roles         = [Nominal, Nominal, Representational, Representational]
+  where
+    -- Kind :: forall k1 k2. k1 -> k2 -> Void#
+    binders  = mkTemplateTyConBinders [liftedTypeKind, liftedTypeKind] (\ks -> ks)
+    res_kind = tYPE voidRepDataConTy
+    roles    = [Nominal, Nominal, Representational, Representational]
 
 -- like eqPrimTyCon, but the type for *Phantom* coercions.
 -- This is only used to make higher-order equalities. Nothing
 -- should ever actually have this type!
 eqPhantPrimTyCon :: TyCon
-eqPhantPrimTyCon = mkPrimTyCon eqPhantPrimTyConName binders res_kind
-                               [Nominal, Nominal, Phantom, Phantom]
-  where binders = [ Named kv1 Specified
-                  , Named kv2 Specified
-                  , Anon k1
-                  , Anon k2 ]
-        res_kind = tYPE voidRepDataConTy
-        [kv1, kv2]    = mkTemplateTyVars [liftedTypeKind, liftedTypeKind]
-        k1            = mkTyVarTy kv1
-        k2            = mkTyVarTy kv2
-
+eqPhantPrimTyCon = mkPrimTyCon eqPhantPrimTyConName binders res_kind roles
+  where
+    -- Kind :: forall k1 k2. k1 -> k2 -> Void#
+    binders  = mkTemplateTyConBinders [liftedTypeKind, liftedTypeKind] (\ks -> ks)
+    res_kind = tYPE voidRepDataConTy
+    roles    = [Nominal, Nominal, Phantom, Phantom]
 
 {- *********************************************************************
 *                                                                      *
@@ -851,6 +945,20 @@ mkStableNamePrimTy ty = TyConApp stableNamePrimTyCon [ty]
 {-
 ************************************************************************
 *                                                                      *
+\subsection[TysPrim-compact-nfdata]{The Compact NFData (CNF) type}
+*                                                                      *
+************************************************************************
+-}
+
+compactPrimTyCon :: TyCon
+compactPrimTyCon = pcPrimTyCon0 compactPrimTyConName PtrRep
+
+compactPrimTy :: Type
+compactPrimTy = mkTyConTy compactPrimTyCon
+
+{-
+************************************************************************
+*                                                                      *
 \subsection[TysPrim-BCOs]{The ``bytecode object'' type}
 *                                                                      *
 ************************************************************************
@@ -896,83 +1004,6 @@ threadIdPrimTy :: Type
 threadIdPrimTy    = mkTyConTy threadIdPrimTyCon
 threadIdPrimTyCon :: TyCon
 threadIdPrimTyCon = pcPrimTyCon0 threadIdPrimTyConName PtrRep
-
-{-
-************************************************************************
-*                                                                      *
-                Any
-*                                                                      *
-************************************************************************
-
-Note [Any types]
-~~~~~~~~~~~~~~~~
-The type constructor Any of kind forall k. k has these properties:
-
-  * It is defined in module GHC.Prim, and exported so that it is
-    available to users.  For this reason it's treated like any other
-    primitive type:
-      - has a fixed unique, anyTyConKey,
-      - lives in the global name cache
-
-  * It is a *closed* type family, with no instances.  This means that
-    if   ty :: '(k1, k2)  we add a given coercion
-             g :: ty ~ (Fst ty, Snd ty)
-    If Any was a *data* type, then we'd get inconsistency because 'ty'
-    could be (Any '(k1,k2)) and then we'd have an equality with Any on
-    one side and '(,) on the other. See also #9097.
-
-  * It is lifted, and hence represented by a pointer
-
-  * It is inhabited by at least one value, namely bottom
-
-  * You can unsafely coerce any lifted type to Any, and back.
-
-  * It does not claim to be a *data* type, and that's important for
-    the code generator, because the code gen may *enter* a data value
-    but never enters a function value.
-
-  * It is used to instantiate otherwise un-constrained type variables
-    For example         length Any []
-    See Note [Strangely-kinded void TyCons]
-
-Note [Strangely-kinded void TyCons]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-See Trac #959 for more examples
-
-When the type checker finds a type variable with no binding, which
-means it can be instantiated with an arbitrary type, it usually
-instantiates it to Void.  Eg.
-
-        length []
-===>
-        length Any (Nil Any)
-
-But in really obscure programs, the type variable might have a kind
-other than *, so we need to invent a suitably-kinded type.
-
-This commit uses
-        Any for kind *
-        Any(*->*) for kind *->*
-        etc
--}
-
-anyTyConName :: Name
-anyTyConName = mkPrimTc (fsLit "Any") anyTyConKey anyTyCon
-
-anyTy :: Type
-anyTy = mkTyConTy anyTyCon
-
-anyTyCon :: TyCon
-anyTyCon = mkFamilyTyCon anyTyConName binders res_kind [kKiVar] Nothing
-                         (ClosedSynFamilyTyCon Nothing)
-                         Nothing
-                         NotInjective
-  where
-    binders  = [Named kKiVar Specified]
-    res_kind = mkTyVarTy kKiVar
-
-anyTypeOfKind :: Kind -> Type
-anyTypeOfKind kind = TyConApp anyTyCon [kind]
 
 {-
 ************************************************************************

@@ -6,11 +6,12 @@
 
 module CmmExpr
     ( CmmExpr(..), cmmExprType, cmmExprWidth, maybeInvertCmmExpr
+    , CmmArg(..)
     , CmmReg(..), cmmRegType
     , CmmLit(..), cmmLitType
     , LocalReg(..), localRegType
     , GlobalReg(..), isArgReg, globalRegType, spReg, hpReg, spLimReg, nodeReg, node, baseReg
-    , VGcPtr(..), vgcFlag       -- Temporary!
+    , VGcPtr(..)
 
     , DefinerOfRegs, UserOfRegs
     , foldRegsDefd, foldRegsUsed, filterRegsUsed
@@ -29,13 +30,14 @@ where
 
 #include "HsVersions.h"
 
-import CmmType
-import CmmMachOp
 import BlockId
 import CLabel
+import CmmMachOp
+import CmmType
 import DynFlags
-import Unique
 import Outputable (panic)
+import Type
+import Unique
 
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -72,6 +74,10 @@ data CmmReg
   = CmmLocal  {-# UNPACK #-} !LocalReg
   | CmmGlobal GlobalReg
   deriving( Eq, Ord )
+
+data CmmArg
+  = CmmExprArg CmmExpr
+  | CmmRubbishArg Type -- See StgRubbishArg in StgSyn.hs
 
 -- | A stack area is either the stack slot where a variable is spilled
 -- or the stack space where function arguments and results are passed.
@@ -250,8 +256,11 @@ data LocalReg
 instance Eq LocalReg where
   (LocalReg u1 _) == (LocalReg u2 _) = u1 == u2
 
+-- This is non-deterministic but we do not currently support deterministic
+-- code-generation. See Note [Unique Determinism and code generation]
+-- See Note [No Ord for Unique]
 instance Ord LocalReg where
-  compare (LocalReg u1 _) (LocalReg u2 _) = compare u1 u2
+  compare (LocalReg u1 _) (LocalReg u2 _) = nonDetCmpUnique u1 u2
 
 instance Uniquable LocalReg where
   getUnique (LocalReg uniq _) = uniq
@@ -378,15 +387,10 @@ instance DefinerOfRegs r a => DefinerOfRegs r (Maybe a) where
 -----------------------------------------------------------------------------
 
 data VGcPtr = VGcPtr | VNonGcPtr deriving( Eq, Show )
-        -- TEMPORARY!!!
 
 -----------------------------------------------------------------------------
 --              Global STG registers
 -----------------------------------------------------------------------------
-vgcFlag :: CmmType -> VGcPtr
-vgcFlag ty | isGcPtrType ty = VGcPtr
-           | otherwise      = VNonGcPtr
-
 {-
 Note [Overlapping global registers]
 

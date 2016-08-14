@@ -84,7 +84,8 @@ cmmTopCodeGen (CmmProc info lab live graph) = do
       os   = platformOS $ targetPlatform dflags
       arch = platformArch $ targetPlatform dflags
   case arch of
-    ArchPPC    -> do
+    ArchPPC | os == OSAIX -> return tops
+            | otherwise -> do
       picBaseMb <- getPicBaseMaybeNat
       case picBaseMb of
            Just picBase -> initializePicBase_ppc arch os picBase tops
@@ -382,6 +383,10 @@ getRegister e = do dflags <- getDynFlags
 getRegister' :: DynFlags -> CmmExpr -> NatM Register
 
 getRegister' dflags (CmmReg (CmmGlobal PicBaseReg))
+  | OSAIX <- platformOS (targetPlatform dflags) = do
+        let code dst = toOL [ LD II32 dst tocAddr ]
+            tocAddr = AddrRegImm toc (ImmLit (text "ghc_toc_table[TC]"))
+        return (Any II32 code)
   | target32Bit (targetPlatform dflags) = do
       reg <- getPicBaseNat $ archWordFormat (target32Bit (targetPlatform dflags))
       return (Fixed (archWordFormat (target32Bit (targetPlatform dflags)))
@@ -569,7 +574,7 @@ getRegister' dflags (CmmMachOp mop [x, y]) -- dyadic PrimOps
          -- (needed for PIC)
       MO_Add W32 ->
         case y of
-          CmmLit (CmmInt imm immrep) | Just _ <- makeImmediate W32 True (-imm)
+          CmmLit (CmmInt imm immrep) | Just _ <- makeImmediate W32 True imm
             -> trivialCode W32 True ADD x (CmmLit $ CmmInt imm immrep)
           CmmLit lit
             -> do
@@ -621,7 +626,16 @@ getRegister' dflags (CmmMachOp mop [x, y]) -- dyadic PrimOps
        | otherwise -> remainderCode rep DIVDU (extendSExpr dflags rep x)
                                               (extendSExpr dflags rep y)
 
-      MO_And rep   -> trivialCode rep False AND x y
+      MO_And rep   -> case y of
+        (CmmLit (CmmInt imm _)) | imm == -8 || imm == -4
+            -> do
+                (src, srcCode) <- getSomeReg x
+                let clear_mask = if imm == -4 then 2 else 3
+                    fmt = intFormat rep
+                    code dst = srcCode
+                               `appOL` unitOL (CLRRI fmt dst src clear_mask)
+                return (Any fmt code)
+        _ -> trivialCode rep False AND x y
       MO_Or rep    -> trivialCode rep False OR x y
       MO_Xor rep   -> trivialCode rep False XOR x y
 
@@ -791,11 +805,23 @@ getAmode DS (CmmMachOp (MO_Add W64) [x, CmmLit (CmmInt i _)])
    -- (needed for PIC)
 getAmode _ (CmmMachOp (MO_Add W32) [x, CmmLit lit])
   = do
-        tmp <- getNewRegNat II32
+        dflags <- getDynFlags
         (src, srcCode) <- getSomeReg x
         let imm = litToImm lit
-            code = srcCode `snocOL` ADDIS tmp src (HA imm)
-        return (Amode (AddrRegImm tmp (LO imm)) code)
+        case () of
+            _ | OSAIX <- platformOS (targetPlatform dflags)
+              , isCmmLabelType lit ->
+                    -- HA16/LO16 relocations on labels not supported on AIX
+                    return (Amode (AddrRegImm src imm) srcCode)
+              | otherwise -> do
+                    tmp <- getNewRegNat II32
+                    let code = srcCode `snocOL` ADDIS tmp src (HA imm)
+                    return (Amode (AddrRegImm tmp (LO imm)) code)
+  where
+      isCmmLabelType (CmmLabel {})        = True
+      isCmmLabelType (CmmLabelOff {})     = True
+      isCmmLabelType (CmmLabelDiffOff {}) = True
+      isCmmLabelType _                    = False
 
 getAmode _ (CmmLit lit)
   = do
@@ -895,14 +921,22 @@ getCondCode (CmmMachOp mop [x, y])
 getCondCode _ = panic "getCondCode(2)(powerpc)"
 
 
-
 -- @cond(Int|Flt)Code@: Turn a boolean expression into a condition, to be
 -- passed back up the tree.
 
 condIntCode, condFltCode :: Cond -> CmmExpr -> CmmExpr -> NatM CondCode
 
---  ###FIXME: I16 and I8!
--- TODO: Is this still an issue? All arguments are extend?Expr'd.
+-- optimize pointer tag checks. Operation andi. sets condition register
+-- so cmpi ..., 0 is redundant.
+condIntCode cond (CmmMachOp (MO_And _) [x, CmmLit (CmmInt imm rep)])
+                 (CmmLit (CmmInt 0 _))
+  | not $ condUnsigned cond,
+    Just src2 <- makeImmediate rep False imm
+  = do
+      (src1, code) <- getSomeReg x
+      let code' = code `snocOL` AND r0 src1 (RIImm src2)
+      return (CondCode False cond code')
+
 condIntCode cond x (CmmLit (CmmInt y rep))
   | Just src2 <- makeImmediate rep (not $ condUnsigned cond) y
   = do
@@ -988,16 +1022,7 @@ genJump (CmmLit (CmmLabel lbl))
 genJump tree
   = do
         dflags <- getDynFlags
-        let platform = targetPlatform dflags
-        case platformOS platform of
-          OSLinux  -> case platformArch platform of
-                      ArchPPC           -> genJump' tree GCPLinux
-                      ArchPPC_64 ELF_V1 -> genJump' tree (GCPLinux64ELF 1)
-                      ArchPPC_64 ELF_V2 -> genJump' tree (GCPLinux64ELF 2)
-                      _   -> panic "PPC.CodeGen.genJump: Unknown Linux"
-          OSDarwin -> genJump' tree GCPDarwin
-          _ -> panic "PPC.CodeGen.genJump: not defined for this os"
-
+        genJump' tree (platformToGCP (targetPlatform dflags))
 
 genJump' :: CmmExpr -> GenCCallPlatform -> NatM InstrBlock
 
@@ -1067,20 +1092,24 @@ genCCall :: ForeignTarget            -- function to call
          -> NatM InstrBlock
 genCCall target dest_regs argsAndHints
  = do dflags <- getDynFlags
-      let platform = targetPlatform dflags
-      case platformOS platform of
-       OSLinux  -> case platformArch platform of
-                   ArchPPC           -> genCCall' dflags GCPLinux
-                                           target dest_regs argsAndHints
-                   ArchPPC_64 ELF_V1 -> genCCall' dflags (GCPLinux64ELF 1)
-                                           target dest_regs argsAndHints
-                   ArchPPC_64 ELF_V2 -> genCCall' dflags (GCPLinux64ELF 2)
-                                           target dest_regs argsAndHints
-                   _  -> panic "PPC.CodeGen.genCCall: Unknown Linux"
-       OSDarwin -> genCCall' dflags GCPDarwin target dest_regs argsAndHints
-       _ -> panic "PPC.CodeGen.genCCall: not defined for this os"
+      genCCall' dflags (platformToGCP (targetPlatform dflags))
+                target dest_regs argsAndHints
 
-data GenCCallPlatform = GCPLinux | GCPDarwin | GCPLinux64ELF Int
+-- TODO: replace 'Int' by an enum such as 'PPC_64ABI'
+data GenCCallPlatform = GCPLinux | GCPDarwin | GCPLinux64ELF !Int | GCPAIX
+                      deriving Eq
+
+platformToGCP :: Platform -> GenCCallPlatform
+platformToGCP platform = case platformOS platform of
+    OSLinux  -> case platformArch platform of
+        ArchPPC           -> GCPLinux
+        ArchPPC_64 ELF_V1 -> GCPLinux64ELF 1
+        ArchPPC_64 ELF_V2 -> GCPLinux64ELF 2
+        _ -> panic "PPC.CodeGen.platformToGCP: Unknown Linux"
+    OSAIX    -> GCPAIX
+    OSDarwin -> GCPDarwin
+    _ -> panic "PPC.CodeGen.platformToGCP: not defined for this OS"
+
 
 genCCall'
     :: DynFlags
@@ -1121,7 +1150,13 @@ genCCall'
 
     PowerPC 64 Linux uses the System V Release 4 Calling Convention for
     64-bit PowerPC. It is specified in
-    "64-bit PowerPC ELF Application Binary Interface Supplement 1.9".
+    "64-bit PowerPC ELF Application Binary Interface Supplement 1.9"
+    (PPC64 ELF v1.9).
+    PowerPC 64 Linux in little endian mode uses the "Power Architecture 64-Bit
+    ELF V2 ABI Specification -- OpenPOWER ABI for Linux Supplement"
+    (PPC64 ELF v2).
+    AIX follows the "PowerOpen ABI: Application Binary Interface Big-Endian
+    32-Bit Hardware Implementation"
 
     According to all conventions, the parameter area should be part of the
     caller's stack frame, allocated in the caller's prologue code (large enough
@@ -1162,31 +1197,46 @@ genCCall' dflags gcp target dest_regs args
             PrimTarget mop -> outOfLineMachOp mop
 
         let codeBefore = move_sp_down finalStack `appOL` passArgumentsCode
-                         `appOL` toc_before
-            codeAfter = toc_after labelOrExpr `appOL` move_sp_up finalStack
-                        `appOL` moveResult reduceToFF32
+            codeAfter = move_sp_up finalStack `appOL` moveResult reduceToFF32
 
         case labelOrExpr of
             Left lbl -> do -- the linker does all the work for us
                 return (         codeBefore
                         `snocOL` BL lbl usedRegs
+                        `appOL`  maybeNOP -- some ABI require a NOP after BL
                         `appOL`  codeAfter)
             Right dyn -> do -- implement call through function pointer
                 (dynReg, dynCode) <- getSomeReg dyn
                 case gcp of
                      GCPLinux64ELF 1 -> return ( dynCode
                        `appOL`  codeBefore
+                       `snocOL` ST spFormat toc (AddrRegImm sp (ImmInt 40))
                        `snocOL` LD II64 r11 (AddrRegImm dynReg (ImmInt 0))
                        `snocOL` LD II64 toc (AddrRegImm dynReg (ImmInt 8))
                        `snocOL` MTCTR r11
                        `snocOL` LD II64 r11 (AddrRegImm dynReg (ImmInt 16))
                        `snocOL` BCTRL usedRegs
+                       `snocOL` LD spFormat toc (AddrRegImm sp (ImmInt 40))
                        `appOL`  codeAfter)
                      GCPLinux64ELF 2 -> return ( dynCode
                        `appOL`  codeBefore
+                       `snocOL` ST spFormat toc (AddrRegImm sp (ImmInt 24))
                        `snocOL` MR r12 dynReg
                        `snocOL` MTCTR r12
                        `snocOL` BCTRL usedRegs
+                       `snocOL` LD spFormat toc (AddrRegImm sp (ImmInt 24))
+                       `appOL`  codeAfter)
+                     GCPAIX          -> return ( dynCode
+                       -- AIX/XCOFF follows the PowerOPEN ABI
+                       -- which is quite similiar to LinuxPPC64/ELFv1
+                       `appOL`  codeBefore
+                       `snocOL` ST spFormat toc (AddrRegImm sp (ImmInt 20))
+                       `snocOL` LD II32 r11 (AddrRegImm dynReg (ImmInt 0))
+                       `snocOL` LD II32 toc (AddrRegImm dynReg (ImmInt 4))
+                       `snocOL` MTCTR r11
+                       `snocOL` LD II32 r11 (AddrRegImm dynReg (ImmInt 8))
+                       `snocOL` BCTRL usedRegs
+                       `snocOL` LD spFormat toc (AddrRegImm sp (ImmInt 20))
                        `appOL`  codeAfter)
                      _              -> return ( dynCode
                        `snocOL` MTCTR dynReg
@@ -1204,6 +1254,7 @@ genCCall' dflags gcp target dest_regs args
                 return ()
 
         initialStackOffset = case gcp of
+                             GCPAIX          -> 24
                              GCPDarwin       -> 24
                              GCPLinux        -> 8
                              GCPLinux64ELF 1 -> 48
@@ -1211,16 +1262,21 @@ genCCall' dflags gcp target dest_regs args
                              _ -> panic "genCall': unknown calling convention"
             -- size of linkage area + size of arguments, in bytes
         stackDelta finalStack = case gcp of
+                                GCPAIX ->
+                                    roundTo 16 $ (24 +) $ max 32 $ sum $
+                                    map (widthInBytes . typeWidth) argReps
                                 GCPDarwin ->
                                     roundTo 16 $ (24 +) $ max 32 $ sum $
                                     map (widthInBytes . typeWidth) argReps
                                 GCPLinux -> roundTo 16 finalStack
                                 GCPLinux64ELF 1 ->
                                     roundTo 16 $ (48 +) $ max 64 $ sum $
-                                    map (widthInBytes . typeWidth) argReps
+                                    map (roundTo 8 . widthInBytes . typeWidth)
+                                        argReps
                                 GCPLinux64ELF 2 ->
                                     roundTo 16 $ (32 +) $ max 64 $ sum $
-                                    map (widthInBytes . typeWidth) argReps
+                                    map (roundTo 8 . widthInBytes . typeWidth)
+                                        argReps
                                 _ -> panic "genCall': unknown calling conv."
 
         argReps = map (cmmExprType dflags) args
@@ -1236,24 +1292,6 @@ genCCall' dflags gcp target dest_regs args
                               DELTA (-delta)]
                | otherwise = nilOL
                where delta = stackDelta finalStack
-        toc_before = case gcp of
-           GCPLinux64ELF 1 -> unitOL $ ST spFormat toc (AddrRegImm sp (ImmInt 40))
-           GCPLinux64ELF 2 -> unitOL $ ST spFormat toc (AddrRegImm sp (ImmInt 24))
-           _               -> nilOL
-        toc_after labelOrExpr = case gcp of
-           GCPLinux64ELF 1 -> case labelOrExpr of
-                                Left _  -> toOL [ NOP ]
-                                Right _ -> toOL [ LD spFormat toc
-                                                     (AddrRegImm sp
-                                                      (ImmInt 40))
-                                                ]
-           GCPLinux64ELF 2 -> case labelOrExpr of
-                                Left _  -> toOL [ NOP ]
-                                Right _ -> toOL [ LD spFormat toc
-                                                     (AddrRegImm sp
-                                                      (ImmInt 24))
-                                                ]
-           _               -> nilOL
         move_sp_up finalStack
                | delta > 64 =  -- TODO: fix-up stack back-chain
                         toOL [ADD sp sp (RIImm (ImmInt delta)),
@@ -1261,6 +1299,19 @@ genCCall' dflags gcp target dest_regs args
                | otherwise = nilOL
                where delta = stackDelta finalStack
 
+        -- A NOP instruction is required after a call (bl instruction)
+        -- on AIX and 64-Bit Linux.
+        -- If the call is to a function with a different TOC (r2) the
+        -- link editor replaces the NOP instruction with a load of the TOC
+        -- from the stack to restore the TOC.
+        maybeNOP = case gcp of
+           -- See Section 3.9.4 of OpenPower ABI
+           GCPAIX          -> unitOL NOP
+           -- See Section 3.5.11 of PPC64 ELF v1.9
+           GCPLinux64ELF 1 -> unitOL NOP
+           -- See Section 2.3.6 of PPC64 ELF v2
+           GCPLinux64ELF 2 -> unitOL NOP
+           _               -> nilOL
 
         passArguments [] _ _ stackOffset accumCode accumUsed = return (stackOffset, accumCode, accumUsed)
         passArguments ((arg,arg_ty):args) gprs fprs stackOffset
@@ -1271,6 +1322,18 @@ genCCall' dflags gcp target dest_regs args
                 let vr_hi = getHiVRegFromLo vr_lo
 
                 case gcp of
+                    GCPAIX -> -- same as for Darwin
+                        do let storeWord vr (gpr:_) _ = MR gpr vr
+                               storeWord vr [] offset
+                                   = ST II32 vr (AddrRegImm sp (ImmInt offset))
+                           passArguments args
+                                         (drop 2 gprs)
+                                         fprs
+                                         (stackOffset+8)
+                                         (accumCode `appOL` code
+                                               `snocOL` storeWord vr_hi gprs stackOffset
+                                               `snocOL` storeWord vr_lo (drop 1 gprs) (stackOffset+4))
+                                         ((take 2 gprs) ++ accumUsed)
                     GCPDarwin ->
                         do let storeWord vr (gpr:_) _ = MR gpr vr
                                storeWord vr [] offset
@@ -1315,6 +1378,8 @@ genCCall' dflags gcp target dest_regs args
                                      -- The Darwin ABI requires that we reserve
                                      -- stack slots for register parameters
                                      GCPDarwin -> stackOffset + stackBytes
+                                     -- ... so does the PowerOpen ABI.
+                                     GCPAIX    -> stackOffset + stackBytes
                                      -- ... the SysV ABI 32-bit doesn't.
                                      GCPLinux -> stackOffset
                                      -- ... but SysV ABI 64-bit does.
@@ -1339,6 +1404,10 @@ genCCall' dflags gcp target dest_regs args
                                    -- stackOffset is at least 4-byte aligned
                                    -- The Darwin ABI is happy with that.
                                    stackOffset
+                               GCPAIX ->
+                                   -- The 32bit PowerOPEN ABI is happy with
+                                   -- 32bit-alignment as well...
+                                   stackOffset
                                GCPLinux
                                    -- ... the SysV ABI requires 8-byte
                                    -- alignment for doubles.
@@ -1347,13 +1416,43 @@ genCCall' dflags gcp target dest_regs args
                                 | otherwise ->
                                    stackOffset
                                GCPLinux64ELF _ ->
-                                   -- everything on the stack is 8-byte
-                                   -- aligned on a 64 bit system
-                                   -- (except vector status, not used now)
+                                   -- Everything on the stack is mapped to
+                                   -- 8-byte aligned doublewords
                                    stackOffset
-                stackSlot = AddrRegImm sp (ImmInt stackOffset')
+                stackOffset''
+                     | isFloatType rep && typeWidth rep == W32 =
+                         case gcp of
+                         -- The ELF v1 ABI Section 3.2.3 requires:
+                         -- "Single precision floating point values
+                         -- are mapped to the second word in a single
+                         -- doubleword"
+                         GCPLinux64ELF 1 -> stackOffset' + 4
+                         _               -> stackOffset'
+                     | otherwise = stackOffset'
+
+                stackSlot = AddrRegImm sp (ImmInt stackOffset'')
                 (nGprs, nFprs, stackBytes, regs)
                     = case gcp of
+                      GCPAIX ->
+                          case cmmTypeFormat rep of
+                          II8  -> (1, 0, 4, gprs)
+                          II16 -> (1, 0, 4, gprs)
+                          II32 -> (1, 0, 4, gprs)
+                          -- The PowerOpen ABI requires that we skip a
+                          -- corresponding number of GPRs when we use
+                          -- the FPRs.
+                          --
+                          -- E.g. for a `double` two GPRs are skipped,
+                          -- whereas for a `float` one GPR is skipped
+                          -- when parameters are assigned to
+                          -- registers.
+                          --
+                          -- The PowerOpen ABI specification can be found at
+                          -- ftp://www.sourceware.org/pub/binutils/ppc-docs/ppc-poweropen/
+                          FF32 -> (1, 1, 4, fprs)
+                          FF64 -> (2, 1, 8, fprs)
+                          II64 -> panic "genCCall' passArguments II64"
+                          FF80 -> panic "genCCall' passArguments FF80"
                       GCPDarwin ->
                           case cmmTypeFormat rep of
                           II8  -> (1, 0, 4, gprs)
@@ -1482,6 +1581,23 @@ genCCall' dflags gcp target dest_regs args
 
 genSwitch :: DynFlags -> CmmExpr -> SwitchTargets -> NatM InstrBlock
 genSwitch dflags expr targets
+  | OSAIX <- platformOS (targetPlatform dflags)
+  = do
+        (reg,e_code) <- getSomeReg (cmmOffset dflags expr offset)
+        let fmt = archWordFormat $ target32Bit $ targetPlatform dflags
+            sha = if target32Bit $ targetPlatform dflags then 2 else 3
+        tmp <- getNewRegNat fmt
+        lbl <- getNewLabelNat
+        dynRef <- cmmMakeDynamicReference dflags DataReference lbl
+        (tableReg,t_code) <- getSomeReg $ dynRef
+        let code = e_code `appOL` t_code `appOL` toOL [
+                            SL fmt tmp reg (RIImm (ImmInt sha)),
+                            LD fmt tmp (AddrRegReg tableReg tmp),
+                            MTCTR tmp,
+                            BCTR ids (Just lbl)
+                    ]
+        return code
+
   | (gopt Opt_PIC dflags) || (not $ target32Bit $ targetPlatform dflags)
   = do
         (reg,e_code) <- getSomeReg (cmmOffset dflags expr offset)

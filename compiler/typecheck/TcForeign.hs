@@ -128,11 +128,11 @@ normaliseFfiType' env ty0 = go initRecTc ty0
       | Just (tc, tys) <- splitTyConApp_maybe ty
       = go_tc_app rec_nts tc tys
 
-      | Just (bndr, inner_ty) <- splitPiTy_maybe ty
-      , Just tyvar <- binderVar_maybe bndr
+      | (bndrs, inner_ty) <- splitForAllTyVarBndrs ty
+      , not (null bndrs)
       = do (coi, nty1, gres1) <- go rec_nts inner_ty
-           return ( mkHomoForAllCos [tyvar] coi
-                  , mkForAllTy bndr nty1, gres1 )
+           return ( mkHomoForAllCos (binderVars bndrs) coi
+                  , mkForAllTys bndrs nty1, gres1 )
 
       | otherwise -- see Note [Don't recur in normaliseFfiType']
       = return (mkRepReflCo ty, ty, emptyBag)
@@ -189,7 +189,7 @@ normaliseFfiType' env ty0 = go initRecTc ty0
 checkNewtypeFFI :: GlobalRdrEnv -> TyCon -> Maybe GlobalRdrElt
 checkNewtypeFFI rdr_env tc
   | Just con <- tyConSingleDataCon_maybe tc
-  , [gre] <- lookupGRE_Name rdr_env (dataConName con)
+  , Just gre <- lookupGRE_Name rdr_env (dataConName con)
   = Just gre    -- See Note [Newtype constructor usage in foreign declarations]
   | otherwise
   = Nothing

@@ -27,10 +27,10 @@
  * closure.  Returns the size of the closure, including the profiling
  * header portion, so that the caller can find the next closure.
  * ----------------------------------------------------------------------- */
-STATIC_INLINE nat
-processHeapClosureForDead( StgClosure *c )
+STATIC_INLINE uint32_t
+processHeapClosureForDead( const StgClosure *c )
 {
-    nat size;
+    uint32_t size;
     const StgInfoTable *info;
 
     info = get_itbl(c);
@@ -142,6 +142,7 @@ processHeapClosureForDead( StgClosure *c )
     case RET_BIG:
         // others
     case INVALID_OBJECT:
+    case COMPACT_NFDATA:
     default:
         barf("Invalid object in processHeapClosureForDead(): %d", info->type);
         return 0;
@@ -178,6 +179,9 @@ processNurseryForDead( void )
     StgPtr p;
     bdescr *bd;
 
+    if (MainCapability.r.rNursery == NULL)
+        return;
+
     for (bd = MainCapability.r.rNursery->blocks; bd != NULL; bd = bd->link) {
         p = bd->start;
         while (p < bd->free) {
@@ -213,9 +217,9 @@ processChainForDead( bdescr *bd )
  * have just been garbage collected.
  * ----------------------------------------------------------------------- */
 void
-LdvCensusForDead( nat N )
+LdvCensusForDead( uint32_t N )
 {
-    nat g;
+    uint32_t g;
 
     // ldvTime == 0 means that LDV profiling is currently turned off.
     if (era == 0)

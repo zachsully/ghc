@@ -1,8 +1,12 @@
 module TysWiredIn where
 
+import Var( TyVar, ArgFlag )
 import {-# SOURCE #-} TyCon      ( TyCon )
 import {-# SOURCE #-} TyCoRep    (Type, Kind)
 
+
+mkFunKind :: Kind -> Kind -> Kind
+mkForAllKind :: TyVar -> ArgFlag -> Kind -> Kind
 
 listTyCon :: TyCon
 typeNatKind, typeSymbolKind :: Type
@@ -13,6 +17,7 @@ constraintKind :: Kind
 
 runtimeRepTyCon, vecCountTyCon, vecElemTyCon :: TyCon
 runtimeRepTy :: Type
+ptrRepLiftedTy :: Type
 
 ptrRepUnliftedDataConTyCon, vecRepDataConTyCon :: TyCon
 
@@ -27,3 +32,5 @@ int8ElemRepDataConTy, int16ElemRepDataConTy, int32ElemRepDataConTy,
   int64ElemRepDataConTy, word8ElemRepDataConTy, word16ElemRepDataConTy,
   word32ElemRepDataConTy, word64ElemRepDataConTy, floatElemRepDataConTy,
   doubleElemRepDataConTy :: Type
+
+anyTypeOfKind :: Kind -> Type

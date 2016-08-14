@@ -5,7 +5,7 @@
 \section[ConLike]{@ConLike@: Constructor-like things}
 -}
 
-{-# LANGUAGE CPP, DeriveDataTypeable #-}
+{-# LANGUAGE CPP #-}
 
 module ConLike (
           ConLike(..)
@@ -36,9 +36,7 @@ import TyCoRep (Type, ThetaType)
 import Var
 import Type (mkTyConApp)
 
-import Data.Function (on)
 import qualified Data.Data as Data
-import qualified Data.Typeable
 
 {-
 ************************************************************************
@@ -51,7 +49,6 @@ import qualified Data.Typeable
 -- | A constructor-like thing
 data ConLike = RealDataCon DataCon
              | PatSynCon PatSyn
-  deriving Data.Typeable.Typeable
 
 {-
 ************************************************************************
@@ -62,15 +59,14 @@ data ConLike = RealDataCon DataCon
 -}
 
 instance Eq ConLike where
-    (==) = (==) `on` getUnique
-    (/=) = (/=) `on` getUnique
+    (==) = eqConLike
 
-instance Ord ConLike where
-    (<=) = (<=) `on` getUnique
-    (<) = (<) `on` getUnique
-    (>=) = (>=) `on` getUnique
-    (>) = (>) `on` getUnique
-    compare = compare `on` getUnique
+eqConLike :: ConLike -> ConLike -> Bool
+eqConLike x y = getUnique x == getUnique y
+
+-- There used to be an Ord ConLike instance here that used Unique for ordering.
+-- It was intentionally removed to prevent determinism problems.
+-- See Note [Unique Determinism] in Unique.
 
 instance Uniquable ConLike where
     getUnique (RealDataCon dc) = getUnique dc

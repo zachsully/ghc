@@ -4,6 +4,7 @@
 {-# LANGUAGE KindSignatures    #-}
 {-# LANGUAGE PolyKinds         #-}
 {-# LANGUAGE RankNTypes        #-}
+{-# LANGUAGE Trustworthy       #-}
 
 {-# OPTIONS_HADDOCK hide #-}
 -- we hide this module from haddock to enforce GHC.Stack as the main
@@ -49,7 +50,7 @@ import cycle,
 -}
 
 import GHC.Classes (Eq)
-import GHC.Types
+import GHC.Types (Char, Int)
 
 -- Make implicit dependency known to build system
 import GHC.Tuple ()
@@ -131,7 +132,7 @@ type HasCallStack = (?callStack :: CallStack)
 -- @since 4.8.1.0
 data CallStack
   = EmptyCallStack
-  | PushCallStack ([Char], SrcLoc) CallStack
+  | PushCallStack [Char] SrcLoc CallStack
   | FreezeCallStack CallStack
     -- ^ Freeze the stack at the given @CallStack@, preventing any further
     -- call-sites from being pushed onto it.
@@ -145,16 +146,16 @@ data CallStack
 -- @since 4.8.1.0
 getCallStack :: CallStack -> [([Char], SrcLoc)]
 getCallStack stk = case stk of
-  EmptyCallStack        -> []
-  PushCallStack cs stk' -> cs : getCallStack stk'
-  FreezeCallStack stk'  -> getCallStack stk'
+  EmptyCallStack            -> []
+  PushCallStack fn loc stk' -> (fn,loc) : getCallStack stk'
+  FreezeCallStack stk'      -> getCallStack stk'
 
 -- | Convert a list of call-sites to a 'CallStack'.
 --
 -- @since 4.9.0.0
 fromCallSiteList :: [([Char], SrcLoc)] -> CallStack
-fromCallSiteList (c:cs) = PushCallStack c (fromCallSiteList cs)
-fromCallSiteList []     = EmptyCallStack
+fromCallSiteList ((fn,loc):cs) = PushCallStack fn loc (fromCallSiteList cs)
+fromCallSiteList []            = EmptyCallStack
 
 -- Note [Definition of CallStack]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -178,9 +179,9 @@ fromCallSiteList []     = EmptyCallStack
 --
 -- @since 4.9.0.0
 pushCallStack :: ([Char], SrcLoc) -> CallStack -> CallStack
-pushCallStack cs stk = case stk of
+pushCallStack (fn, loc) stk = case stk of
   FreezeCallStack _ -> stk
-  _                 -> PushCallStack cs stk
+  _                 -> PushCallStack fn loc stk
 {-# INLINE pushCallStack #-}
 
 

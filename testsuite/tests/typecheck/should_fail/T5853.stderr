@@ -1,23 +1,22 @@
 
 T5853.hs:15:46: error:
-    • Could not deduce: Subst t1 (Elem t2) ~ t2
+    • Could not deduce: Subst (Subst t2 t) t1 ~ Subst t2 t1
         arising from a use of ‘<$>’
-      from the context: (F t,
-                         Elem t ~ Elem t,
+      from the context: (F t2,
                          Elem t2 ~ Elem t2,
-                         Subst t (Elem t2) ~ t2,
-                         Subst t2 (Elem t) ~ t,
-                         F t1,
-                         Elem t1 ~ Elem t1,
-                         Elem t ~ Elem t,
-                         Subst t1 (Elem t) ~ t,
-                         Subst t (Elem t1) ~ t1)
+                         Elem (Subst t2 t1) ~ t1,
+                         Subst t2 t1 ~ Subst t2 t1,
+                         Subst (Subst t2 t1) (Elem t2) ~ t2,
+                         F (Subst t2 t),
+                         Elem (Subst t2 t) ~ t,
+                         Elem t2 ~ Elem t2,
+                         Subst (Subst t2 t) (Elem t2) ~ t2,
+                         Subst t2 t ~ Subst t2 t)
         bound by the RULE "map/map" at T5853.hs:15:2-57
-      ‘t2’ is a rigid type variable bound by
-        the RULE "map/map" at T5853.hs:15:2
+      NB: ‘Subst’ is a type function, and may not be injective
     • In the expression: (f . g) <$> xs
       When checking the transformation rule "map/map"
     • Relevant bindings include
-        f :: Elem t -> Elem t2 (bound at T5853.hs:15:19)
-        g :: Elem t1 -> Elem t (bound at T5853.hs:15:21)
-        xs :: t1 (bound at T5853.hs:15:23)
+        f :: Elem t2 -> t1 (bound at T5853.hs:15:19)
+        g :: t -> Elem t2 (bound at T5853.hs:15:21)
+        xs :: Subst t2 t (bound at T5853.hs:15:23)

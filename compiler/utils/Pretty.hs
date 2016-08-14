@@ -1,161 +1,70 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE MagicHash #-}
+
+-----------------------------------------------------------------------------
+-- |
+-- Module      :  Pretty
+-- Copyright   :  (c) The University of Glasgow 2001
+-- License     :  BSD-style (see the file LICENSE)
+--
+-- Maintainer  :  David Terei <code@davidterei.com>
+-- Stability   :  stable
+-- Portability :  portable
+--
+-- John Hughes's and Simon Peyton Jones's Pretty Printer Combinators
+--
+-- Based on /The Design of a Pretty-printing Library/
+-- in Advanced Functional Programming,
+-- Johan Jeuring and Erik Meijer (eds), LNCS 925
+-- <http://www.cs.chalmers.se/~rjmh/Papers/pretty.ps>
+--
+-----------------------------------------------------------------------------
+
 {-
-*********************************************************************************
-*                                                                               *
-*       John Hughes's and Simon Peyton Jones's Pretty Printer Combinators       *
-*                                                                               *
-*               based on "The Design of a Pretty-printing Library"              *
-*               in Advanced Functional Programming,                             *
-*               Johan Jeuring and Erik Meijer (eds), LNCS 925                   *
-*               http://www.cs.chalmers.se/~rjmh/Papers/pretty.ps                *
-*                                                                               *
-*               Heavily modified by Simon Peyton Jones, Dec 96                  *
-*                                                                               *
-*********************************************************************************
+Note [Differences between libraries/pretty and compiler/utils/Pretty.hs]
 
-Version 3.0     28 May 1997
-  * Cured massive performance bug.  If you write
+For historical reasons, there are two different copies of `Pretty` in the GHC
+source tree:
+ * `libraries/pretty` is a submodule containing
+   https://github.com/haskell/pretty. This is the `pretty` library as released
+   on hackage. It is used by several other libraries in the GHC source tree
+   (e.g. template-haskell and Cabal).
+ * `compiler/utils/Pretty.hs` (this module). It is used by GHC only.
 
-        foldl <> empty (map (text.show) [1..10000])
+There is an ongoing effort in https://github.com/haskell/pretty/issues/1 and
+https://ghc.haskell.org/trac/ghc/ticket/10735 to try to get rid of GHC's copy
+of Pretty.
 
-    you get quadratic behaviour with V2.0.  Why?  For just the same reason as you get
-    quadratic behaviour with left-associated (++) chains.
+Currently, GHC's copy of Pretty resembles pretty-1.1.2.0, with the following
+major differences:
+ * GHC's copy uses `Faststring` for performance reasons.
+ * GHC's copy has received a backported bugfix for #12227, which was
+   released as pretty-1.1.3.4 ("Remove harmful $! forcing in beside",
+   https://github.com/haskell/pretty/pull/35).
 
-    This is really bad news.  One thing a pretty-printer abstraction should
-    certainly guarantee is insensivity to associativity.  It matters: suddenly
-    GHC's compilation times went up by a factor of 100 when I switched to the
-    new pretty printer.
+Other differences are minor. Both copies define some extra functions and
+instances not defined in the other copy. To see all differences, do this in a
+ghc git tree:
 
-    I fixed it with a bit of a hack (because I wanted to get GHC back on the
-    road).  I added two new constructors to the Doc type, Above and Beside:
+    $ cd libraries/pretty
+    $ git checkout v1.1.2.0
+    $ cd -
+    $ vimdiff compiler/utils/Pretty.hs \
+              libraries/pretty/src/Text/PrettyPrint/HughesPJ.hs
 
-         <> = Beside
-         $$ = Above
-
-    Then, where I need to get to a "TextBeside" or "NilAbove" form I "force"
-    the Doc to squeeze out these suspended calls to Beside and Above; but in so
-    doing I re-associate. It's quite simple, but I'm not satisfied that I've done
-    the best possible job.  I'll send you the code if you are interested.
-
-  * Added new exports:
-        punctuate, hang
-        int, integer, float, double, rational,
-        lparen, rparen, lbrack, rbrack, lbrace, rbrace,
-
-  * fullRender's type signature has changed.  Rather than producing a string it
-    now takes an extra couple of arguments that tells it how to glue fragments
-    of output together:
-
-        fullRender :: Mode
-                   -> Int                       -- Line length
-                   -> Float                     -- Ribbons per line
-                   -> (TextDetails -> a -> a)   -- What to do with text
-                   -> a                         -- What to do at the end
-                   -> Doc
-                   -> a                         -- Result
-
-    The "fragments" are encapsulated in the TextDetails data type:
-        data TextDetails = Chr  Char
-                         | Str  String
-                         | PStr FastString
-
-    The Chr and Str constructors are obvious enough.  The PStr constructor has a packed
-    string (FastString) inside it.  It's generated by using the new "ptext" export.
-
-    An advantage of this new setup is that you can get the renderer to do output
-    directly (by passing in a function of type (TextDetails -> IO () -> IO ()),
-    rather than producing a string that you then print.
-
-
-Version 2.0     24 April 1997
-  * Made empty into a left unit for <> as well as a right unit;
-    it is also now true that
-        nest k empty = empty
-    which wasn't true before.
-
-  * Fixed an obscure bug in sep that occasionally gave very weird behaviour
-
-  * Added $+$
-
-  * Corrected and tidied up the laws and invariants
-
-======================================================================
-Relative to John's original paper, there are the following new features:
-
-1.  There's an empty document, "empty".  It's a left and right unit for
-    both <> and $$, and anywhere in the argument list for
-    sep, hcat, hsep, vcat, fcat etc.
-
-    It is Really Useful in practice.
-
-2.  There is a paragraph-fill combinator, fsep, that's much like sep,
-    only it keeps fitting things on one line until it can't fit any more.
-
-3.  Some random useful extra combinators are provided.
-        <+> puts its arguments beside each other with a space between them,
-            unless either argument is empty in which case it returns the other
-
-
-        hcat is a list version of <>
-        hsep is a list version of <+>
-        vcat is a list version of $$
-
-        sep (separate) is either like hsep or like vcat, depending on what fits
-
-        cat  is behaves like sep,  but it uses <> for horizontal conposition
-        fcat is behaves like fsep, but it uses <> for horizontal conposition
-
-        These new ones do the obvious things:
-                char, semi, comma, colon, space,
-                parens, brackets, braces,
-                quotes, quote, doubleQuotes
-
-4.      The "above" combinator, $$, now overlaps its two arguments if the
-        last line of the top argument stops before the first line of the second begins.
-        For example:  text "hi" $$ nest 5 "there"
-        lays out as
-                        hi   there
-        rather than
-                        hi
-                             there
-
-        There are two places this is really useful
-
-        a) When making labelled blocks, like this:
-                Left ->   code for left
-                Right ->  code for right
-                LongLongLongLabel ->
-                          code for longlonglonglabel
-           The block is on the same line as the label if the label is
-           short, but on the next line otherwise.
-
-        b) When laying out lists like this:
-                [ first
-                , second
-                , third
-                ]
-           which some people like.  But if the list fits on one line
-           you want [first, second, third].  You can't do this with
-           John's original combinators, but it's quite easy with the
-           new $$.
-
-        The combinator $+$ gives the original "never-overlap" behaviour.
-
-5.      Several different renderers are provided:
-                * a standard one
-                * one that uses cut-marks to avoid deeply-nested documents
-                        simply piling up in the right-hand margin
-                * one that ignores indentation (fewer chars output; good for machines)
-                * one that ignores indentation and newlines (ditto, only more so)
-
-6.      Numerous implementation tidy-ups
-        Use of unboxed data types to speed up the implementation
+For parity with `pretty-1.1.2.1`, the following two `pretty` commits would
+have to be backported:
+  * "Resolve foldr-strictness stack overflow bug"
+    (307b8173f41cd776eae8f547267df6d72bff2d68)
+  * "Special-case reduce for horiz/vert"
+    (c57c7a9dfc49617ba8d6e4fcdb019a3f29f1044c)
+This has not been done sofar, because these commits seem to cause more
+allocation in the compiler (see thomie's comments in
+https://github.com/haskell/pretty/pull/9).
 -}
 
-
-{-# LANGUAGE BangPatterns, CPP, MagicHash #-}
-
 module Pretty (
+
         -- * The document type
         Doc, TextDetails(..),
 
@@ -724,7 +633,7 @@ beside p@(Beside p1 g1 q1) g2 q2
          | otherwise             = beside (reduceDoc p) g2 q2
 beside p@(Above{})         g q   = let !d = reduceDoc p in beside d g q
 beside (NilAbove p)        g q   = nilAbove_ $! beside p g q
-beside (TextBeside s sl p) g q   = textBeside_ s sl $! rest
+beside (TextBeside s sl p) g q   = textBeside_ s sl rest
                                where
                                   rest = case p of
                                            Empty -> nilBeside g q

@@ -78,7 +78,7 @@ test('dynamic003',      extra_run_opts('+RTS -K32m -RTS'), compile_and_run, ['']
 test('dynamic004',      omit_ways(['normal', 'threaded1', 'ghci']), compile_and_run, [''])
 test('dynamic005',      normal, compile_and_run, [''])
 
-enum_setups = [when(fast(), skip), when(opsys('mingw32'), expect_broken(9399))]
+enum_setups = [when(fast(), skip)]
 test('enum01',          enum_setups, compile_and_run, [''])
 test('enum02',          enum_setups, compile_and_run, [''])
 test('enum03',          enum_setups, compile_and_run, [''])
@@ -102,8 +102,6 @@ test('memo002',
      [extra_run_opts('20'),
       extra_clean(['Memo2.hi', 'Memo2.o'])],
 	multimod_compile_and_run, ['memo002',''])
-
-test('packedstring001', reqlib('packedstring'), compile_and_run, ['-package packedstring'])
 
 test('stableptr001',
      [when(fast(), skip), extra_run_opts('+RTS -K8m -RTS')],
@@ -145,22 +143,17 @@ test('CatEntail', normal, compile, [''])
 test('T7653', high_memory_usage, compile_and_run, [''])
 test('T7787', normal, compile_and_run, [''])
 
+def stderr_contains(pattern):
+    return normalise_errmsg_fun(lambda s: pattern if pattern in s else s)
+
 test('topHandler01', when(opsys('mingw32'), skip), compile_and_run, [''])
 test('topHandler02',
      [when(opsys('mingw32'), skip),
       omit_ways(['ghci']),
-      # Irritatingly, the test driver calls the programs via a shell, and
-      # depending on the shell, they can add their own "helpful" commentary,
-      # pretty printing the name of the signal that killed the process. So we
-      # ignore the stdout here, we only care about the exit code (which itself
-      # is messed up because of the shell, using 128+sig encoding)
-      ignore_output,
       signal_exit_code(2)
      ], compile_and_run, [''])
 test('topHandler03',
-     [when(opsys('mingw32'), skip),
-      # As above, shells, grrr.
-      ignore_output,
+     [when(opsys('mingw32'), skip), stderr_contains('Terminated'),
       signal_exit_code(15)
      ], compile_and_run, [''])
 test('topHandler04',
@@ -196,12 +189,11 @@ test('T9681', normal, compile_fail, [''])
 #   Probably something like 1s is already enough, but I don't know enough to
 #   make an educated guess how long it needs to be guaranteed to reach the C
 #   call."
-test('T8089', [exit_code(99),
-               run_timeout_multiplier(0.01),
-               when(opsys('mingw32'),
-                    expect_broken_for(7325, ['normal', 'hpc', 'optasm'])),
-               ],
-              compile_and_run, [''])
+test('T8089',
+     [exit_code(99), run_timeout_multiplier(0.01),
+      when(opsys('mingw32'),
+           expect_broken_for(7325, ['normal', 'hpc', 'optasm', 'profasm']))],
+     compile_and_run, [''])
 test('T9826',normal, compile_and_run,[''])
 test('T9848',
         [ stats_num_field('bytes allocated',
@@ -211,4 +203,5 @@ test('T9848',
       compile_and_run,
       ['-O'])
 test('T10149', normal, compile_and_run, [''])
-test('T11334', normal, compile_and_run, [''])
+test('T11334a', normal, compile_and_run, [''])
+test('T11555', normal, compile_and_run, [''])

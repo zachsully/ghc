@@ -16,7 +16,7 @@ module TcUnify (
   checkConstraints, buildImplicationFor,
 
   -- Various unifications
-  unifyType_, unifyType, unifyTheta, unifyKind, noThing,
+  unifyType, unifyTheta, unifyKind, noThing,
   uType, unifyExpType,
 
   --------------------------------
@@ -49,8 +49,8 @@ import Inst
 import TyCon
 import TysWiredIn
 import Var
-import VarEnv
 import VarSet
+import VarEnv
 import ErrUtils
 import DynFlags
 import BasicTypes
@@ -132,7 +132,7 @@ matchExpectedFunTys herald arity orig_ty thing_inside
     go acc_arg_tys n ty
       | Just ty' <- coreView ty = go acc_arg_tys n ty'
 
-    go acc_arg_tys n (ForAllTy (Anon arg_ty) res_ty)
+    go acc_arg_tys n (FunTy arg_ty res_ty)
       = ASSERT( not (isPredTy arg_ty) )
         do { (result, wrap_res) <- go (mkCheckExpType arg_ty : acc_arg_tys)
                                       (n-1) res_ty
@@ -258,7 +258,7 @@ matchActualFunTysPart herald ct_orig mb_thing arity orig_ty
     go n acc_args ty
       | Just ty' <- coreView ty = go n acc_args ty'
 
-    go n acc_args (ForAllTy (Anon arg_ty) res_ty)
+    go n acc_args (FunTy arg_ty res_ty)
       = ASSERT( not (isPredTy arg_ty) )
         do { (wrap_res, tys, ty_r) <- go (n-1) (arg_ty : acc_args) res_ty
            ; return ( mkWpFun idHsWrapper wrap_res arg_ty ty_r
@@ -381,8 +381,11 @@ matchExpectedTyConApp tc orig_ty
     -- because that'll make types that are utterly ill-kinded.
     -- This happened in Trac #7368
     defer
-      = do { (_subst, args) <- tcInstBinders (tyConBinders tc)
-           ; co <- unifyType noThing (mkTyConApp tc args) orig_ty
+      = do { (_, arg_tvs) <- newMetaTyVars (tyConTyVars tc)
+           ; traceTc "mtca" (ppr tc $$ ppr (tyConTyVars tc) $$ ppr arg_tvs)
+           ; let args = mkTyVarTys arg_tvs
+                 tc_template = mkTyConApp tc args
+           ; co <- unifyType noThing tc_template orig_ty
            ; return (co, args) }
 
 ----------------------
@@ -739,15 +742,14 @@ tc_sub_type_ds eq_orig inst_orig ctxt ty_actual ty_expected
                  |  otherwise
                  -> inst_and_unify }
 
-    go (ForAllTy (Anon act_arg) act_res) (ForAllTy (Anon exp_arg) exp_res)
+    go (FunTy act_arg act_res) (FunTy exp_arg exp_res)
       | not (isPredTy act_arg)
       , not (isPredTy exp_arg)
       = -- See Note [Co/contra-variance of subsumption checking]
         do { res_wrap <- tc_sub_type_ds eq_orig inst_orig ctxt act_res exp_res
            ; arg_wrap
                <- tc_sub_tc_type eq_orig (GivenOrigin
-                                          (SigSkol GenSigCtxt
-                                           (mkCheckExpType exp_arg)))
+                                          (SigSkol GenSigCtxt exp_arg))
                                  ctxt exp_arg act_arg
            ; return (mkWpFun arg_wrap res_wrap exp_arg exp_res) }
                -- arg_wrap :: exp_arg ~ act_arg
@@ -883,8 +885,7 @@ tcSkolemise ctxt expected_ty thing_inside
 
         -- Use the *instantiated* type in the SkolemInfo
         -- so that the names of displayed type variables line up
-        ; let skol_info = SigSkol ctxt (mkCheckExpType $
-                                        mkFunTys (map varType given) rho')
+        ; let skol_info = SigSkol ctxt (mkFunTys (map varType given) rho')
 
         ; (ev_binds, result) <- checkConstraints skol_info tvs' given $
                                 thing_inside tvs' rho'
@@ -977,12 +978,6 @@ buildImplicationFor tclvl skol_info skol_tvs given wanted
 The exported functions are all defined as versions of some
 non-exported generic functions.
 -}
-
--- | Unify two types, discarding a resultant coercion. Any constraints
--- generated will still need to be solved, however.
-unifyType_ :: Outputable a => Maybe a  -- ^ If present, has type 'ty1'
-           -> TcTauType -> TcTauType -> TcM ()
-unifyType_ thing ty1 ty2 = void $ unifyType thing ty1 ty2
 
 unifyType :: Outputable a => Maybe a   -- ^ If present, has type 'ty1'
           -> TcTauType -> TcTauType -> TcM TcCoercionN
@@ -1155,7 +1150,7 @@ uType origin t_or_k orig_ty1 orig_ty2
            ; return (mkCoherenceRightCo co_tys co2) }
 
         -- Functions (or predicate functions) just check the two parts
-    go (ForAllTy (Anon fun1) arg1) (ForAllTy (Anon fun2) arg2)
+    go (FunTy fun1 arg1) (FunTy fun2 arg2)
       = do { co_l <- uType origin t_or_k fun1 fun2
            ; co_r <- uType origin t_or_k arg1 arg2
            ; return $ mkFunCo Nominal co_l co_r }
@@ -1171,16 +1166,8 @@ uType origin t_or_k orig_ty1 orig_ty2
       -- See Note [Mismatched type lists and application decomposition]
       | tc1 == tc2, length tys1 == length tys2
       = ASSERT2( isGenerativeTyCon tc1 Nominal, ppr tc1 )
-        do { cos <- zipWith3M (uType origin) t_or_ks tys1 tys2
+        do { cos <- zipWithM (uType origin t_or_k) tys1 tys2
            ; return $ mkTyConAppCo Nominal tc1 cos }
-      where
-        bndrs      = tyConBinders tc1
-        t_or_ks    = case t_or_k of
-                       KindLevel -> repeat KindLevel
-                       TypeLevel -> map (\bndr -> if isNamedBinder bndr
-                                                  then KindLevel
-                                                  else TypeLevel) bndrs ++
-                                    repeat TypeLevel
 
     go (LitTy m) ty@(LitTy n)
       | m == n
@@ -1456,23 +1443,27 @@ checkTauTvUpdate dflags origin t_or_k tv ty
                              | otherwise    -> return (Just (ty2, co_k))
                    _                        -> return Nothing
             | otherwise   -> return (Just (ty, co_k)) }
+
   where
     kind_origin   = KindEqOrigin (mkTyVarTy tv) (Just ty) origin (Just t_or_k)
     details       = tcTyVarDetails tv
     info          = mtv_info details
+
     impredicative = canUnifyWithPolyType dflags details
 
     defer_me :: TcType -> Bool
     -- Checks for (a) occurrence of tv
     --            (b) type family applications
     --            (c) foralls
-    -- See Note [Conservative unification check]
+    -- See Note [Prevent unification with type families]
+    -- See Note [Refactoring hazard: checkTauTvUpdate]
     defer_me (LitTy {})        = False
-    defer_me (TyVarTy tv')     = tv == tv'
+    defer_me (TyVarTy tv')     = tv == tv' || defer_me (tyVarKind tv')
     defer_me (TyConApp tc tys) = isTypeFamilyTyCon tc || any defer_me tys
                                  || not (impredicative || isTauTyCon tc)
-    defer_me (ForAllTy bndr t) = defer_me (binderType bndr) || defer_me t
-                                 || (isNamedBinder bndr && not impredicative)
+    defer_me (ForAllTy bndr t) = defer_me (binderKind bndr) || defer_me t
+                                 || not impredicative
+    defer_me (FunTy fun arg)   = defer_me fun || defer_me arg
     defer_me (AppTy fun arg)   = defer_me fun || defer_me arg
     defer_me (CastTy ty co)    = defer_me ty || defer_me_co co
     defer_me (CoercionTy co)   = defer_me_co co
@@ -1482,39 +1473,54 @@ checkTauTvUpdate dflags origin t_or_k tv ty
     defer_me_co co = tv `elemVarSet` tyCoVarsOfCo co
 
 {-
-Note [Conservative unification check]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-When unifying (tv ~ rhs), w try to avoid creating deferred constraints
-only for efficiency.  However, we do not unify (the defer_me check) if
-  a) There's an occurs check (tv is in fvs(rhs))
-  b) There's a type-function call in 'rhs'
+Note [Prevent unification with type families]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We prevent unification with type families because of an uneasy compromise.
+It's perfectly sound to unify with type families, and it even improves the
+error messages in the testsuite. It also modestly improves performance, at
+least in some cases. But it's disastrous for test case perf/compiler/T3064.
+Here is the problem: Suppose we have (F ty) where we also have [G] F ty ~ a.
+What do we do? Do we reduce F? Or do we use the given? Hard to know what's
+best. GHC reduces. This is a disaster for T3064, where the type's size
+spirals out of control during reduction. (We're not helped by the fact that
+the flattener re-flattens all the arguments every time around.) If we prevent
+unification with type families, then the solver happens to use the equality
+before expanding the type family.
 
-If we fail defer_me we use occurCheckExpand to try to make it pass,
-(see Note [Type synonyms and the occur check]) and then use defer_me
-again to check.  Example: Trac #4917)
-       a ~ Const a b
-where type Const a b = a.  We can solve this immediately, even when
-'a' is a skolem, just by expanding the synonym.
+It would be lovely in the future to revisit this problem and remove this
+extra, unnecessary check. But we retain it for now as it seems to work
+better in practice.
 
-We always defer type-function calls, even if it's be perfectly safe to
-unify, eg (a ~ F [b]).  Reason: this ensures that the constraint
-solver gets to see, and hence simplify the type-function call, which
-in turn might simplify the type of an inferred function.  Test ghci046
-is a case in point.
+Note [Refactoring hazard: checkTauTvUpdate]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+I (Richard E.) have a sad story about refactoring this code, retained here
+to prevent others (or a future me!) from falling into the same traps.
 
-More mysteriously, test T7010 gave a horrible error
-  T7010.hs:29:21:
-    Couldn't match type `Serial (ValueTuple Float)' with `IO Float'
-    Expected type: (ValueTuple Vector, ValueTuple Vector)
-      Actual type: (ValueTuple Vector, ValueTuple Vector)
-because an insoluble type function constraint got mixed up with
-a soluble one when flattening.  I never fully understood this, but
-deferring type-function applications made it go away :-(.
-T5853 also got a less-good error message with more aggressive
-unification of type functions.
+It all started with #11407, which was caused by the fact that the TyVarTy
+case of defer_me didn't look in the kind. But it seemed reasonable to
+simply remove the defer_me check instead.
 
-Moreover the Note [Type family sharing] gives another reason, but
-again I'm not sure if it's really valid.
+It referred to two Notes (since removed) that were out of date, and the
+fast_check code in occurCheckExpand seemed to do just about the same thing as
+defer_me. The one piece that defer_me did that wasn't repeated by
+occurCheckExpand was the type-family check. (See Note [Prevent unification
+with type families].) So I checked the result of occurCheckExpand for any
+type family occurrences and deferred if there were any. This was done
+in commit e9bf7bb5cc9fb3f87dd05111aa23da76b86a8967 .
+
+This approach turned out not to be performant, because the expanded type
+was bigger than the original type, and tyConsOfType looks through type
+synonyms. So it then struck me that we could dispense with the defer_me
+check entirely. This simplified the code nicely, and it cut the allocations
+in T5030 by half. But, as documented in Note [Prevent unification with
+type families], this destroyed performance in T3064. Regardless, I missed this
+regression and the change was committed as
+3f5d1a13f112f34d992f6b74656d64d95a3f506d .
+
+Bottom lines:
+ * defer_me is back, but now fixed w.r.t. #11407.
+ * Tread carefully before you start to refactor here. There can be
+   lots of hard-to-predict consequences.
 
 Note [Type synonyms and the occur check]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1540,41 +1546,6 @@ the underlying definition of the type synonym.
 
 The same applies later on in the constraint interaction code; see TcInteract,
 function @occ_check_ok@.
-
-Note [Type family sharing]
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-We must avoid eagerly unifying type variables to types that contain function symbols,
-because this may lead to loss of sharing, and in turn, in very poor performance of the
-constraint simplifier. Assume that we have a wanted constraint:
-{
-  m1 ~ [F m2],
-  m2 ~ [F m3],
-  m3 ~ [F m4],
-  D m1,
-  D m2,
-  D m3
-}
-where D is some type class. If we eagerly unify m1 := [F m2], m2 := [F m3], m3 := [F m4],
-then, after zonking, our constraint simplifier will be faced with the following wanted
-constraint:
-{
-  D [F [F [F m4]]],
-  D [F [F m4]],
-  D [F m4]
-}
-which has to be flattened by the constraint solver. In the absence of
-a flat-cache, this may generate a polynomially larger number of
-flatten skolems and the constraint sets we are working with will be
-polynomially larger.
-
-Instead, if we defer the unifications m1 := [F m2], etc. we will only
-be generating three flatten skolems, which is the maximum possible
-sharing arising from the original constraint.  That's why we used to
-use a local "ok" function, a variant of TcType.occurCheckExpand.
-
-HOWEVER, we *do* now have a flat-cache, which effectively recovers the
-sharing, so there's no great harm in losing it -- and it's generally
-more efficient to do the unification up-front.
 
 Note [Non-TcTyVars in TcUnify]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1663,10 +1634,8 @@ matchExpectedFunKind num_args_remaining ty = go
                 Indirect fun_kind -> go fun_kind
                 Flexi ->             defer k }
 
-    go k@(ForAllTy (Anon arg) res)
-      = return (mkNomReflCo k, arg, res)
-
-    go other = defer other
+    go k@(FunTy arg res) = return (mkNomReflCo k, arg, res)
+    go other             = defer other
 
     defer k
       = do { arg_kind <- newMetaKindVar

@@ -61,7 +61,8 @@ import IfaceEnv   ( newInteractiveBinder )
 import FamInstEnv ( FamInst )
 import CoreFVs    ( orphNamesOfFamInst )
 import TyCon
-import Type     hiding( typeKind )
+import Type             hiding( typeKind )
+import RepType
 import TcType           hiding( typeKind )
 import Var
 import Id
@@ -80,7 +81,6 @@ import MonadUtils
 import Module
 import PrelNames  ( toDynName, pretendNameIsInScope )
 import Panic
-import UniqFM
 import Maybes
 import ErrUtils
 import SrcLoc
@@ -118,7 +118,7 @@ getHistoryModule = breakInfo_module . historyBreakInfo
 getHistorySpan :: HscEnv -> History -> SrcSpan
 getHistorySpan hsc_env History{..} =
   let BreakInfo{..} = historyBreakInfo in
-  case lookupUFM (hsc_HPT hsc_env) (moduleName breakInfo_module) of
+  case lookupHpt (hsc_HPT hsc_env) (moduleName breakInfo_module) of
     Just hmi -> modBreaks_locs (getModBreaks hmi) ! breakInfo_number
     _ -> panic "getHistorySpan"
 
@@ -137,7 +137,7 @@ getModBreaks hmi
 findEnclosingDecls :: HscEnv -> BreakInfo -> [String]
 findEnclosingDecls hsc_env (BreakInfo modl ix) =
    let hmi = expectJust "findEnclosingDecls" $
-             lookupUFM (hsc_HPT hsc_env) (moduleName modl)
+             lookupHpt (hsc_HPT hsc_env) (moduleName modl)
        mb = getModBreaks hmi
    in modBreaks_decls mb ! ix
 
@@ -246,7 +246,7 @@ runDeclsWithLocation source linenumber expr =
     setSession $ hsc_env { hsc_IC = ic }
     hsc_env <- getSession
     hsc_env' <- liftIO $ rttiEnvironment hsc_env
-    modifySession (\_ -> hsc_env')
+    setSession hsc_env'
     return $ filter (not . isDerivedOccName . nameOccName)
              -- For this filter, see Note [What to show to users]
            $ map getName tyThings
@@ -308,7 +308,8 @@ handleRunStatus step expr bindings final_ids status history
     = do
        hsc_env <- getSession
        let hmi = expectJust "handleRunStatus" $
-                   lookupUFM (hsc_HPT hsc_env) (mkUniqueGrimily mod_uniq)
+                   lookupHptDirectly (hsc_HPT hsc_env)
+                                     (mkUniqueGrimily mod_uniq)
            modl = mi_module (hm_iface hmi)
            breaks = getModBreaks hmi
 
@@ -338,7 +339,8 @@ handleRunStatus step expr bindings final_ids status history
          resume_ctxt_fhv <- liftIO $ mkFinalizedHValue hsc_env resume_ctxt
          apStack_fhv <- liftIO $ mkFinalizedHValue hsc_env apStack_ref
          let hmi = expectJust "handleRunStatus" $
-                     lookupUFM (hsc_HPT hsc_env) (mkUniqueGrimily mod_uniq)
+                     lookupHptDirectly (hsc_HPT hsc_env)
+                                       (mkUniqueGrimily mod_uniq)
              modl = mi_module (hm_iface hmi)
              bp | is_exception = Nothing
                 | otherwise = Just (BreakInfo modl ix)
@@ -356,7 +358,7 @@ handleRunStatus step expr bindings final_ids status history
              , resumeHistoryIx = 0 }
            hsc_env2 = pushResume hsc_env1 resume
 
-         modifySession (\_ -> hsc_env2)
+         setSession hsc_env2
          return (ExecBreak names bp)
 
     -- Completed successfully
@@ -366,7 +368,7 @@ handleRunStatus step expr bindings final_ids status history
              final_names = map getName final_ids
          liftIO $ Linker.extendLinkEnv (zip final_names hvals)
          hsc_env' <- liftIO $ rttiEnvironment hsc_env{hsc_IC=final_ic}
-         modifySession (\_ -> hsc_env')
+         setSession hsc_env'
          return (ExecComplete (Right final_names) allocs)
 
     -- Completed with an exception
@@ -398,12 +400,14 @@ resumeExec canLogSpan step
             ic' = ic { ic_tythings = resume_tmp_te,
                        ic_rn_gbl_env = resume_rdr_env,
                        ic_resume   = rs }
-        modifySession (\_ -> hsc_env{ hsc_IC = ic' })
+        setSession hsc_env{ hsc_IC = ic' }
 
         -- remove any bindings created since the breakpoint from the
         -- linker's environment
-        let new_names = map getName (filter (`notElem` resume_tmp_te)
-                                           (ic_tythings ic))
+        let old_names = map getName resume_tmp_te
+            new_names = [ n | thing <- ic_tythings ic
+                            , let n = getName thing
+                            , not (n `elem` old_names) ]
         liftIO $ Linker.deleteFromLinkEnv new_names
 
         case r of
@@ -453,7 +457,7 @@ moveHist fn = do
                 r' = r { resumeHistoryIx = new_ix }
                 ic' = ic { ic_resume = r':rs }
 
-            modifySession (\_ -> hsc_env1{ hsc_IC = ic' })
+            setSession hsc_env1{ hsc_IC = ic' }
 
             return (names, new_ix, span, decl)
 
@@ -507,7 +511,7 @@ bindLocalsAtBreakpoint hsc_env apStack Nothing = do
 bindLocalsAtBreakpoint hsc_env apStack_fhv (Just BreakInfo{..}) = do
    let
        hmi       = expectJust "bindLocalsAtBreakpoint" $
-                     lookupUFM (hsc_HPT hsc_env) (moduleName breakInfo_module)
+                     lookupHpt (hsc_HPT hsc_env) (moduleName breakInfo_module)
        breaks    = getModBreaks hmi
        info      = expectJust "bindLocalsAtBreakpoint2" $
                      IntMap.lookup breakInfo_number (modBreaks_breakInfo breaks)
@@ -526,8 +530,7 @@ bindLocalsAtBreakpoint hsc_env apStack_fhv (Just BreakInfo{..}) = do
 
        (ids, offsets) = unzip pointers
 
-       free_tvs = mapUnionVarSet (tyCoVarsOfType . idType) ids
-                  `unionVarSet` tyCoVarsOfType result_ty
+       free_tvs = tyCoVarsOfTypesList (result_ty:map idType ids)
 
    -- It might be that getIdValFromApStack fails, because the AP_STACK
    -- has been accidentally evaluated, or something else has gone wrong.
@@ -573,12 +576,12 @@ bindLocalsAtBreakpoint hsc_env apStack_fhv (Just BreakInfo{..}) = do
      = do { name <- newInteractiveBinder hsc_env occ (getSrcSpan old_id)
           ; return (Id.mkVanillaGlobalWithInfo name ty (idInfo old_id)) }
 
-   newTyVars :: UniqSupply -> TcTyVarSet -> TCvSubst
+   newTyVars :: UniqSupply -> [TcTyVar] -> TCvSubst
      -- Similarly, clone the type variables mentioned in the types
-     -- we have here, *and* make them all RuntimeUnk tyars
+     -- we have here, *and* make them all RuntimeUnk tyvars
    newTyVars us tvs
      = mkTvSubstPrs [ (tv, mkTyVarTy (mkRuntimeUnkTyVar name (tyVarKind tv)))
-                    | (tv, uniq) <- varSetElems tvs `zip` uniqsFromSupply us
+                    | (tv, uniq) <- tvs `zip` uniqsFromSupply us
                     , let name = setNameUnique (tyVarName tv) uniq ]
 
 rttiEnvironment :: HscEnv -> IO HscEnv
@@ -633,7 +636,7 @@ abandon = do
    case resume of
       []    -> return False
       r:rs  -> do
-         modifySession $ \_ -> hsc_env{ hsc_IC = ic { ic_resume = rs } }
+         setSession hsc_env{ hsc_IC = ic { ic_resume = rs } }
          liftIO $ abandonStmt hsc_env (resumeContext r)
          return True
 
@@ -645,7 +648,7 @@ abandonAll = do
    case resume of
       []  -> return False
       rs  -> do
-         modifySession $ \_ -> hsc_env{ hsc_IC = ic { ic_resume = [] } }
+         setSession hsc_env{ hsc_IC = ic { ic_resume = [] } }
          liftIO $ mapM_ (abandonStmt hsc_env. resumeContext) rs
          return True
 
@@ -696,7 +699,7 @@ setContext imports
            Right all_env -> do {
        ; let old_ic         = hsc_IC hsc_env
              !final_rdr_env = all_env `icExtendGblRdrEnv` ic_tythings old_ic
-       ; modifySession $ \_ ->
+       ; setSession
          hsc_env{ hsc_IC = old_ic { ic_imports    = imports
                                   , ic_rn_gbl_env = final_rdr_env }}}}
   where
@@ -737,7 +740,7 @@ availsToGlobalRdrEnv mod_name avails
 
 mkTopLevEnv :: HomePackageTable -> ModuleName -> Either String GlobalRdrEnv
 mkTopLevEnv hpt modl
-  = case lookupUFM hpt modl of
+  = case lookupHpt hpt modl of
       Nothing -> Left "not a home module"
       Just details ->
          case mi_globals (hm_iface details) of
@@ -757,7 +760,7 @@ moduleIsInterpreted :: GhcMonad m => Module -> m Bool
 moduleIsInterpreted modl = withSession $ \h ->
  if moduleUnitId modl /= thisPackage (hsc_dflags h)
         then return False
-        else case lookupUFM (hsc_HPT h) (moduleName modl) of
+        else case lookupHpt (hsc_HPT h) (moduleName modl) of
                 Just details       -> return (isJust (mi_globals (hm_iface details)))
                 _not_a_home_module -> return False
 
@@ -784,15 +787,14 @@ getInfo allInfo name
     plausible rdr_env names
           -- Dfun involving only names that are in ic_rn_glb_env
         = allInfo
-       || all ok (nameSetElems names)
+       || nameSetAll ok names
         where   -- A name is ok if it's in the rdr_env,
                 -- whether qualified or not
           ok n | n == name              = True
                        -- The one we looked for in the first place!
                | pretendNameIsInScope n = True
                | isBuiltInSyntax n      = True
-               | isExternalName n       = any ((== n) . gre_name)
-                                              (lookupGRE_Name rdr_env n)
+               | isExternalName n       = isJust (lookupGRE_Name rdr_env n)
                | otherwise              = True
 
 -- | Returns all names in scope in the current interactive context
@@ -863,10 +865,10 @@ parseThing parser dflags stmt = do
 -- Getting the type of an expression
 
 -- | Get the type of an expression
--- Returns its most general type
-exprType :: GhcMonad m => String -> m Type
-exprType expr = withSession $ \hsc_env -> do
-   ty <- liftIO $ hscTcExpr hsc_env expr
+-- Returns the type as described by 'TcRnExprMode'
+exprType :: GhcMonad m => TcRnExprMode -> String -> m Type
+exprType mode expr = withSession $ \hsc_env -> do
+   ty <- liftIO $ hscTcExpr hsc_env mode expr
    return $ tidyType emptyTidyEnv ty
 
 -- -----------------------------------------------------------------------------
@@ -949,7 +951,7 @@ showModule mod_summary =
 
 isModuleInterpreted :: GhcMonad m => ModSummary -> m Bool
 isModuleInterpreted mod_summary = withSession $ \hsc_env ->
-  case lookupUFM (hsc_HPT hsc_env) (ms_mod_name mod_summary) of
+  case lookupHpt (hsc_HPT hsc_env) (ms_mod_name mod_summary) of
         Nothing       -> panic "missing linkable"
         Just mod_info -> return (not obj_linkable)
                       where

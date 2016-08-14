@@ -3,7 +3,7 @@
 module TcCanonical(
      canonicalize,
      unifyDerived,
-     makeSuperClasses, mkGivensWithSuperClasses,
+     makeSuperClasses,
      StopOrContinue(..), stopWith, continueWith
   ) where
 
@@ -23,7 +23,6 @@ import FamInstEnv ( FamInstEnvs )
 import FamInst ( tcTopNormaliseNewTypeTF_maybe )
 import Var
 import Name( isSystemName )
-import OccName( OccName )
 import Outputable
 import DynFlags( DynFlags )
 import VarSet
@@ -164,8 +163,8 @@ canonicalize (CFunEqCan { cc_ev = ev
 
 canonicalize (CIrredEvCan { cc_ev = ev })
   = canIrred ev
-canonicalize (CHoleCan { cc_ev = ev, cc_occ = occ, cc_hole = hole })
-  = canHole ev occ hole
+canonicalize (CHoleCan { cc_ev = ev, cc_hole = hole })
+  = canHole ev hole
 
 canEvNC :: CtEvidence -> TcS (StopOrContinue Ct)
 -- Called only for non-canonical EvVars
@@ -186,12 +185,23 @@ canEvNC ev
 -}
 
 canClassNC :: CtEvidence -> Class -> [Type] -> TcS (StopOrContinue Ct)
+-- "NC" means "non-canonical"; that is, we have got here
+-- from a NonCanonical constrataint, not from a CDictCan
 -- Precondition: EvVar is class evidence
-canClassNC ev cls tys = canClass ev cls tys (has_scs cls)
+canClassNC ev cls tys
+  | isGiven ev  -- See Note [Eagerly expand given superclasses]
+  = do { sc_cts <- mkStrictSuperClasses ev cls tys
+       ; emitWork sc_cts
+       ; canClass ev cls tys False }
+  | otherwise
+  = canClass ev cls tys (has_scs cls)
   where
     has_scs cls = not (null (classSCTheta cls))
 
-canClass :: CtEvidence -> Class -> [Type] -> Bool -> TcS (StopOrContinue Ct)
+canClass :: CtEvidence
+         -> Class -> [Type]
+         -> Bool            -- True <=> un-explored superclasses
+         -> TcS (StopOrContinue Ct)
 -- Precondition: EvVar is class evidence
 
 canClass ev cls tys pend_sc
@@ -250,15 +260,24 @@ Givens and Wanteds. But:
 
 So here's the plan:
 
-1. Generate superclasses for given (but not wanted) constraints;
-   see Note [Aggressively expand given superclasses].  However
-   stop if you encounter the same class twice.  That is, expand
-   eagerly, but have a conservative termination condition: see
+1. Eagerly generate superclasses for given (but not wanted)
+   constraints; see Note [Eagerly expand given superclasses].
+   This is done in canClassNC, when we take a non-canonical constraint
+   and cannonicalise it.
+
+   However stop if you encounter the same class twice.  That is,
+   expand eagerly, but have a conservative termination condition: see
    Note [Expanding superclasses] in TcType.
 
-2. Solve the wanteds as usual, but do /no/ expansion of superclasses
-   in solveSimpleGivens or solveSimpleWanteds.
-   See Note [Danger of adding superclasses during solving]
+2. Solve the wanteds as usual, but do no further expansion of
+   superclasses for canonical CDictCans in solveSimpleGivens or
+   solveSimpleWanteds; Note [Danger of adding superclasses during solving]
+
+   However, /do/ continue to eagerly expand superlasses for /given/
+   non-canonical constraints (canClassNC does this).  As Trac #12175
+   showed, a type-family application can expand to a class constraint,
+   and we want to see its superclasses for just the same reason as
+   Note [Eagerly expand given superclasses].
 
 3. If we have any remaining unsolved wanteds
         (see Note [When superclasses help] in TcRnTypes)
@@ -279,11 +298,11 @@ isPendingScDict holds).
 When we take a CNonCanonical or CIrredCan, but end up classifying it
 as a CDictCan, we set the cc_pend_sc flag to False.
 
-Note [Aggressively expand given superclasses]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-In step (1) of Note [The superclass story], why do we aggressively
-expand Given superclasses by one layer?  Mainly because of some very
-obscure cases like this:
+Note [Eagerly expand given superclasses]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In step (1) of Note [The superclass story], why do we eagerly expand
+Given superclasses by one layer?  Mainly because of some very obscure
+cases like this:
 
    instance Bad a => Eq (T a)
 
@@ -294,6 +313,19 @@ Here if we can't satisfy (Eq (T a)) from the givens we'll use the
 instance declaration; but then we are stuck with (Bad a).  Sigh.
 This is really a case of non-confluent proofs, but to stop our users
 complaining we expand one layer in advance.
+
+Note [Instance and Given overlap] in TcInteract.
+
+We also want to do this if we have
+
+   f :: F (T a) => blah
+
+where
+   type instance F (T a) = Ord (T a)
+
+So we may need to do a little work on the givens to expose the
+class that has the superclasses.  That's why the superclass
+expansion for Givens happens in canClassNC.
 
 Note [Why adding superclasses can help]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -362,23 +394,6 @@ Mind you, now that Wanteds cannot rewrite Derived, I think this particular
 situation can't happen.
   -}
 
-mkGivensWithSuperClasses :: CtLoc -> [EvId] -> TcS [Ct]
--- From a given EvId, make its Ct, plus the Ct's of its superclasses
--- See Note [The superclass story]
--- The loop-breaking here follows Note [Expanding superclasses] in TcType
---
--- Example:  class D a => C a
---           class C [a] => D a
--- makeGivensWithSuperClasses (C x) will return (C x, D x, C[x])
---   i.e. up to and including the first repetition of C
-mkGivensWithSuperClasses loc ev_ids = concatMapM go ev_ids
-  where
-    go ev_id = mk_superclasses emptyNameSet this_ev
-       where
-         this_ev = CtGiven { ctev_evar = ev_id
-                           , ctev_pred = evVarPred ev_id
-                           , ctev_loc = loc }
-
 makeSuperClasses :: [Ct] -> TcS [Ct]
 -- Returns strict superclasses, transitively, see Note [The superclasses story]
 -- See Note [The superclass story]
@@ -396,8 +411,13 @@ makeSuperClasses :: [Ct] -> TcS [Ct]
 makeSuperClasses cts = concatMapM go cts
   where
     go (CDictCan { cc_ev = ev, cc_class = cls, cc_tyargs = tys })
-          = mk_strict_superclasses (unitNameSet (className cls)) ev cls tys
+          = mkStrictSuperClasses ev cls tys
     go ct = pprPanic "makeSuperClasses" (ppr ct)
+
+mkStrictSuperClasses :: CtEvidence -> Class -> [Type] -> TcS [Ct]
+-- Return constraints for the strict superclasses of (c tys)
+mkStrictSuperClasses ev cls tys
+  = mk_strict_superclasses (unitNameSet (className cls)) ev cls tys
 
 mk_superclasses :: NameSet -> CtEvidence -> TcS [Ct]
 -- Return this constraint, plus its superclasses, if any
@@ -487,14 +507,13 @@ canIrred old_ev
            _                     -> continueWith $
                                     CIrredEvCan { cc_ev = new_ev } } }
 
-canHole :: CtEvidence -> OccName -> HoleSort -> TcS (StopOrContinue Ct)
-canHole ev occ hole_sort
+canHole :: CtEvidence -> Hole -> TcS (StopOrContinue Ct)
+canHole ev hole
   = do { let ty = ctEvPred ev
        ; (xi,co) <- flatten FM_SubstOnly ev ty -- co :: xi ~ ty
        ; rewriteEvidence ev xi co `andWhenContinue` \ new_ev ->
     do { emitInsoluble (CHoleCan { cc_ev = new_ev
-                                 , cc_occ = occ
-                                 , cc_hole = hole_sort })
+                                 , cc_hole = hole })
        ; stopWith new_ev "Emit insoluble hole" } }
 
 {-
@@ -534,7 +553,7 @@ can_eq_nc
    -> TcS (StopOrContinue Ct)
 can_eq_nc flat ev eq_rel ty1 ps_ty1 ty2 ps_ty2
   = do { traceTcS "can_eq_nc" $
-         vcat [ ppr ev, ppr eq_rel, ppr ty1, ppr ps_ty1, ppr ty2, ppr ps_ty2 ]
+         vcat [ ppr flat, ppr ev, ppr eq_rel, ppr ty1, ppr ps_ty1, ppr ty2, ppr ps_ty2 ]
        ; rdr_env <- getGlobalRdrEnvTcS
        ; fam_insts <- getFamInstEnvs
        ; can_eq_nc' flat rdr_env fam_insts ev eq_rel ty1 ps_ty1 ty2 ps_ty2 }
@@ -559,16 +578,16 @@ can_eq_nc' flat _rdr_env _envs ev eq_rel ty1 ps_ty1 ty2 ps_ty2
 -- Check only when flat because the zonk_eq_types check in canEqNC takes
 -- care of the non-flat case.
 can_eq_nc' True _rdr_env _envs ev ReprEq ty1 _ ty2 _
-  | ty1 `eqType` ty2
+  | ty1 `tcEqType` ty2
   = canEqReflexive ev ReprEq ty1
 
 -- When working with ReprEq, unwrap newtypes.
 can_eq_nc' _flat rdr_env envs ev ReprEq ty1 _ ty2 ps_ty2
-  | Just (co, ty1') <- tcTopNormaliseNewTypeTF_maybe envs rdr_env ty1
-  = can_eq_newtype_nc rdr_env ev NotSwapped co ty1 ty1' ty2 ps_ty2
+  | Just stuff1 <- tcTopNormaliseNewTypeTF_maybe envs rdr_env ty1
+  = can_eq_newtype_nc ev NotSwapped ty1 stuff1 ty2 ps_ty2
 can_eq_nc' _flat rdr_env envs ev ReprEq ty1 ps_ty1 ty2 _
-  | Just (co, ty2') <- tcTopNormaliseNewTypeTF_maybe envs rdr_env ty2
-  = can_eq_newtype_nc rdr_env ev IsSwapped  co ty2 ty2' ty1 ps_ty1
+  | Just stuff2 <- tcTopNormaliseNewTypeTF_maybe envs rdr_env ty2
+  = can_eq_newtype_nc ev IsSwapped  ty2 stuff2 ty1 ps_ty1
 
 -- Then, get rid of casts
 can_eq_nc' flat _rdr_env _envs ev eq_rel (CastTy ty1 co1) _ ty2 ps_ty2
@@ -596,17 +615,20 @@ can_eq_nc' _flat _rdr_env _envs ev eq_rel ty1 _ ty2 _
   = canTyConApp ev eq_rel tc1 tys1 tc2 tys2
 
 can_eq_nc' _flat _rdr_env _envs ev eq_rel
-           s1@(ForAllTy (Named {}) _) _ s2@(ForAllTy (Named {}) _) _
+           s1@(ForAllTy {}) _ s2@(ForAllTy {}) _
  | CtWanted { ctev_loc = loc, ctev_dest = orig_dest } <- ev
- = do { let (bndrs1,body1) = tcSplitNamedPiTys s1
-            (bndrs2,body2) = tcSplitNamedPiTys s2
+ = do { let (bndrs1,body1) = tcSplitForAllTyVarBndrs s1
+            (bndrs2,body2) = tcSplitForAllTyVarBndrs s2
       ; if not (equalLength bndrs1 bndrs2)
-           || not (map binderVisibility bndrs1 == map binderVisibility bndrs2)
-        then canEqHardFailure ev s1 s2
+        then do { traceTcS "Forall failure" $
+                     vcat [ ppr s1, ppr s2, ppr bndrs1, ppr bndrs2
+                          , ppr (map binderArgFlag bndrs1)
+                          , ppr (map binderArgFlag bndrs2) ]
+                ; canEqHardFailure ev s1 s2 }
         else
           do { traceTcS "Creating implication for polytype equality" $ ppr ev
              ; kind_cos <- zipWithM (unifyWanted loc Nominal)
-                             (map binderType bndrs1) (map binderType bndrs2)
+                             (map binderKind bndrs1) (map binderKind bndrs2)
              ; all_co <- deferTcSForAllEq (eqRelRole eq_rel) loc
                                            kind_cos (bndrs1,body1) (bndrs2,body2)
              ; setWantedEq orig_dest all_co
@@ -798,23 +820,21 @@ E.] am worried that it would slow down the common case.)
 
 ------------------------
 -- | We're able to unwrap a newtype. Update the bits accordingly.
-can_eq_newtype_nc :: GlobalRdrEnv
-                  -> CtEvidence           -- ^ :: ty1 ~ ty2
+can_eq_newtype_nc :: CtEvidence           -- ^ :: ty1 ~ ty2
                   -> SwapFlag
-                  -> TcCoercion           -- ^ :: ty1 ~ ty1'
-                  -> TcType               -- ^ ty1
-                  -> TcType               -- ^ ty1'
+                  -> TcType                                    -- ^ ty1
+                  -> ((Bag GlobalRdrElt, TcCoercion), TcType)  -- ^ :: ty1 ~ ty1'
                   -> TcType               -- ^ ty2
                   -> TcType               -- ^ ty2, with type synonyms
                   -> TcS (StopOrContinue Ct)
-can_eq_newtype_nc rdr_env ev swapped co ty1 ty1' ty2 ps_ty2
+can_eq_newtype_nc ev swapped ty1 ((gres, co), ty1') ty2 ps_ty2
   = do { traceTcS "can_eq_newtype_nc" $
-         vcat [ ppr ev, ppr swapped, ppr co, ppr ty1', ppr ty2 ]
+         vcat [ ppr ev, ppr swapped, ppr co, ppr gres, ppr ty1', ppr ty2 ]
 
          -- check for blowing our stack:
          -- See Note [Newtypes can blow the stack]
        ; checkReductionDepth (ctEvLoc ev) ty1
-       ; addUsedDataCons rdr_env (tyConAppTyCon ty1)
+       ; addUsedGREs (bagToList gres)
            -- we have actually used the newtype constructor here, so
            -- make sure we don't warn about importing it!
 
@@ -1137,7 +1157,7 @@ canDecomposableTyConAppOK ev eq_rel tc tys1 tys2
       -- in error messages
     bndrs      = tyConBinders tc
     kind_loc   = toKindLoc loc
-    is_kinds   = map isNamedBinder bndrs
+    is_kinds   = map isNamedTyConBinder bndrs
     new_locs | Just KindLevel <- ctLocTypeOrKind_maybe loc
              = repeat loc
              | otherwise
@@ -1505,7 +1525,7 @@ homogeniseRhsKind :: CtEvidence -- ^ the evidence to homogenise
                            -- the 'Xi' is the new RHS
                   -> TcS (StopOrContinue Ct)
 homogeniseRhsKind ev eq_rel lhs rhs build_ct
-  | k1 `eqType` k2
+  | k1 `tcEqType` k2
   = continueWith (build_ct ev rhs)
 
   | CtGiven { ctev_evar = evar } <- ev
@@ -1895,7 +1915,7 @@ unifyWanted loc role orig_ty1 orig_ty2
     go ty1 ty2 | Just ty1' <- coreView ty1 = go ty1' ty2
     go ty1 ty2 | Just ty2' <- coreView ty2 = go ty1 ty2'
 
-    go (ForAllTy (Anon s1) t1) (ForAllTy (Anon s2) t2)
+    go (FunTy s1 t1) (FunTy s2 t2)
       = do { co_s <- unifyWanted loc role s1 s2
            ; co_t <- unifyWanted loc role t1 t2
            ; return (mkTyConAppCo role funTyCon [co_s,co_t]) }
@@ -1944,7 +1964,7 @@ unify_derived loc role    orig_ty1 orig_ty2
     go ty1 ty2 | Just ty1' <- coreView ty1 = go ty1' ty2
     go ty1 ty2 | Just ty2' <- coreView ty2 = go ty1 ty2'
 
-    go (ForAllTy (Anon s1) t1) (ForAllTy (Anon s2) t2)
+    go (FunTy s1 t1) (FunTy s2 t2)
       = do { unify_derived loc role s1 s2
            ; unify_derived loc role t1 t2 }
     go (TyConApp tc1 tys1) (TyConApp tc2 tys2)

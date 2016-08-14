@@ -69,11 +69,13 @@ module HsTypes (
 
 import {-# SOURCE #-} HsExpr ( HsSplice, pprSplice )
 
-import PlaceHolder ( PostTc,PostRn,DataId,PlaceHolder(..) )
+import PlaceHolder ( PostTc,PostRn,DataId,PlaceHolder(..),
+                     OutputableBndrId )
 
 import Id ( Id )
 import Name( Name )
 import RdrName ( RdrName )
+import NameSet ( NameSet, emptyNameSet )
 import DataCon( HsSrcBang(..), HsImplBang(..),
                 SrcStrictness(..), SrcUnpackedness(..) )
 import TysPrim( funTyConName )
@@ -246,23 +248,26 @@ data LHsQTyVars name   -- See Note [HsType binders]
   = HsQTvs { hsq_implicit :: PostRn name [Name]      -- implicit (dependent) variables
            , hsq_explicit :: [LHsTyVarBndr name]     -- explicit variables
              -- See Note [HsForAllTy tyvar binders]
+           , hsq_dependent :: PostRn name NameSet
+               -- which explicit vars are dependent
+               -- See Note [Dependent LHsQTyVars] in TcHsType
     }
-  deriving( Typeable )
 
 deriving instance (DataId name) => Data (LHsQTyVars name)
 
 mkHsQTvs :: [LHsTyVarBndr RdrName] -> LHsQTyVars RdrName
-mkHsQTvs tvs = HsQTvs { hsq_implicit = PlaceHolder, hsq_explicit = tvs }
+mkHsQTvs tvs = HsQTvs { hsq_implicit = PlaceHolder, hsq_explicit = tvs
+                      , hsq_dependent = PlaceHolder }
 
 hsQTvExplicit :: LHsQTyVars name -> [LHsTyVarBndr name]
 hsQTvExplicit = hsq_explicit
 
 emptyLHsQTvs :: LHsQTyVars Name
-emptyLHsQTvs = HsQTvs [] []
+emptyLHsQTvs = HsQTvs [] [] emptyNameSet
 
 isEmptyLHsQTvs :: LHsQTyVars Name -> Bool
-isEmptyLHsQTvs (HsQTvs [] []) = True
-isEmptyLHsQTvs _              = False
+isEmptyLHsQTvs (HsQTvs [] [] _) = True
+isEmptyLHsQTvs _                = False
 
 ------------------------------------------------
 --            HsImplicitBndrs
@@ -277,25 +282,19 @@ data HsImplicitBndrs name thing   -- See Note [HsType binders]
   = HsIB { hsib_vars :: PostRn name [Name] -- Implicitly-bound kind & type vars
          , hsib_body :: thing              -- Main payload (type or list of types)
     }
-  deriving (Typeable)
 
 data HsWildCardBndrs name thing
     -- See Note [HsType binders]
     -- See Note [The wildcard story for types]
   = HsWC { hswc_wcs :: PostRn name [Name]
                 -- Wild cards, both named and anonymous
+                -- after the renamer
 
-         , hswc_ctx :: Maybe SrcSpan
-                -- Indicates whether hswc_body has an
-                -- extra-constraint wildcard, and if so where
-                --    e.g.  (Eq a, _) => a -> a
-                -- NB: the wildcard stays in HsQualTy inside the type!
-                -- So for pretty printing purposes you can ignore
-                -- hswc_ctx
-
-         , hswc_body :: thing  -- Main payload (type or list of types)
+         , hswc_body :: thing
+                -- Main payload (type or list of types)
+                -- If there is an extra-constraints wildcard,
+                -- it's still there in the hsc_body.
     }
-  deriving( Typeable )
 
 deriving instance (Data name, Data thing, Data (PostRn name [Name]))
   => Data (HsImplicitBndrs name thing)
@@ -305,7 +304,7 @@ deriving instance (Data name, Data thing, Data (PostRn name [Name]))
 
 type LHsSigType   name = HsImplicitBndrs name (LHsType name)    -- Implicit only
 type LHsWcType    name = HsWildCardBndrs name (LHsType name)    -- Wildcard only
-type LHsSigWcType name = HsImplicitBndrs name (LHsWcType name)  -- Both
+type LHsSigWcType name = HsWildCardBndrs name (LHsSigType name) -- Both
 
 -- See Note [Representing type signatures]
 
@@ -316,11 +315,11 @@ hsSigType :: LHsSigType name -> LHsType name
 hsSigType = hsImplicitBody
 
 hsSigWcType :: LHsSigWcType name -> LHsType name
-hsSigWcType sig_ty = hswc_body (hsib_body sig_ty)
+hsSigWcType sig_ty = hsib_body (hswc_body sig_ty)
 
 dropWildCards :: LHsSigWcType name -> LHsSigType name
 -- Drop the wildcard part of a LHsSigWcType
-dropWildCards sig_ty = sig_ty { hsib_body = hsSigWcType sig_ty }
+dropWildCards sig_ty = hswc_body sig_ty
 
 {- Note [Representing type signatures]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -348,8 +347,7 @@ mkHsImplicitBndrs x = HsIB { hsib_body = x
 
 mkHsWildCardBndrs :: thing -> HsWildCardBndrs RdrName thing
 mkHsWildCardBndrs x = HsWC { hswc_body = x
-                           , hswc_wcs  = PlaceHolder
-                           , hswc_ctx  = Nothing }
+                           , hswc_wcs  = PlaceHolder }
 
 -- Add empty binders.  This is a bit suspicious; what if
 -- the wrapped thing had free type variables?
@@ -359,15 +357,14 @@ mkEmptyImplicitBndrs x = HsIB { hsib_body = x
 
 mkEmptyWildCardBndrs :: thing -> HsWildCardBndrs Name thing
 mkEmptyWildCardBndrs x = HsWC { hswc_body = x
-                              , hswc_wcs  = []
-                              , hswc_ctx  = Nothing }
+                              , hswc_wcs  = [] }
 
 
 --------------------------------------------------
 -- | These names are used early on to store the names of implicit
 -- parameters.  They completely disappear after type-checking.
 newtype HsIPName = HsIPName FastString
-  deriving( Eq, Data, Typeable )
+  deriving( Eq, Data )
 
 hsIPNameFS :: HsIPName -> FastString
 hsIPNameFS (HsIPName n) = n
@@ -393,7 +390,6 @@ data HsTyVarBndr name
         --          'ApiAnnotation.AnnDcolon', 'ApiAnnotation.AnnClose'
 
         -- For details on above see note [Api annotations] in ApiAnnotation
-  deriving (Typeable)
 deriving instance (DataId name) => Data (HsTyVarBndr name)
 
 -- | Does this 'HsTyVarBndr' come with an explicit kind annotation?
@@ -458,6 +454,12 @@ data HsType name
                         [LHsType name]  -- Element types (length gives arity)
     -- ^ - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnOpen' @'(' or '(#'@,
     --         'ApiAnnotation.AnnClose' @')' or '#)'@
+
+    -- For details on above see note [Api annotations] in ApiAnnotation
+
+  | HsSumTy             [LHsType name]  -- Element types (length gives arity)
+    -- ^ - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnOpen' @'(#'@,
+    --         'ApiAnnotation.AnnClose' '#)'@
 
     -- For details on above see note [Api annotations] in ApiAnnotation
 
@@ -560,7 +562,6 @@ data HsType name
       -- ^ - 'ApiAnnotation.AnnKeywordId' : None
 
       -- For details on above see note [Api annotations] in ApiAnnotation
-  deriving (Typeable)
 deriving instance (DataId name) => Data (HsType name)
 
 -- Note [Literal source text] in BasicTypes for SourceText fields in
@@ -568,13 +569,12 @@ deriving instance (DataId name) => Data (HsType name)
 data HsTyLit
   = HsNumTy SourceText Integer
   | HsStrTy SourceText FastString
-    deriving (Data, Typeable)
+    deriving Data
 
 newtype HsWildCardInfo name      -- See Note [The wildcard story for types]
     = AnonWildCard (PostRn name (Located Name))
       -- A anonymous wild card ('_'). A fresh Name is generated for
       -- each individual anonymous wildcard during renaming
-    deriving (Typeable)
 deriving instance (DataId name) => Data (HsWildCardInfo name)
 
 type LHsAppType name = Located (HsAppType name)
@@ -583,10 +583,9 @@ type LHsAppType name = Located (HsAppType name)
 data HsAppType name
   = HsAppInfix (Located name)       -- either a symbol or an id in backticks
   | HsAppPrefix (LHsType name)      -- anything else, including things like (+)
-  deriving (Typeable)
 deriving instance (DataId name) => Data (HsAppType name)
 
-instance OutputableBndr name => Outputable (HsAppType name) where
+instance (OutputableBndrId name) => Outputable (HsAppType name) where
   ppr = ppr_app_ty TopPrec
 
 {-
@@ -700,7 +699,7 @@ data HsTupleSort = HsUnboxedTuple
                  | HsBoxedTuple
                  | HsConstraintTuple
                  | HsBoxedOrConstraintTuple
-                 deriving (Data, Typeable)
+                 deriving Data
 
 type LConDeclField name = Located (ConDeclField name)
       -- ^ May have 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnComma' when
@@ -715,10 +714,9 @@ data ConDeclField name  -- Record fields have Haddoc docs on them
       -- ^ - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnDcolon'
 
       -- For details on above see note [Api annotations] in ApiAnnotation
-  deriving (Typeable)
 deriving instance (DataId name) => Data (ConDeclField name)
 
-instance (OutputableBndr name) => Outputable (ConDeclField name) where
+instance (OutputableBndrId name) => Outputable (ConDeclField name) where
   ppr (ConDeclField fld_n fld_ty _) = ppr fld_n <+> dcolon <+> ppr fld_ty
 
 -- HsConDetails is used for patterns/expressions *and* for data type
@@ -727,7 +725,7 @@ data HsConDetails arg rec
   = PrefixCon [arg]             -- C p1 p2 p3
   | RecCon    rec               -- C { x = p1, y = p2 }
   | InfixCon  arg arg           -- p1 `C` p2
-  deriving (Data, Typeable)
+  deriving Data
 
 instance (Outputable arg, Outputable rec)
          => Outputable (HsConDetails arg rec) where
@@ -791,8 +789,8 @@ hsWcScopedTvs :: LHsSigWcType Name -> [Name]
 --  - the named wildcars; see Note [Scoping of named wildcards]
 -- because they scope in the same way
 hsWcScopedTvs sig_ty
-  | HsIB { hsib_vars = vars, hsib_body = sig_ty1 } <- sig_ty
-  , HsWC { hswc_wcs = nwcs, hswc_body = sig_ty2 } <- sig_ty1
+  | HsWC { hswc_wcs = nwcs, hswc_body = sig_ty1 }  <- sig_ty
+  , HsIB { hsib_vars = vars, hsib_body = sig_ty2 } <- sig_ty1
   = case sig_ty2 of
       L _ (HsForAllTy { hst_bndrs = tvs }) -> vars ++ nwcs ++
                                               map hsLTyVarName tvs
@@ -979,22 +977,17 @@ splitHsAppTys f                   as = (f,as)
 
 --------------------------------
 splitLHsPatSynTy :: LHsType name
-                 -> ( [LHsTyVarBndr name]
-                    , LHsContext name        -- Required
-                    , LHsContext name        -- Provided
-                    , LHsType name)          -- Body
-splitLHsPatSynTy ty
-  | L _ (HsQualTy { hst_ctxt = req, hst_body = ty2 }) <- ty1
-  , L _ (HsQualTy { hst_ctxt = prov,  hst_body = ty3 }) <- ty2
-  = (tvs, req, prov, ty3)
-
-  | L _ (HsQualTy { hst_ctxt = req, hst_body = ty2 }) <- ty1
-  = (tvs, req, noLoc [], ty2)
-
-  | otherwise
-  = (tvs, noLoc [], noLoc [], ty1)
+                 -> ( [LHsTyVarBndr name]    -- universals
+                    , LHsContext name        -- required constraints
+                    , [LHsTyVarBndr name]    -- existentials
+                    , LHsContext name        -- provided constraints
+                    , LHsType name)          -- body type
+splitLHsPatSynTy ty = (univs, reqs, exis, provs, ty4)
   where
-    (tvs, ty1) = splitLHsForAllTy ty
+    (univs, ty1) = splitLHsForAllTy ty
+    (reqs,  ty2) = splitLHsQualTy ty1
+    (exis,  ty3) = splitLHsForAllTy ty2
+    (provs, ty4) = splitLHsQualTy ty3
 
 splitLHsSigmaTy :: LHsType name -> ([LHsTyVarBndr name], LHsContext name, LHsType name)
 splitLHsSigmaTy ty
@@ -1050,7 +1043,6 @@ data FieldOcc name = FieldOcc { rdrNameFieldOcc  :: Located RdrName
                                  -- ^ See Note [Located RdrNames] in HsExpr
                               , selectorFieldOcc :: PostRn name name
                               }
-  deriving Typeable
 deriving instance Eq (PostRn name name) => Eq (FieldOcc name)
 deriving instance Ord (PostRn name name) => Ord (FieldOcc name)
 deriving instance (Data name, Data (PostRn name name)) => Data (FieldOcc name)
@@ -1075,7 +1067,6 @@ mkFieldOcc rdr = FieldOcc rdr PlaceHolder
 data AmbiguousFieldOcc name
   = Unambiguous (Located RdrName) (PostRn name name)
   | Ambiguous   (Located RdrName) (PostTc name name)
-  deriving (Typeable)
 deriving instance ( Data name
                   , Data (PostRn name name)
                   , Data (PostTc name name))
@@ -1114,16 +1105,16 @@ ambiguousFieldOcc (FieldOcc rdr sel) = Unambiguous rdr sel
 ************************************************************************
 -}
 
-instance (OutputableBndr name) => Outputable (HsType name) where
+instance (OutputableBndrId name) => Outputable (HsType name) where
     ppr ty = pprHsType ty
 
 instance Outputable HsTyLit where
     ppr = ppr_tylit
 
-instance (OutputableBndr name) => Outputable (LHsQTyVars name) where
+instance (OutputableBndrId name) => Outputable (LHsQTyVars name) where
     ppr (HsQTvs { hsq_explicit = tvs }) = interppSP tvs
 
-instance (OutputableBndr name) => Outputable (HsTyVarBndr name) where
+instance (OutputableBndrId name) => Outputable (HsTyVarBndr name) where
     ppr (UserTyVar n)     = ppr n
     ppr (KindedTyVar n k) = parens $ hsep [ppr n, dcolon, ppr k]
 
@@ -1136,7 +1127,8 @@ instance (Outputable thing) => Outputable (HsWildCardBndrs name thing) where
 instance Outputable (HsWildCardInfo name) where
     ppr (AnonWildCard _)  = char '_'
 
-pprHsForAll :: OutputableBndr name => [LHsTyVarBndr name] -> LHsContext name -> SDoc
+pprHsForAll :: (OutputableBndrId name)
+            => [LHsTyVarBndr name] -> LHsContext name -> SDoc
 pprHsForAll = pprHsForAllExtra Nothing
 
 -- | Version of 'pprHsForAll' that can also print an extra-constraints
@@ -1146,32 +1138,34 @@ pprHsForAll = pprHsForAllExtra Nothing
 -- function for this is needed, as the extra-constraints wildcard is removed
 -- from the actual context and type, and stored in a separate field, thus just
 -- printing the type will not print the extra-constraints wildcard.
-pprHsForAllExtra :: OutputableBndr name => Maybe SrcSpan -> [LHsTyVarBndr name] -> LHsContext name -> SDoc
+pprHsForAllExtra :: (OutputableBndrId name)
+                 => Maybe SrcSpan -> [LHsTyVarBndr name] -> LHsContext name
+                 -> SDoc
 pprHsForAllExtra extra qtvs cxt
   = pprHsForAllTvs qtvs <+> pprHsContextExtra show_extra (unLoc cxt)
   where
     show_extra = isJust extra
 
-pprHsForAllTvs :: OutputableBndr name => [LHsTyVarBndr name] -> SDoc
+pprHsForAllTvs :: (OutputableBndrId name) => [LHsTyVarBndr name] -> SDoc
 pprHsForAllTvs qtvs
   | show_forall = forAllLit <+> interppSP qtvs <> dot
   | otherwise   = empty
   where
     show_forall = opt_PprStyle_Debug || not (null qtvs)
 
-pprHsContext :: (OutputableBndr name) => HsContext name -> SDoc
+pprHsContext :: (OutputableBndrId name) => HsContext name -> SDoc
 pprHsContext = maybe empty (<+> darrow) . pprHsContextMaybe
 
-pprHsContextNoArrow :: (OutputableBndr name) => HsContext name -> SDoc
+pprHsContextNoArrow :: (OutputableBndrId name) => HsContext name -> SDoc
 pprHsContextNoArrow = fromMaybe empty . pprHsContextMaybe
 
-pprHsContextMaybe :: (OutputableBndr name) => HsContext name -> Maybe SDoc
+pprHsContextMaybe :: (OutputableBndrId name) => HsContext name -> Maybe SDoc
 pprHsContextMaybe []         = Nothing
 pprHsContextMaybe [L _ pred] = Just $ ppr_mono_ty FunPrec pred
 pprHsContextMaybe cxt        = Just $ parens (interpp'SP cxt)
 
 -- True <=> print an extra-constraints wildcard, e.g. @(Show a, _) =>@
-pprHsContextExtra :: (OutputableBndr name) => Bool -> HsContext name -> SDoc
+pprHsContextExtra :: (OutputableBndrId name) => Bool -> HsContext name -> SDoc
 pprHsContextExtra show_extra ctxt
   | not show_extra
   = pprHsContext ctxt
@@ -1182,7 +1176,7 @@ pprHsContextExtra show_extra ctxt
   where
     ctxt' = map ppr ctxt ++ [char '_']
 
-pprConDeclFields :: OutputableBndr name => [LConDeclField name] -> SDoc
+pprConDeclFields :: (OutputableBndrId name) => [LConDeclField name] -> SDoc
 pprConDeclFields fields = braces (sep (punctuate comma (map ppr_fld fields)))
   where
     ppr_fld (L _ (ConDeclField { cd_fld_names = ns, cd_fld_type = ty,
@@ -1206,7 +1200,7 @@ seems like the Right Thing anyway.)
 
 -- Printing works more-or-less as for Types
 
-pprHsType, pprParendHsType :: (OutputableBndr name) => HsType name -> SDoc
+pprHsType, pprParendHsType :: (OutputableBndrId name) => HsType name -> SDoc
 
 pprHsType ty       = ppr_mono_ty TopPrec (prepare ty)
 pprParendHsType ty = ppr_mono_ty TyConPrec ty
@@ -1217,10 +1211,10 @@ prepare (HsParTy ty)                            = prepare (unLoc ty)
 prepare (HsAppsTy [L _ (HsAppPrefix (L _ ty))]) = prepare ty
 prepare ty                                      = ty
 
-ppr_mono_lty :: (OutputableBndr name) => TyPrec -> LHsType name -> SDoc
+ppr_mono_lty :: (OutputableBndrId name) => TyPrec -> LHsType name -> SDoc
 ppr_mono_lty ctxt_prec ty = ppr_mono_ty ctxt_prec (unLoc ty)
 
-ppr_mono_ty :: (OutputableBndr name) => TyPrec -> HsType name -> SDoc
+ppr_mono_ty :: (OutputableBndrId name) => TyPrec -> HsType name -> SDoc
 ppr_mono_ty ctxt_prec (HsForAllTy { hst_bndrs = tvs, hst_body = ty })
   = maybeParen ctxt_prec FunPrec $
     sep [pprHsForAllTvs tvs, ppr_mono_lty TopPrec ty]
@@ -1237,16 +1231,17 @@ ppr_mono_ty _    (HsTupleTy con tys) = tupleParens std_con (pprWithCommas ppr ty
   where std_con = case con of
                     HsUnboxedTuple -> UnboxedTuple
                     _              -> BoxedTuple
+ppr_mono_ty _    (HsSumTy tys)       = tupleParens UnboxedTuple (pprWithBars ppr tys)
 ppr_mono_ty _    (HsKindSig ty kind) = parens (ppr_mono_lty TopPrec ty <+> dcolon <+> ppr kind)
 ppr_mono_ty _    (HsListTy ty)       = brackets (ppr_mono_lty TopPrec ty)
 ppr_mono_ty _    (HsPArrTy ty)       = paBrackets (ppr_mono_lty TopPrec ty)
 ppr_mono_ty prec (HsIParamTy n ty)   = maybeParen prec FunPrec (ppr n <+> dcolon <+> ppr_mono_lty TopPrec ty)
 ppr_mono_ty _    (HsSpliceTy s _)    = pprSplice s
 ppr_mono_ty _    (HsCoreTy ty)       = ppr ty
-ppr_mono_ty _    (HsExplicitListTy _ tys) = quote $ brackets (interpp'SP tys)
+ppr_mono_ty _    (HsExplicitListTy _ tys)  = quote $ brackets (interpp'SP tys)
 ppr_mono_ty _    (HsExplicitTupleTy _ tys) = quote $ parens (interpp'SP tys)
 ppr_mono_ty _    (HsTyLit t)         = ppr_tylit t
-ppr_mono_ty _    (HsWildCardTy (AnonWildCard _))     = char '_'
+ppr_mono_ty _    (HsWildCardTy {})   = char '_'
 
 ppr_mono_ty ctxt_prec (HsEqTy ty1 ty2)
   = maybeParen ctxt_prec TyOpPrec $
@@ -1278,7 +1273,8 @@ ppr_mono_ty ctxt_prec (HsDocTy ty doc)
   -- postfix operators
 
 --------------------------
-ppr_fun_ty :: (OutputableBndr name) => TyPrec -> LHsType name -> LHsType name -> SDoc
+ppr_fun_ty :: (OutputableBndrId name)
+           => TyPrec -> LHsType name -> LHsType name -> SDoc
 ppr_fun_ty ctxt_prec ty1 ty2
   = let p1 = ppr_mono_lty FunPrec ty1
         p2 = ppr_mono_lty TopPrec ty2
@@ -1287,7 +1283,7 @@ ppr_fun_ty ctxt_prec ty1 ty2
     sep [p1, text "->" <+> p2]
 
 --------------------------
-ppr_app_ty :: OutputableBndr name => TyPrec -> HsAppType name -> SDoc
+ppr_app_ty :: (OutputableBndrId name) => TyPrec -> HsAppType name -> SDoc
 ppr_app_ty _    (HsAppInfix (L _ n))                  = pprInfixOcc n
 ppr_app_ty _    (HsAppPrefix (L _ (HsTyVar (L _ n)))) = pprPrefixOcc n
 ppr_app_ty ctxt (HsAppPrefix ty)                      = ppr_mono_lty ctxt ty

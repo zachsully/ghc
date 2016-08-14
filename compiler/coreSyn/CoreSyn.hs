@@ -31,7 +31,8 @@ module CoreSyn (
 
         -- ** Simple 'Expr' access functions and predicates
         bindersOf, bindersOfBinds, rhssOfBind, rhssOfAlts,
-        collectBinders, collectTyAndValBinders, collectNBinders,
+        collectBinders, collectTyBinders, collectTyAndValBinders,
+        collectNBinders,
         collectArgs, collectArgsTicks, flattenBinds,
 
         exprToType, exprToCoercion_maybe,
@@ -95,6 +96,7 @@ import Var
 import Type
 import Coercion
 import Name
+import NameSet
 import NameEnv( NameEnv, emptyNameEnv )
 import Literal
 import DataCon
@@ -104,6 +106,7 @@ import BasicTypes
 import DynFlags
 import Outputable
 import Util
+import UniqFM
 import SrcLoc     ( RealSrcSpan, containsSpan )
 import Binary
 
@@ -263,7 +266,7 @@ data Expr b
   | Tick  (Tickish Id) (Expr b)
   | Type  Type
   | Coercion Coercion
-  deriving (Data, Typeable)
+  deriving Data
 
 -- | Type synonym for expressions that occur in function argument positions.
 -- Only 'Arg' should contain a 'Type' at top level, general 'Expr' should not
@@ -290,7 +293,7 @@ data AltCon
                       -- See Note [Literal alternatives]
 
   | DEFAULT           -- ^ Trivial alternative: @case e of { _ -> ... }@
-   deriving (Eq, Ord, Data, Typeable)
+   deriving (Eq, Data)
 
 -- | Binding, used for top level bindings in a module and local bindings in a @let@.
 
@@ -298,7 +301,7 @@ data AltCon
 -- See Note [GHC Formalism] in coreSyn/CoreLint.hs
 data Bind b = NonRec b (Expr b)
             | Rec [(b, (Expr b))]
-  deriving (Data, Typeable)
+  deriving Data
 
 {-
 Note [Shadowing]
@@ -509,7 +512,7 @@ data Tickish id =
                                 --   (uses same names as CCs)
     }
 
-  deriving (Eq, Ord, Data, Typeable)
+  deriving (Eq, Ord, Data)
 
 -- | A "counting tick" (where tickishCounts is True) is one that
 -- counts evaluations in some way.  We cannot discard a counting tick,
@@ -730,7 +733,7 @@ data IsOrphan
   | NotOrphan OccName -- The OccName 'n' witnesses the instance's non-orphanhood
                       -- In that case, the instance is fingerprinted as part
                       -- of the definition of 'n's definition
-    deriving (Data, Typeable)
+    deriving Data
 
 -- | Returns true if 'IsOrphan' is orphan.
 isOrphan :: IsOrphan -> Bool
@@ -742,7 +745,7 @@ notOrphan :: IsOrphan -> Bool
 notOrphan NotOrphan{} = True
 notOrphan _ = False
 
-chooseOrphanAnchor :: [Name] -> IsOrphan
+chooseOrphanAnchor :: NameSet -> IsOrphan
 -- Something (rule, instance) is relate to all the Names in this
 -- list. Choose one of them to be an "anchor" for the orphan.  We make
 -- the choice deterministic to avoid gratuitious changes in the ABI
@@ -752,10 +755,11 @@ chooseOrphanAnchor :: [Name] -> IsOrphan
 -- NB: 'minimum' use Ord, and (Ord OccName) works lexicographically
 --
 chooseOrphanAnchor local_names
-  | null local_names = IsOrphan
-  | otherwise        = NotOrphan (minimum occs)
+  | isEmptyNameSet local_names = IsOrphan
+  | otherwise                  = NotOrphan (minimum occs)
   where
-    occs = map nameOccName local_names
+    occs = map nameOccName $ nonDetEltsUFM local_names
+    -- It's OK to use nonDetEltsUFM here, see comments above
 
 instance Binary IsOrphan where
     put_ bh IsOrphan = putByte bh 0
@@ -1627,17 +1631,15 @@ flattenBinds (Rec prs1   : binds) = prs1 ++ flattenBinds binds
 flattenBinds []                   = []
 
 -- | We often want to strip off leading lambdas before getting down to
--- business. This function is your friend.
-collectBinders               :: Expr b -> ([b],         Expr b)
--- | Collect type and value binders from nested lambdas, stopping
--- right before any "forall"s within a non-forall. For example,
--- forall (a :: *) (b :: Foo ~ Bar) (c :: *). Baz -> forall (d :: *). Blob
--- will pull out the binders for a, b, c, and Baz, but not for d or anything
--- within Blob. This is to coordinate with tcSplitSigmaTy.
-collectTyAndValBinders       :: CoreExpr -> ([TyVar], [Id], CoreExpr)
+-- business. Variants are 'collectTyBinders', 'collectValBinders',
+-- and 'collectTyAndValBinders'
+collectBinders         :: Expr b   -> ([b],     Expr b)
+collectTyBinders       :: CoreExpr -> ([TyVar], CoreExpr)
+collectValBinders      :: CoreExpr -> ([Id],    CoreExpr)
+collectTyAndValBinders :: CoreExpr -> ([TyVar], [Id], CoreExpr)
 -- | Strip off exactly N leading lambdas (type or value). Good for use with
 -- join points.
-collectNBinders              :: Int -> Expr b -> ([b], Expr b)
+collectNBinders        :: Int -> Expr b -> ([b], Expr b)
 
 collectBinders expr
   = go [] expr
@@ -1645,16 +1647,23 @@ collectBinders expr
     go bs (Lam b e) = go (b:bs) e
     go bs e          = (reverse bs, e)
 
-collectTyAndValBinders expr
-  = go_forall [] [] expr
-  where go_forall tvs ids (Lam b e)
-          | isTyVar b       = go_forall (b:tvs) ids e
-          | isCoVar b       = go_forall tvs (b:ids) e
-        go_forall tvs ids e = go_fun tvs ids e
+collectTyBinders expr
+  = go [] expr
+  where
+    go tvs (Lam b e) | isTyVar b = go (b:tvs) e
+    go tvs e                     = (reverse tvs, e)
 
-        go_fun tvs ids (Lam b e)
-          | isId b          = go_fun tvs (b:ids) e
-        go_fun tvs ids e    = (reverse tvs, reverse ids, e)
+collectValBinders expr
+  = go [] expr
+  where
+    go ids (Lam b e) | isId b = go (b:ids) e
+    go ids body               = (reverse ids, body)
+
+collectTyAndValBinders expr
+  = (tvs, ids, body)
+  where
+    (tvs, body1) = collectTyBinders expr
+    (ids, body)  = collectValBinders body1
 
 collectNBinders orig_n orig_expr
   = go orig_n [] orig_expr

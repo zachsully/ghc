@@ -18,7 +18,7 @@ module LlvmCodeGen.Base (
         runLlvm, liftStream, withClearVars, varLookup, varInsert,
         markStackReg, checkStackReg,
         funLookup, funInsert, getLlvmVer, getDynFlags, getDynFlag, getLlvmPlatform,
-        dumpIfSetLlvm, renderLlvm, runUs, markUsedVar, getUsedVars,
+        dumpIfSetLlvm, renderLlvm, markUsedVar, getUsedVars,
         ghcInternalFunctions,
 
         getMetaUniqueId,
@@ -44,7 +44,7 @@ import CLabel
 import CodeGen.Platform ( activeStgRegs )
 import DynFlags
 import FastString
-import Cmm
+import Cmm              hiding ( succ )
 import Outputable as Outp
 import qualified Pretty as Prt
 import Platform
@@ -193,8 +193,8 @@ data LlvmEnv = LlvmEnv
   , envDynFlags :: DynFlags        -- ^ Dynamic flags
   , envOutput :: BufHandle         -- ^ Output buffer
   , envUniq :: UniqSupply          -- ^ Supply of unique values
-  , envFreshMeta :: Int            -- ^ Supply of fresh metadata IDs
-  , envUniqMeta :: UniqFM Int      -- ^ Global metadata nodes
+  , envFreshMeta :: MetaId         -- ^ Supply of fresh metadata IDs
+  , envUniqMeta :: UniqFM MetaId   -- ^ Global metadata nodes
   , envFunMap :: LlvmEnvMap        -- ^ Global functions so far, with type
   , envAliases :: UniqSet LMString -- ^ Globals that we had to alias, see [Llvm Forward References]
   , envUsedVars :: [LlvmVar]       -- ^ Pointers to be added to llvm.used (see @cmmUsedLlvmGens@)
@@ -224,6 +224,19 @@ instance Monad LlvmM where
 instance HasDynFlags LlvmM where
     getDynFlags = LlvmM $ \env -> return (envDynFlags env, env)
 
+instance MonadUnique LlvmM where
+    getUniqueSupplyM = do
+        us <- getEnv envUniq
+        let (us1, us2) = splitUniqSupply us
+        modifyEnv (\s -> s { envUniq = us2 })
+        return us1
+
+    getUniqueM = do
+        us <- getEnv envUniq
+        let (u,us') = takeUniqFromSupply us
+        modifyEnv (\s -> s { envUniq = us' })
+        return u
+
 -- | Lifting of IO actions. Not exported, as we want to encapsulate IO.
 liftIO :: IO a -> LlvmM a
 liftIO m = LlvmM $ \env -> do x <- m
@@ -243,7 +256,7 @@ runLlvm dflags ver out us m = do
                       , envDynFlags = dflags
                       , envOutput = out
                       , envUniq = us
-                      , envFreshMeta = 0
+                      , envFreshMeta = MetaId 0
                       , envUniqMeta = emptyUFM
                       }
 
@@ -288,8 +301,9 @@ checkStackReg :: GlobalReg -> LlvmM Bool
 checkStackReg r = getEnv ((elem r) . envStackRegs)
 
 -- | Allocate a new global unnamed metadata identifier
-getMetaUniqueId :: LlvmM Int
-getMetaUniqueId = LlvmM $ \env -> return (envFreshMeta env, env { envFreshMeta = envFreshMeta env + 1})
+getMetaUniqueId :: LlvmM MetaId
+getMetaUniqueId = LlvmM $ \env ->
+    return (envFreshMeta env, env { envFreshMeta = succ $ envFreshMeta env })
 
 -- | Get the LLVM version we are generating code for
 getLlvmVer :: LlvmM LlvmVersion
@@ -323,12 +337,6 @@ renderLlvm sdoc = do
     dumpIfSetLlvm Opt_D_dump_llvm "LLVM Code" sdoc
     return ()
 
--- | Run a @UniqSM@ action with our unique supply
-runUs :: UniqSM a -> LlvmM a
-runUs m = LlvmM $ \env -> do
-    let (x, us') = initUs (envUniq env) m
-    return (x, env { envUniq = us' })
-
 -- | Marks a variable as "used"
 markUsedVar :: LlvmVar -> LlvmM ()
 markUsedVar v = modifyEnv $ \env -> env { envUsedVars = v : envUsedVars env }
@@ -343,10 +351,11 @@ saveAlias :: LMString -> LlvmM ()
 saveAlias lbl = modifyEnv $ \env -> env { envAliases = addOneToUniqSet (envAliases env) lbl }
 
 -- | Sets metadata node for a given unique
-setUniqMeta :: Unique -> Int -> LlvmM ()
+setUniqMeta :: Unique -> MetaId -> LlvmM ()
 setUniqMeta f m = modifyEnv $ \env -> env { envUniqMeta = addToUFM (envUniqMeta env) f m }
+
 -- | Gets metadata node for given unique
-getUniqMeta :: Unique -> LlvmM (Maybe Int)
+getUniqMeta :: Unique -> LlvmM (Maybe MetaId)
 getUniqMeta s = getEnv (flip lookupUFM s . envUniqMeta)
 
 -- ----------------------------------------------------------------------------
@@ -439,7 +448,10 @@ getGlobalPtr llvmLbl = do
 -- will be generated anymore!
 generateExternDecls :: LlvmM ([LMGlobal], [LlvmType])
 generateExternDecls = do
-  delayed <- fmap uniqSetToList $ getEnv envAliases
+  delayed <- fmap nonDetEltsUFM $ getEnv envAliases
+  -- This is non-deterministic but we do not
+  -- currently support deterministic code-generation.
+  -- See Note [Unique Determinism and code generation]
   defss <- flip mapM delayed $ \lbl -> do
     m_ty <- funLookup lbl
     case m_ty of

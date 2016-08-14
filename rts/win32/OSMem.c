@@ -48,7 +48,7 @@ osMemInit(void)
 
 static
 alloc_rec*
-allocNew(nat n) {
+allocNew(uint32_t n) {
     alloc_rec* rec;
     rec = (alloc_rec*)stgMallocBytes(sizeof(alloc_rec),"getMBlocks: allocNew");
     rec->size = ((W_)n+1)*MBLOCK_SIZE;
@@ -117,7 +117,7 @@ insertFree(char* alloc_base, W_ alloc_size) {
 
 static
 void*
-findFreeBlocks(nat n) {
+findFreeBlocks(uint32_t n) {
     void* ret=0;
     block_rec* it;
     block_rec temp;
@@ -186,7 +186,7 @@ commitBlocks(char* base, W_ size) {
 }
 
 void *
-osGetMBlocks(nat n) {
+osGetMBlocks(uint32_t n) {
     void* ret;
     ret = findFreeBlocks(n);
     if(ret==0) {
@@ -246,7 +246,7 @@ static void decommitBlocks(char *addr, W_ nBytes)
     }
 }
 
-void osFreeMBlocks(char *addr, nat n)
+void osFreeMBlocks(void *addr, uint32_t n)
 {
     W_ nBytes = (W_)n * MBLOCK_SIZE;
 
@@ -381,17 +381,17 @@ osFreeAllMBlocks(void)
     }
 }
 
-W_ getPageSize (void)
+size_t getPageSize (void)
 {
-    static W_ pagesize = 0;
-    if (pagesize) {
-        return pagesize;
-    } else {
+    static size_t pagesize = 0;
+
+    if (pagesize == 0) {
         SYSTEM_INFO sSysInfo;
         GetSystemInfo(&sSysInfo);
         pagesize = sSysInfo.dwPageSize;
-        return pagesize;
     }
+
+    return pagesize;
 }
 
 /* Returns 0 if physical memory size cannot be identified */
@@ -482,3 +482,25 @@ void osReleaseHeapMemory (void)
 }
 
 #endif
+
+rtsBool osNumaAvailable(void)
+{
+    return rtsFalse;
+}
+
+uint32_t osNumaNodes(void)
+{
+    return 1;
+}
+
+StgWord osNumaMask(void)
+{
+    return 1;
+}
+
+void osBindMBlocksToNode(
+    void *addr STG_UNUSED,
+    StgWord size STG_UNUSED,
+    uint32_t node STG_UNUSED)
+{
+}

@@ -108,6 +108,7 @@ endif
 
 # Some platforms don't support shared libraries
 NoSharedLibsPlatformList = \
+	powerpc-ibm-aix \
 	x86_64-unknown-mingw32 \
 	i386-unknown-mingw32
 
@@ -172,9 +173,9 @@ GhcUnregisterised=@Unregisterised@
 #
 # Target platforms supported:
 #   i386, powerpc, powerpc64, sparc
-#   IOS and AIX are not supported
+#   IOS is not supported
 ArchSupportsNCG=$(strip $(patsubst $(TargetArch_CPP), YES, $(findstring $(TargetArch_CPP), i386 x86_64 powerpc powerpc64 powerpc64le sparc)))
-OsSupportsNCG=$(strip $(patsubst $(TargetOS_CPP), YES, $(patsubst ios,,$(patsubst aix,,$(TargetOS_CPP)))))
+OsSupportsNCG=$(strip $(patsubst $(TargetOS_CPP), YES, $(patsubst ios,,$(TargetOS_CPP))))
 
 GhcWithNativeCodeGen := $(strip\
     $(if $(filter YESYESNO,\
@@ -191,6 +192,8 @@ else
 ArchSupportsSMP=$(strip $(patsubst $(TargetArch_CPP), YES, $(findstring $(TargetArch_CPP), i386 x86_64 sparc powerpc powerpc64 powerpc64le aarch64)))
 endif
 
+# The THREADED_RTS requites `BaseReg` to be in a register and the
+# `GhcUnregisterised` mode doesn't allow that.
 GhcWithSMP := $(strip $(if $(filter YESNO, $(ArchSupportsSMP)$(GhcUnregisterised)),YES,NO))
 
 # Whether to include GHCi in the compiler.  Depends on whether the RTS linker
@@ -271,14 +274,21 @@ BuildSharedLibs=$(strip $(if $(findstring dyn,$(GhcLibWays)),YES,NO))
 # In addition, the RTS is built in some further variations.  Ways that
 # make sense here:
 #
-#   thr         : threaded
-#   thr_p       : threaded profiled
-#   debug       : debugging (compile with -g for the C compiler, and -DDEBUG)
-#   debug_p     : debugging profiled
-#   thr_debug   : debugging threaded
-#   thr_debug_p : debugging threaded profiled
-#   l           : event logging
-#   thr_l       : threaded and event logging
+#   thr           : threaded
+#   thr_p         : threaded + profiled + eventlog
+#   debug         : debugging + eventlog
+#   thr_debug     : debugging + threaded, + eventlog
+#   l             : eventlog
+#   p             : profiled + eventlog
+#   thr_l         : threaded + eventlog
+#
+# Note how there are a few cases which are handled specially (in packageHsLibs)
+# to reduce the number of distinct ways,
+#
+#   debug     implies  eventlog
+#   profiled  implies  eventlog
+#
+# This means, for instance, that there is no debug_l way.
 #
 GhcRTSWays=l
 
@@ -378,7 +388,7 @@ FFIIncludeDir=@FFIIncludeDir@
 
 # GHC needs arch-specific tweak at least in
 #     rts/Libdw.c:set_initial_registers()
-GhcRtsWithLibdw=$(strip $(if $(filter $(TargetArch_CPP),i386 x86_64),@HaveLibdw@,NO))
+GhcRtsWithLibdw=$(strip $(if $(filter $(TargetArch_CPP),i386 x86_64),@UseLibdw@,NO))
 
 ################################################################################
 #
@@ -508,11 +518,10 @@ SUPPORTS_THIS_UNIT_ID = @SUPPORTS_THIS_UNIT_ID@
 #-----------------------------------------------------------------------------
 # C compiler
 #
-# NB. Don't override $(WhatGccIsCalled) using build.mk,  re-configure using
-# the flag --with-gcc=<blah> instead.  The reason is that the configure script
+# NB. Don't override $(CC) using build.mk,  re-configure using
+# the flag CC=<blah> instead.  The reason is that the configure script
 # needs to know which gcc you're using in order to perform its tests.
 
-WhatGccIsCalled       = @WhatGccIsCalled@
 GccVersion            = @GccVersion@
 ifeq "$(phase)" "0"
 CrossCompilePrefix    =
@@ -523,24 +532,24 @@ endif
 # the necessary format to pass to libffi's configure.
 TargetPlatformFull    = @TargetPlatformFull@
 GccLT34         = @GccLT34@
+GccLT44         = @GccLT44@
 GccLT46         = @GccLT46@
 GccIsClang      = @GccIsClang@
 
-CC              = $(WhatGccIsCalled)
+CC              = @CC@
 CC_STAGE0       = @CC_STAGE0@
 CC_STAGE1       = $(CC)
 CC_STAGE2       = $(CC)
 CC_STAGE3       = $(CC)
 
-AS              = $(WhatGccIsCalled)
+AS              = @CC@
 AS_STAGE0       = @CC_STAGE0@
 AS_STAGE1       = $(AS)
 AS_STAGE2       = $(AS)
 AS_STAGE3       = $(AS)
 
-# We don't have an LD_STAGE0.  CC_STAGE0 is determined by asking "ghc
-# --info", and it doesn't report an LD.
-LD_STAGE0       = error-no-ld-stage0
+# why no LD=@LD@ ?
+LD_STAGE0       = @LD_STAGE0@
 LD_STAGE1       = $(LD)
 LD_STAGE2       = $(LD)
 LD_STAGE3       = $(LD)

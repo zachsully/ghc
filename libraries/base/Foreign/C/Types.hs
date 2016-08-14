@@ -10,7 +10,7 @@
 -- Module      :  Foreign.C.Types
 -- Copyright   :  (c) The FFI task force 2001
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  ffi@haskell.org
 -- Stability   :  provisional
 -- Portability :  portable
@@ -62,6 +62,10 @@ module Foreign.C.Types
         , CFloat(..),   CDouble(..)
         -- XXX GHC doesn't support CLDouble yet
         -- , CLDouble(..)
+
+          -- See Note [Exporting constructors of marshallable foreign types]
+          -- in Foreign.Ptr for why the constructors for these newtypes are
+          -- exported.
 
           -- ** Other types
 
@@ -184,6 +188,7 @@ ARITHMETIC_TYPE(CTime,HTYPE_TIME_T)
 -- | Haskell type representing the C @useconds_t@ type.
 --
 -- @since 4.4.0.0
+
 ARITHMETIC_TYPE(CUSeconds,HTYPE_USECONDS_T)
 -- | Haskell type representing the C @suseconds_t@ type.
 --

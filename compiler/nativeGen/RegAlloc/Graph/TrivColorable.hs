@@ -59,7 +59,8 @@ accSqueeze
         -> UniqFM reg
         -> Int
 
-accSqueeze count maxCount squeeze ufm = acc count (eltsUFM ufm)
+accSqueeze count maxCount squeeze ufm = acc count (nonDetEltsUFM ufm)
+  -- See Note [Unique Determinism and code generation]
   where acc count [] = count
         acc count _ | count >= maxCount = count
         acc count (r:rs) = acc (count + squeeze r) rs
@@ -225,8 +226,8 @@ trivColorable classN conflicts exclusions
                 RcFloat         -> (cd,   cf+1)
                 _               -> panic "Regs.trivColorable: reg class not handled"
 
-        tmp                     = foldUniqSet acc (0, 0) conflicts
-        (countInt,  countFloat) = foldUniqSet acc tmp    exclusions
+        tmp                     = nonDetFoldUFM acc (0, 0) conflicts
+        (countInt,  countFloat) = nonDetFoldUFM acc tmp    exclusions
 
         squeese         = worst countInt   classN RcInteger
                         + worst countFloat classN RcFloat

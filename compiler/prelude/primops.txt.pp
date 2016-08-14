@@ -1077,6 +1077,17 @@ primop  NewAlignedPinnedByteArrayOp_Char "newAlignedPinnedByteArray#" GenPrimOp
    with out_of_line = True
         has_side_effects = True
 
+primop  MutableByteArrayIsPinnedOp "isMutableByteArrayPinned#" GenPrimOp
+   MutableByteArray# s -> Int#
+   {Determine whether a {\tt MutableByteArray\#} is guaranteed not to move
+   during GC.}
+   with out_of_line = True
+
+primop  ByteArrayIsPinnedOp "isByteArrayPinned#" GenPrimOp
+   ByteArray# -> Int#
+   {Determine whether a {\tt ByteArray\#} is guaranteed not to move during GC.}
+   with out_of_line = True
+
 primop  ByteArrayContents_Char "byteArrayContents#" GenPrimOp
    ByteArray# -> Addr#
    {Intended for use with pinned arrays; otherwise very unsafe!}
@@ -2415,8 +2426,94 @@ primop  StableNameToIntOp "stableNameToInt#" GenPrimOp
    StableName# a -> Int#
 
 ------------------------------------------------------------------------
+section "Compact normal form"
+------------------------------------------------------------------------
+
+primtype Compact#
+
+primop  CompactNewOp "compactNew#" GenPrimOp
+   Word# -> State# RealWorld -> (# State# RealWorld, Compact# #)
+   { Create a new Compact with the given size (in bytes, not words).
+     The size is rounded up to a multiple of the allocator block size,
+     and capped to one mega block. }
+   with
+   has_side_effects = True
+   out_of_line      = True
+
+primop  CompactAppendOp "compactAppend#" GenPrimOp
+   Compact# -> a -> Int# -> State# RealWorld -> (# State# RealWorld, a #)
+   { Append an object to a compact, return the new address in the Compact.
+     The third argument is 1 if sharing should be preserved, 0 otherwise. }
+   with
+   has_side_effects = True
+   out_of_line      = True
+
+primop  CompactResizeOp "compactResize#" GenPrimOp
+   Compact# -> Word# -> State# RealWorld ->
+   State# RealWorld
+   { Set the new allocation size of the compact. This value (in bytes)
+     determines the size of each block in the compact chain. }
+   with
+   has_side_effects = True
+   out_of_line      = True
+
+primop  CompactContainsOp "compactContains#" GenPrimOp
+   Compact# -> a -> State# RealWorld -> (# State# RealWorld, Int# #)
+   { Returns 1# if the object is contained in the compact, 0# otherwise. }
+   with
+   out_of_line      = True
+
+primop  CompactContainsAnyOp "compactContainsAny#" GenPrimOp
+   a -> State# RealWorld -> (# State# RealWorld, Int# #)
+   { Returns 1# if the object is in any compact at all, 0# otherwise. }
+   with
+   out_of_line      = True
+
+primop  CompactGetFirstBlockOp "compactGetFirstBlock#" GenPrimOp
+   Compact# -> State# RealWorld -> (# State# RealWorld, Addr#, Word# #)
+   { Returns the address and the size (in bytes) of the first block of
+     a compact. }
+   with
+   out_of_line      = True
+
+primop  CompactGetNextBlockOp "compactGetNextBlock#" GenPrimOp
+   Compact# -> Addr# -> State# RealWorld -> (# State# RealWorld, Addr#, Word# #)
+   { Given a compact and the address of one its blocks, returns the
+     next block and its size, or #nullAddr if the argument was the
+     last block in the compact. }
+   with
+   out_of_line      = True
+
+primop  CompactAllocateBlockOp "compactAllocateBlock#" GenPrimOp
+   Word# -> Addr# -> State# RealWorld -> (# State# RealWorld, Addr# #)
+   { Attempt to allocate a compact block with the given size (in
+     bytes) at the given address. The first argument is a hint to
+     the allocator, allocation might be satisfied at a different
+     address (which is returned).
+     The resulting block is not known to the GC until
+     compactFixupPointers# is called on it, and care must be taken
+     so that the address does not escape or memory will be leaked.
+   }
+   with
+   has_side_effects = True
+   out_of_line      = True
+
+primop  CompactFixupPointersOp "compactFixupPointers#" GenPrimOp
+   Addr# -> Addr# -> State# RealWorld -> (# State# RealWorld, Compact#, Addr# #)
+   { Given the pointer to the first block of a compact, and the
+     address of the root object in the old address space, fix up
+     the internal pointers inside the compact to account for
+     a different position in memory than when it was serialized.
+     This method must be called exactly once after importing
+     a serialized compact, and returns the new compact and
+     the new adjusted root address. }
+   with
+   has_side_effects = True
+   out_of_line      = True
+
+------------------------------------------------------------------------
 section "Unsafe pointer equality"
---  (#1 Bad Guy: Alistair Reid :)
+--  (#1 Bad Guy: Alastair Reid :)
 ------------------------------------------------------------------------
 
 primop  ReallyUnsafePtrEqualityOp "reallyUnsafePtrEquality#" GenPrimOp
@@ -2430,7 +2527,7 @@ primop  ParOp "par#" GenPrimOp
    a -> Int#
    with
       -- Note that Par is lazy to avoid that the sparked thing
-      -- gets evaluted strictly, which it should *not* be
+      -- gets evaluated strictly, which it should *not* be
    has_side_effects = True
    code_size = { primOpCodeSizeForeignCall }
 
@@ -2493,6 +2590,21 @@ primtype BCO#
 primop   AddrToAnyOp "addrToAny#" GenPrimOp
    Addr# -> (# a #)
    { Convert an {\tt Addr\#} to a followable Any type. }
+   with
+   code_size = 0
+
+primop   AnyToAddrOp "anyToAddr#" GenPrimOp
+   a -> State# RealWorld -> (# State# RealWorld, Addr# #)
+   { Retrive the address of any Haskell value. This is
+     essentially an {\texttt unsafeCoerce\#}, but if implemented as such
+     the core lint pass complains and fails to compile.
+     As a primop, it is opaque to core/stg, and only appears
+     in cmm (where the copy propagation pass will get rid of it).
+     Note that "a" must be a value, not a thunk! It's too late
+     for strictness analysis to enforce this, so you're on your
+     own to guarantee this. Also note that {\texttt Addr\#} is not a GC
+     pointer - up to you to guarantee that it does not become
+     a dangling pointer immediately after you get it.}
    with
    code_size = 0
 
@@ -2577,52 +2689,6 @@ pseudoop   "seq"
      In particular, this means that {\tt b} may be evaluated before
      {\tt a}. If you need to guarantee a specific order of evaluation,
      you must use the function {\tt pseq} from the "parallel" package. }
-
-primtype Any
-        { The type constructor {\tt Any} is type to which you can unsafely coerce any
-        lifted type, and back.
-
-          * It is lifted, and hence represented by a pointer
-
-          * It does not claim to be a {\it data} type, and that's important for
-            the code generator, because the code gen may {\it enter} a data value
-            but never enters a function value.
-
-        It's also used to instantiate un-constrained type variables after type
-        checking.  For example, {\tt length} has type
-
-        {\tt length :: forall a. [a] -> Int}
-
-        and the list datacon for the empty list has type
-
-        {\tt [] :: forall a. [a]}
-
-        In order to compose these two terms as {\tt length []} a type
-        application is required, but there is no constraint on the
-        choice.  In this situation GHC uses {\tt Any}:
-
-        {\tt length (Any *) ([] (Any *))}
-
-        Above, we print kinds explicitly, as if with
-        {\tt -fprint-explicit-kinds}.
-
-        Note that {\tt Any} is kind polymorphic; its kind is thus
-        {\tt forall k. k}.}
-
-primtype AnyK
-        { The kind {\tt AnyK} is the kind level counterpart to {\tt Any}. In a
-        kind polymorphic setting, a similar example to the length of the empty
-        list can be given at the type level:
-
-        {\tt type family Length (l :: [k]) :: Nat}
-        {\tt type instance Length [] = Zero}
-
-        When {\tt Length} is applied to the empty (promoted) list it will have
-        the kind {\tt Length AnyK []}.
-
-        {\tt AnyK} is currently not exported and cannot be used directly, but
-        you might see it in debug output from the compiler.
-        }
 
 pseudoop   "unsafeCoerce#"
    a -> b

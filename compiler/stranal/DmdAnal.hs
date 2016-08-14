@@ -64,8 +64,8 @@ dmdAnalTopBind :: AnalEnv
 dmdAnalTopBind sigs (NonRec id rhs)
   = (extendAnalEnv TopLevel sigs id sig, NonRec id2 rhs2)
   where
-    (  _, _, _,   rhs1) = dmdAnalRhs TopLevel Nothing sigs             id rhs
-    (sig, _, id2, rhs2) = dmdAnalRhs TopLevel Nothing (nonVirgin sigs) id rhs1
+    (  _, _, _,   rhs1) = dmdAnalRhsLetDown TopLevel Nothing sigs             id rhs
+    (sig, _, id2, rhs2) = dmdAnalRhsLetDown TopLevel Nothing (nonVirgin sigs) id rhs1
         -- Do two passes to improve CPR information
         -- See comments with ignore_cpr_info in mk_sig_ty
         -- and with extendSigsWithLam
@@ -188,7 +188,7 @@ dmdAnal' env dmd (App fun arg)
 --         , text "overall res dmd_ty =" <+> ppr (res_ty `bothDmdType` arg_ty) ])
     (res_ty `bothDmdType` arg_ty, App fun' arg')
 
--- this is an anonymous lambda, since @dmdAnalRhs@ uses @collectBinders@
+-- this is an anonymous lambda, since @dmdAnalRhsLetDown@ uses @collectBinders@
 dmdAnal' env dmd (Lam var body)
   | isTyVar var
   = let
@@ -200,13 +200,9 @@ dmdAnal' env dmd (Lam var body)
   = let (body_dmd, defer_and_use) = peelCallDmd dmd
           -- body_dmd: a demand to analyze the body
 
-        one_shot         = useCount (getUseDmd defer_and_use)
-          -- one_shot: one-shotness of the lambda
-          --           hence, cardinality of its free vars
-
         env'             = extendSigsWithLam env var
         (body_ty, body') = dmdAnal env' body_dmd body
-        (lam_ty, var')   = annotateLamIdBndr env notArgOfDfun body_ty one_shot var
+        (lam_ty, var')   = annotateLamIdBndr env notArgOfDfun body_ty var
     in
     (postProcessUnsat defer_and_use lam_ty, Lam var' body')
 
@@ -259,17 +255,38 @@ dmdAnal' env dmd (Case scrut case_bndr ty alts)
 --                                   , text "res_ty" <+> ppr res_ty ]) $
     (res_ty, Case scrut' case_bndr' ty alts')
 
+-- Let bindings can be processed in two ways:
+-- Down (RHS before body) or Up (body before RHS).
+-- The following case handle the up variant.
+--
+-- It is very simple. For  let x = rhs in body
+--   * Demand-analyse 'body' in the current environment
+--   * Find the demand, 'rhs_dmd' placed on 'x' by 'body'
+--   * Demand-analyse 'rhs' in 'rhs_dmd'
+--
+-- This is used for a non-recursive local let without manifest lambdas.
+-- This is the LetUp rule in the paper “Higher-Order Cardinality Analysis”.
 dmdAnal' env dmd (Let (NonRec id rhs) body)
-  = (body_ty2, Let (NonRec id2 annotated_rhs) body')
+  | useLetUp rhs
+  , Nothing <- unpackTrivial rhs
+      -- dmdAnalRhsLetDown treats trivial right hand sides specially
+      -- so if we have a trival right hand side, fall through to that.
+  = (final_ty, Let (NonRec id' rhs') body')
   where
-    (sig, lazy_fv, id1, rhs') = dmdAnalRhs NotTopLevel Nothing env id rhs
+    (body_ty, body')   = dmdAnal env dmd body
+    (body_ty', id_dmd) = findBndrDmd env notArgOfDfun body_ty id
+    id'                = setIdDemandInfo id id_dmd
+
+    (rhs_ty, rhs')     = dmdAnalStar env (dmdTransformThunkDmd rhs id_dmd) rhs
+    final_ty           = body_ty' `bothDmdType` rhs_ty
+
+dmdAnal' env dmd (Let (NonRec id rhs) body)
+  = (body_ty2, Let (NonRec id2 rhs') body')
+  where
+    (sig, lazy_fv, id1, rhs') = dmdAnalRhsLetDown NotTopLevel Nothing env id rhs
     (body_ty, body')          = dmdAnal (extendAnalEnv NotTopLevel env id sig) dmd body
     (body_ty1, id2)           = annotateBndr env body_ty id1
     body_ty2                  = addLazyFVs body_ty1 lazy_fv
-
-    -- Annotate top-level lambdas at RHS basing on the aggregated demand info
-    -- See Note [Annotating lambdas at right-hand side]
-    annotated_rhs = annLamWithShotness (idDemandInfo id2) rhs'
 
         -- If the actual demand is better than the vanilla call
         -- demand, you might think that we might do better to re-analyse
@@ -306,25 +323,6 @@ io_hack_reqd scrut con bndrs
       _     -> True
   | otherwise
   = False
-
-annLamWithShotness :: Demand -> CoreExpr -> CoreExpr
-annLamWithShotness d e
-  | Just u <- cleanUseDmd_maybe d
-  = go u e
-  | otherwise = e
-  where
-    go u e
-      | Just (c, u') <- peelUseCall u
-      , Lam bndr body <- e
-      = if isTyVar bndr
-        then Lam bndr                    (go u  body)
-        else Lam (setOneShotness c bndr) (go u' body)
-      | otherwise
-      = e
-
-setOneShotness :: Count -> Id -> Id
-setOneShotness One  bndr = setOneShotLambda bndr
-setOneShotness Many bndr = bndr
 
 dmdAnalAlt :: AnalEnv -> CleanDemand -> Id -> Alt Var -> (DmdType, Alt Var)
 dmdAnalAlt env dmd case_bndr (con,bndrs,rhs)
@@ -432,23 +430,6 @@ free variable |y|. Conversely, if the demand on |h| is unleashed right
 on the spot, we will get the desired result, namely, that |f| is
 strict in |y|.
 
-Note [Annotating lambdas at right-hand side]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Let us take a look at the following example:
-
-g f = let x = 100
-          h = \y -> f x y
-       in h 5
-
-One can see that |h| is called just once, therefore the RHS of h can
-be annotated as a one-shot lambda. This is done by the function
-annLamWithShotness *a posteriori*, i.e., basing on the aggregated
-usage demand on |h| from the body of |let|-expression, which is C1(U)
-in this case.
-
-In other words, for locally-bound lambdas we can infer
-one-shotness.
-
 
 ************************************************************************
 *                                                                      *
@@ -553,7 +534,7 @@ dmdFix top_lvl env orig_pairs
         my_downRhs (env, lazy_fv) (id,rhs)
           = ((env', lazy_fv'), (id', rhs'))
           where
-            (sig, lazy_fv1, id', rhs') = dmdAnalRhs top_lvl (Just bndrs) env id rhs
+            (sig, lazy_fv1, id', rhs') = dmdAnalRhsLetDown top_lvl (Just bndrs) env id rhs
             lazy_fv'                   = plusVarEnv_C bothDmd lazy_fv lazy_fv1
             env'                       = extendAnalEnv top_lvl env id sig
 
@@ -562,26 +543,47 @@ dmdFix top_lvl env orig_pairs
                         Just (sig,_) -> sig
                         Nothing      -> pprPanic "dmdFix" (ppr var)
 
--- Non-recursive bindings
-dmdAnalRhs :: TopLevelFlag
+
+-- Trivial RHS
+-- See Note [Demand analysis for trivial right-hand sides]
+dmdAnalTrivialRhs ::
+    AnalEnv -> Id -> CoreExpr -> Var ->
+    (StrictSig, VarEnv Demand, Id, CoreExpr)
+dmdAnalTrivialRhs env id rhs fn
+  = (fn_str, fn_fv, set_idStrictness env id fn_str, rhs)
+  where
+    fn_str = getStrictness env fn
+    fn_fv | isLocalId fn = unitVarEnv fn topDmd
+          | otherwise    = emptyDmdEnv
+    -- Note [Remember to demand the function itself]
+    -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    -- fn_fv: don't forget to produce a demand for fn itself
+    -- Lacking this caused Trac #9128
+    -- The demand is very conservative (topDmd), but that doesn't
+    -- matter; trivial bindings are usually inlined, so it only
+    -- kicks in for top-level bindings and NOINLINE bindings
+
+-- Let bindings can be processed in two ways:
+-- Down (RHS before body) or Up (body before RHS).
+-- dmdAnalRhsLetDown implements the Down variant:
+--  * assuming a demand of <L,U>
+--  * looking at the definition
+--  * determining a strictness signature
+--
+-- It is used for toplevel definition, recursive definitions and local
+-- non-recursive definitions that have manifest lambdas.
+-- Local non-recursive definitions without a lambda are handled with LetUp.
+--
+-- This is the LetDown rule in the paper “Higher-Order Cardinality Analysis”.
+dmdAnalRhsLetDown :: TopLevelFlag
            -> Maybe [Id]   -- Just bs <=> recursive, Nothing <=> non-recursive
            -> AnalEnv -> Id -> CoreExpr
-           -> (StrictSig,  DmdEnv, Id, CoreExpr)
+           -> (StrictSig, DmdEnv, Id, CoreExpr)
 -- Process the RHS of the binding, add the strictness signature
 -- to the Id, and augment the environment with the signature as well.
-dmdAnalRhs top_lvl rec_flag env id rhs
+dmdAnalRhsLetDown top_lvl rec_flag env id rhs
   | Just fn <- unpackTrivial rhs   -- See Note [Demand analysis for trivial right-hand sides]
-  , let fn_str = getStrictness env fn
-        fn_fv | isLocalId fn = unitVarEnv fn topDmd
-              | otherwise    = emptyDmdEnv
-        -- Note [Remember to demand the function itself]
-        -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        -- fn_fv: don't forget to produce a demand for fn itself
-        -- Lacking this caused Trac #9128
-        -- The demand is very conservative (topDmd), but that doesn't
-        -- matter; trivial bindings are usually inlined, so it only
-        -- kicks in for top-level bindings and NOINLINE bindings
-  = (fn_str, fn_fv, set_idStrictness env id fn_str, rhs)
+  = dmdAnalTrivialRhs env id rhs fn
 
   | otherwise
   = (sig_ty, lazy_fv, id', mkLams bndrs' body')
@@ -630,6 +632,18 @@ unpackTrivial (Cast e _)              = unpackTrivial e
 unpackTrivial (Lam v e) | isTyVar v   = unpackTrivial e
 unpackTrivial (App e a) | isTypeArg a = unpackTrivial e
 unpackTrivial _                       = Nothing
+
+-- | If given the RHS of a let-binding, this 'useLetUp' determines
+-- whether we should process the binding up (body before rhs) or
+-- down (rhs before body).
+--
+-- We use LetDown if there is a chance to get a useful strictness signature.
+-- This is the case when there are manifest value lambdas.
+useLetUp :: CoreExpr -> Bool
+useLetUp (Lam v e) | isTyVar v = useLetUp e
+useLetUp (Lam _ _)             = False
+useLetUp _                     = True
+
 
 {-
 Note [Demand analysis for trivial right-hand sides]
@@ -703,7 +717,7 @@ addLazyFVs dmd_ty lazy_fvs
         -- demand with the bottom coming up from 'error'
         --
         -- I got a loop in the fixpointer without this, due to an interaction
-        -- with the lazy_fv filtering in dmdAnalRhs.  Roughly, it was
+        -- with the lazy_fv filtering in dmdAnalRhsLetDown.  Roughly, it was
         --      letrec f n x
         --          = letrec g y = x `fatbar`
         --                         letrec h z = z + ...g...
@@ -749,23 +763,22 @@ annotateLamBndrs :: AnalEnv -> DFunFlag -> DmdType -> [Var] -> (DmdType, [Var])
 annotateLamBndrs env args_of_dfun ty bndrs = mapAccumR annotate ty bndrs
   where
     annotate dmd_ty bndr
-      | isId bndr = annotateLamIdBndr env args_of_dfun dmd_ty Many bndr
+      | isId bndr = annotateLamIdBndr env args_of_dfun dmd_ty bndr
       | otherwise = (dmd_ty, bndr)
 
 annotateLamIdBndr :: AnalEnv
                   -> DFunFlag   -- is this lambda at the top of the RHS of a dfun?
                   -> DmdType    -- Demand type of body
-                  -> Count      -- One-shot-ness of the lambda
                   -> Id         -- Lambda binder
                   -> (DmdType,  -- Demand type of lambda
                       Id)       -- and binder annotated with demand
 
-annotateLamIdBndr env arg_of_dfun dmd_ty one_shot id
+annotateLamIdBndr env arg_of_dfun dmd_ty id
 -- For lambdas we add the demand to the argument demands
 -- Only called for Ids
   = ASSERT( isId id )
     -- pprTrace "annLamBndr" (vcat [ppr id, ppr _dmd_ty]) $
-    (final_ty, setOneShotness one_shot (setIdDemandInfo id dmd))
+    (final_ty, setIdDemandInfo id dmd)
   where
       -- Watch out!  See note [Lambda-bound unfoldings]
     final_ty = case maybeUnfoldingTemplate (idUnfolding id) of
@@ -1346,7 +1359,7 @@ See section 9.2 (Finding fixpoints) of the paper.
 
 Our basic plan is to initialise the strictness of each Id in a
 recursive group to "bottom", and find a fixpoint from there.  However,
-this group B might be inside an *enclosing* recursiveb group A, in
+this group B might be inside an *enclosing* recursive group A, in
 which case we'll do the entire fixpoint shebang on for each iteration
 of A. This can be illustrated by the following example:
 
@@ -1376,4 +1389,34 @@ of the Id, and start from "bottom".  Nowadays the Id can have a current
 strictness, because interface files record strictness for nested bindings.
 To know when we are in the first iteration, we look at the ae_virgin
 field of the AnalEnv.
+
+
+Note [Final Demand Analyser run]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Some of the information that the demand analyser determines is not always
+preserved by the simplifier.  For example, the simplifier will happily rewrite
+  \y [Demand=1*U] let x = y in x + x
+to
+  \y [Demand=1*U] y + y
+which is quite a lie.
+
+The once-used information is (currently) only used by the code
+generator, though.  So:
+
+ * We zap the used-once info in the worker-wrapper;
+   see Note [Zapping Used Once info in WorkWrap] in WorkWrap. If it's
+   not reliable, it's better not to have it at all.
+
+ * Just before TidyCore, we add a pass of the demand analyser,
+      but WITHOUT subsequent worker/wrapper and simplifier,
+   right before TidyCore.  See SimplCore.getCoreToDo.
+
+   This way, correct information finds its way into the module interface
+   (strictness signatures!) and the code generator (single-entry thunks!)
+
+Note that, in contrast, the single-call information (C1(..)) /can/ be
+relied upon, as the simplifier tends to be very careful about not
+duplicating actual function calls.
+
+Also see #11731.
 -}

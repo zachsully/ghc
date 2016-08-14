@@ -37,14 +37,12 @@ import TcHsSyn
 import Type
 import CoreSyn
 import CoreUtils
-import CoreFVs
 import MkCore
 
 import DynFlags
 import CostCentre
 import Id
 import Module
-import VarSet
 import ConLike
 import DataCon
 import TysWiredIn
@@ -56,11 +54,10 @@ import SrcLoc
 import Util
 import Bag
 import Outputable
-import FastString
 import PatSyn
 
-import IfaceEnv
-import Data.IORef       ( atomicModifyIORef', modifyIORef )
+import Data.List        ( intercalate )
+import Data.IORef       ( atomicModifyIORef' )
 
 import Control.Monad
 import GHC.Fingerprint
@@ -152,13 +149,14 @@ dsUnliftedBind (AbsBindsSig { abs_tvs         = []
        ; body' <- dsUnliftedBind (bind { fun_id = noLoc poly }) body
        ; return (mkCoreLets ds_binds body') }
 
-dsUnliftedBind (FunBind { fun_id = L _ fun
+dsUnliftedBind (FunBind { fun_id = L l fun
                         , fun_matches = matches
                         , fun_co_fn = co_fn
                         , fun_tick = tick }) body
                -- Can't be a bang pattern (that looks like a PatBind)
                -- so must be simply unboxed
-  = do { (args, rhs) <- matchWrapper (FunRhs (idName fun)) Nothing matches
+  = do { (args, rhs) <- matchWrapper (FunRhs (L l $ idName fun) Prefix)
+                                     Nothing matches
        ; MASSERT( null args ) -- Functions aren't lifted
        ; MASSERT( isIdHsWrapper co_fn )
        ; let rhs' = mkOptTickBox tick rhs
@@ -228,16 +226,16 @@ dsExpr (NegApp expr neg_expr)
 dsExpr (HsLam a_Match)
   = uncurry mkLams <$> matchWrapper LambdaExpr Nothing a_Match
 
-dsExpr (HsLamCase arg matches)
-  = do { arg_var <- newSysLocalDs arg
-       ; ([discrim_var], matching_code) <- matchWrapper CaseAlt Nothing matches
-       ; return $ Lam arg_var $ bindNonRec discrim_var (Var arg_var) matching_code }
+dsExpr (HsLamCase matches)
+  = do { ([discrim_var], matching_code) <- matchWrapper CaseAlt Nothing matches
+       ; return $ Lam discrim_var matching_code }
 
 dsExpr e@(HsApp fun arg)
+  = mkCoreAppDs (text "HsApp" <+> ppr e) <$> dsLExpr fun <*> dsLExpr arg
+
+dsExpr (HsAppTypeOut e _)
     -- ignore type arguments here; they're in the wrappers instead at this point
-  | isLHsTypeExpr arg = dsLExpr fun
-  | otherwise         = mkCoreAppDs (text "HsApp" <+> ppr e)
-                        <$> dsLExpr fun <*>  dsLExpr arg
+  = dsLExpr e
 
 
 {-
@@ -315,6 +313,13 @@ dsExpr (ExplicitTuple tup_args boxity)
 
        ; return $ mkCoreLams lam_vars $
                   mkCoreTupBoxity boxity args }
+
+dsExpr (ExplicitSum alt arity expr types)
+  = do { core_expr <- dsLExpr expr
+       ; return $ mkCoreConApps (sumDataCon alt arity)
+                                (map (Type . getRuntimeRep "dsExpr ExplicitSum") types ++
+                                 map Type types ++
+                                 [core_expr]) }
 
 dsExpr (HsSCC _ cc expr@(L loc _)) = do
     dflags <- getDynFlags
@@ -414,30 +419,27 @@ dsExpr (PArrSeq _ _)
     -- shouldn't have let it through
 
 {-
-\noindent
-\underline{\bf Static Pointers}
-               ~~~~~~~~~~~~~~~
-\begin{verbatim}
+Static Pointers
+~~~~~~~~~~~~~~~
+
     g = ... static f ...
 ==>
-    sptEntry:N = StaticPtr
-        (fingerprintString "pkgKey:module.sptEntry:N")
-        (StaticPtrInfo "current pkg key" "current module" "sptEntry:0")
-        f
-    g = ... sptEntry:N
-\end{verbatim}
+    g = ... StaticPtr
+              w0 w1
+              (StaticPtrInfo "current pkg key" "current module" "N")
+              f
+        ...
+
+Where we obtain w0 and w1 from
+
+   Fingerprint w0 w1 = fingerprintString "pkgKey:module:N"
 -}
 
-dsExpr (HsStatic expr@(L loc _)) = do
+dsExpr (HsStatic _ expr@(L loc _)) = do
     expr_ds <- dsLExpr expr
     let ty = exprType expr_ds
-    n' <- mkSptEntryName loc
-    static_binds_var <- dsGetStaticBindsVar
-
-    staticPtrTyCon       <- dsLookupTyCon   staticPtrTyConName
     staticPtrInfoDataCon <- dsLookupDataCon staticPtrInfoDataConName
     staticPtrDataCon     <- dsLookupDataCon staticPtrDataConName
-    fingerprintDataCon   <- dsLookupDataCon fingerprintDataConName
 
     dflags <- getDynFlags
     let (line, col) = case loc of
@@ -449,42 +451,48 @@ dsExpr (HsStatic expr@(L loc _)) = do
                      [ Type intTy              , Type intTy
                      , mkIntExprInt dflags line, mkIntExprInt dflags col
                      ]
+    this_mod <- getModule
     info <- mkConApp staticPtrInfoDataCon <$>
             (++[srcLoc]) <$>
             mapM mkStringExprFS
-                 [ unitIdFS $ moduleUnitId $ nameModule n'
-                 , moduleNameFS $ moduleName $ nameModule n'
-                 , occNameFS    $ nameOccName n'
+                 [ unitIdFS $ moduleUnitId this_mod
+                 , moduleNameFS $ moduleName this_mod
                  ]
-    let tvars = tyCoVarsOfTypeWellScoped ty
-        speTy = ASSERT( all isTyVar tvars )  -- ty is top-level, so this is OK
-                mkInvForAllTys tvars $ mkTyConApp staticPtrTyCon [ty]
-        speId = mkExportedVanillaId n' speTy
-        fp@(Fingerprint w0 w1) = fingerprintName $ idName speId
-        fp_core = mkConApp fingerprintDataCon
-                    [ mkWord64LitWordRep dflags w0
-                    , mkWord64LitWordRep dflags w1
-                    ]
-        sp    = mkConApp staticPtrDataCon [Type ty, fp_core, info, expr_ds]
-    liftIO $ modifyIORef static_binds_var ((fp, (speId, mkLams tvars sp)) :)
-    putSrcSpanDs loc $ return $ mkTyApps (Var speId) (mkTyVarTys tvars)
+    Fingerprint w0 w1 <- mkStaticPtrFingerprint this_mod
+    putSrcSpanDs loc $ return $
+      mkConApp staticPtrDataCon [ Type ty
+                                , mkWord64LitWordRep dflags w0
+                                , mkWord64LitWordRep dflags w1
+                                , info
+                                , expr_ds
+                                ]
 
   where
-
     -- | Choose either 'Word64#' or 'Word#' to represent the arguments of the
     -- 'Fingerprint' data constructor.
     mkWord64LitWordRep dflags
       | platformWordSize (targetPlatform dflags) < 8 = mkWord64LitWord64
       | otherwise = mkWordLit dflags . toInteger
 
-    fingerprintName :: Name -> Fingerprint
-    fingerprintName n = fingerprintString $ unpackFS $ concatFS
-        [ unitIdFS $ moduleUnitId $ nameModule n
-        , fsLit ":"
-        , moduleNameFS (moduleName $ nameModule n)
-        , fsLit "."
-        , occNameFS $ occName n
+    mkStaticPtrFingerprint :: Module -> DsM Fingerprint
+    mkStaticPtrFingerprint this_mod = do
+      n <- mkGenPerModuleNum this_mod
+      return $ fingerprintString $ intercalate ":"
+        [ unitIdString $ moduleUnitId this_mod
+        , moduleNameString $ moduleName this_mod
+        , show n
         ]
+
+    mkGenPerModuleNum :: Module -> DsM Int
+    mkGenPerModuleNum this_mod = do
+      dflags <- getDynFlags
+      let -- Note [Generating fresh names for ccall wrapper]
+          -- in compiler/typecheck/TcEnv.hs
+          wrapperRef = nextWrapperNum dflags
+      wrapperNum <- liftIO $ atomicModifyIORef' wrapperRef $ \mod_env ->
+        let num = lookupWithDefaultModuleEnv mod_env 0 this_mod
+         in (extendModuleEnv mod_env this_mod (num + 1), num)
+      return wrapperNum
 
 {-
 \noindent
@@ -683,7 +691,7 @@ dsExpr expr@(RecordUpd { rupd_expr = record_expr, rupd_flds = fields
                                          , pat_args = PrefixCon $ map nlVarPat arg_ids
                                          , pat_arg_tys = in_inst_tys
                                          , pat_wrap = req_wrap }
-           ; return (mkSimpleMatch [pat] wrapped_rhs) }
+           ; return (mkSimpleMatch RecUpd [pat] wrapped_rhs) }
 
 -- Here is where we desugar the Template Haskell brackets and escapes
 
@@ -730,15 +738,9 @@ dsExpr (EWildPat      {})  = panic "dsExpr:EWildPat"
 dsExpr (EAsPat        {})  = panic "dsExpr:EAsPat"
 dsExpr (EViewPat      {})  = panic "dsExpr:EViewPat"
 dsExpr (ELazyPat      {})  = panic "dsExpr:ELazyPat"
-dsExpr (HsType        {})  = panic "dsExpr:HsType" -- removed by typechecker
+dsExpr (HsAppType     {})  = panic "dsExpr:HsAppType" -- removed by typechecker
 dsExpr (HsDo          {})  = panic "dsExpr:HsDo"
 dsExpr (HsRecFld      {})  = panic "dsExpr:HsRecFld"
-
--- Normally handled in HsApp case, but a GHC API user might try to desugar
--- an HsTypeOut, since it is an HsExpr in a typechecked module after all.
--- (Such as ghci itself, in #11456.) So improve the error message slightly.
-dsExpr (HsTypeOut {})
-  = panic "dsExpr: tried to desugar a naked type application argument (HsTypeOut)"
 
 ------------------------------
 dsSyntaxExpr :: SyntaxExpr Id -> [CoreExpr] -> DsM CoreExpr
@@ -762,55 +764,58 @@ Note [Desugaring explicit lists]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Explicit lists are desugared in a cleverer way to prevent some
 fruitless allocations.  Essentially, whenever we see a list literal
-[x_1, ..., x_n] we:
+[x_1, ..., x_n] we generate the corresponding expression in terms of
+build:
 
-1. Find the tail of the list that can be allocated statically (say
-   [x_k, ..., x_n]) by later stages and ensure we desugar that
-   normally: this makes sure that we don't cause a code size increase
-   by having the cons in that expression fused (see later) and hence
-   being unable to statically allocate any more
+Explicit lists (literals) are desugared to allow build/foldr fusion when
+beneficial. This is a bit of a trade-off,
 
-2. For the prefix of the list which cannot be allocated statically,
-   say [x_1, ..., x_(k-1)], we turn it into an expression involving
-   build so that if we find any foldrs over it it will fuse away
-   entirely!
+ * build/foldr fusion can generate far larger code than the corresponding
+   cons-chain (e.g. see #11707)
 
-   So in this example we will desugar to:
-   build (\c n -> x_1 `c` x_2 `c` .... `c` foldr c n [x_k, ..., x_n]
+ * even when it doesn't produce more code, build can still fail to fuse,
+   requiring that the simplifier do more work to bring the expression
+   back into cons-chain form; this costs compile time
 
-   If fusion fails to occur then build will get inlined and (since we
-   defined a RULE for foldr (:) []) we will get back exactly the
-   normal desugaring for an explicit list.
-
-This optimisation can be worth a lot: up to 25% of the total
-allocation in some nofib programs. Specifically
+ * when it works, fusion can be a significant win. Allocations are reduced
+   by up to 25% in some nofib programs. Specifically,
 
         Program           Size    Allocs   Runtime  CompTime
         rewrite          +0.0%    -26.3%      0.02     -1.8%
            ansi          -0.3%    -13.8%      0.00     +0.0%
            lift          +0.0%     -8.7%      0.00     -2.3%
 
-Of course, if rules aren't turned on then there is pretty much no
-point doing this fancy stuff, and it may even be harmful.
+At the moment we use a simple heuristic to determine whether build will be
+fruitful: for small lists we assume the benefits of fusion will be worthwhile;
+for long lists we assume that the benefits will be outweighted by the cost of
+code duplication. This magic length threshold is @maxBuildLength@. Also, fusion
+won't work at all if rewrite rules are disabled, so we don't use the build-based
+desugaring in this case.
 
-=======>  Note by SLPJ Dec 08.
-
-I'm unconvinced that we should *ever* generate a build for an explicit
-list.  See the comments in GHC.Base about the foldr/cons rule, which
-points out that (foldr k z [a,b,c]) may generate *much* less code than
-(a `k` b `k` c `k` z).
-
-Furthermore generating builds messes up the LHS of RULES.
-Example: the foldr/single rule in GHC.Base
-   foldr k z [x] = ...
-We do not want to generate a build invocation on the LHS of this RULE!
-
-We fix this by disabling rules in rule LHSs, and testing that
-flag here; see Note [Desugaring RULE left hand sides] in Desugar
-
-To test this I've added a (static) flag -fsimple-list-literals, which
-makes all list literals be generated via the simple route.
+We used to have a more complex heuristic which would try to break the list into
+"static" and "dynamic" parts and only build-desugar the dynamic part.
+Unfortunately, determining "static-ness" reliably is a bit tricky and the
+heuristic at times produced surprising behavior (see #11710) so it was dropped.
 -}
+
+{- | The longest list length which we will desugar using @build@.
+
+This is essentially a magic number and its setting is unfortunate rather
+arbitrary. The idea here, as mentioned in Note [Desugaring explicit lists],
+is to avoid deforesting large static data into large(r) code. Ideally we'd
+want a smaller threshold with larger consumers and vice-versa, but we have no
+way of knowing what will be consuming our list in the desugaring impossible to
+set generally correctly.
+
+The effect of reducing this number will be that 'build' fusion is applied
+less often. From a runtime performance perspective, applying 'build' more
+liberally on "moderately" sized lists should rarely hurt and will often it can
+only expose further optimization opportunities; if no fusion is possible it will
+eventually get rule-rewritten back to a list). We do, however, pay in compile
+time.
+-}
+maxBuildLength :: Int
+maxBuildLength = 32
 
 dsExplicitList :: Type -> Maybe (SyntaxExpr Id) -> [LHsExpr Id]
                -> DsM CoreExpr
@@ -818,36 +823,23 @@ dsExplicitList :: Type -> Maybe (SyntaxExpr Id) -> [LHsExpr Id]
 dsExplicitList elt_ty Nothing xs
   = do { dflags <- getDynFlags
        ; xs' <- mapM dsLExpr xs
-       ; let (dynamic_prefix, static_suffix) = spanTail is_static xs'
-       ; if gopt Opt_SimpleListLiterals dflags        -- -fsimple-list-literals
+       ; if length xs' > maxBuildLength
+                -- Don't generate builds if the list is very long.
+         || length xs' == 0
+                -- Don't generate builds when the [] constructor will do
          || not (gopt Opt_EnableRewriteRules dflags)  -- Rewrite rules off
                 -- Don't generate a build if there are no rules to eliminate it!
                 -- See Note [Desugaring RULE left hand sides] in Desugar
-         || null dynamic_prefix   -- Avoid build (\c n. foldr c n xs)!
          then return $ mkListExpr elt_ty xs'
-         else mkBuildExpr elt_ty (mkSplitExplicitList dynamic_prefix static_suffix) }
+         else mkBuildExpr elt_ty (mk_build_list xs') }
   where
-    is_static :: CoreExpr -> Bool
-    is_static e = all is_static_var (varSetElems (exprFreeVars e))
-
-    is_static_var :: Var -> Bool
-    is_static_var v
-      | isId v = isExternalName (idName v)  -- Top-level things are given external names
-      | otherwise = False                   -- Type variables
-
-    mkSplitExplicitList prefix suffix (c, _) (n, n_ty)
-      = do { let suffix' = mkListExpr elt_ty suffix
-           ; folded_suffix <- mkFoldrExpr elt_ty n_ty (Var c) (Var n) suffix'
-           ; return (foldr (App . App (Var c)) folded_suffix prefix) }
+    mk_build_list xs' (cons, _) (nil, _)
+      = return (foldr (App . App (Var cons)) (Var nil) xs')
 
 dsExplicitList elt_ty (Just fln) xs
   = do { list <- dsExplicitList elt_ty Nothing xs
        ; dflags <- getDynFlags
        ; dsSyntaxExpr fln [mkIntExprInt dflags (length xs), list] }
-
-spanTail :: (a -> Bool) -> [a] -> ([a], [a])
-spanTail f xs = (reverse rejected, reverse satisfying)
-    where (satisfying, rejected) = span f $ reverse xs
 
 dsArithSeq :: PostTcExpr -> (ArithSeqInfo Id) -> DsM CoreExpr
 dsArithSeq expr (From from)
@@ -923,7 +915,8 @@ dsDo stmts
            ; let body' = noLoc $ HsDo DoExpr (noLoc stmts) body_ty
 
            ; let fun = L noSrcSpan $ HsLam $
-                   MG { mg_alts = noLoc [mkSimpleMatch pats body']
+                   MG { mg_alts = noLoc [mkSimpleMatch LambdaExpr pats
+                                                       body']
                       , mg_arg_tys = arg_tys
                       , mg_res_ty = body_ty
                       , mg_origin = Generated }
@@ -954,7 +947,9 @@ dsDo stmts
         rets         = map noLoc rec_rets
         mfix_app     = nlHsSyntaxApps mfix_op [mfix_arg]
         mfix_arg     = noLoc $ HsLam
-                           (MG { mg_alts = noLoc [mkSimpleMatch [mfix_pat] body]
+                           (MG { mg_alts = noLoc [mkSimpleMatch
+                                                    LambdaExpr
+                                                    [mfix_pat] body]
                                , mg_arg_tys = [tup_ty], mg_res_ty = body_ty
                                , mg_origin = Generated })
         mfix_pat     = noLoc $ LazyPat $ mkBigLHsPatTupId rec_tup_pats
@@ -1029,33 +1024,3 @@ badMonadBind rhs elt_ty
          , hang (text "Suppress this warning by saying")
               2 (quotes $ text "_ <-" <+> ppr rhs)
          ]
-
-{-
-************************************************************************
-*                                                                      *
-\subsection{Static pointers}
-*                                                                      *
-************************************************************************
--}
-
--- | Creates an name for an entry in the Static Pointer Table.
---
--- The name has the form @sptEntry:<N>@ where @<N>@ is generated from a
--- per-module counter.
---
-mkSptEntryName :: SrcSpan -> DsM Name
-mkSptEntryName loc = do
-    mod  <- getModule
-    occ  <- mkWrapperName "sptEntry"
-    newGlobalBinder mod occ loc
-  where
-    mkWrapperName what
-      = do dflags <- getDynFlags
-           thisMod <- getModule
-           let -- Note [Generating fresh names for ccall wrapper]
-               -- in compiler/typecheck/TcEnv.hs
-               wrapperRef = nextWrapperNum dflags
-           wrapperNum <- liftIO $ atomicModifyIORef' wrapperRef $ \mod_env ->
-               let num = lookupWithDefaultModuleEnv mod_env 0 thisMod
-                in (extendModuleEnv mod_env thisMod (num+1), num)
-           return $ mkVarOcc $ what ++ ":" ++ show wrapperNum

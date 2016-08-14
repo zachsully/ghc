@@ -25,7 +25,7 @@ module IdInfo (
 
         -- ** Zapping various forms of Info
         zapLamInfo, zapFragileInfo,
-        zapDemandInfo, zapUsageInfo,
+        zapDemandInfo, zapUsageInfo, zapUsageEnvInfo, zapUsedOnceInfo,
 
         -- ** The ArityInfo type
         ArityInfo,
@@ -78,7 +78,7 @@ import VarSet
 import BasicTypes
 import DataCon
 import TyCon
-import {-# SOURCE #-} PatSyn
+import PatSyn
 import ForeignCall
 import Outputable
 import Module
@@ -135,7 +135,9 @@ data IdDetails
        --                  implemented with a newtype, so it might be bad
        --                  to be strict on this dictionary
 
-  | CoVarId                    -- ^ A coercion variable
+  | CoVarId    -- ^ A coercion variable
+               -- This only covers /un-lifted/ coercions, of type
+               -- (t1 ~# t2) or (t1 ~R# t2), not their lifted variants
   | JoinId JoinArity           -- ^ An 'Id' for a join point taking n arguments
        -- Note [Join points]
 
@@ -245,7 +247,11 @@ However, it is always safe to set the join point flag to False.
 --
 -- Much of the 'IdInfo' gives information about the value, or definition, of
 -- the 'Id', independent of its usage. Exceptions to this
--- are 'demandInfo', 'occInfo', 'oneShotInfo', and 'callArityInfo'.
+-- are 'demandInfo', 'occInfo', 'oneShotInfo' and 'callArityInfo'.
+--
+-- Performance note: when we update 'IdInfo', we have to reallocate this
+-- entire record, so it is a good idea not to let this data structure get
+-- too big.
 data IdInfo
   = IdInfo {
         arityInfo       :: !ArityInfo,          -- ^ 'Id' arity
@@ -348,7 +354,7 @@ type ArityInfo = Arity
 
 -- | It is always safe to assume that an 'Id' has an arity of 0
 unknownArity :: Arity
-unknownArity = 0 :: Arity
+unknownArity = 0
 
 ppArityInfo :: Int -> SDoc
 ppArityInfo 0 = empty
@@ -517,6 +523,19 @@ zapDemandInfo info = Just (info {demandInfo = topDmd})
 -- | Remove usage (but not strictness) info on the 'IdInfo'
 zapUsageInfo :: IdInfo -> Maybe IdInfo
 zapUsageInfo info = Just (info {demandInfo = zapUsageDemand (demandInfo info)})
+
+-- | Remove usage environment info from the strictness signature on the 'IdInfo'
+zapUsageEnvInfo :: IdInfo -> Maybe IdInfo
+zapUsageEnvInfo info
+    | hasDemandEnvSig (strictnessInfo info)
+    = Just (info {strictnessInfo = zapUsageEnvSig (strictnessInfo info)})
+    | otherwise
+    = Nothing
+
+zapUsedOnceInfo :: IdInfo -> Maybe IdInfo
+zapUsedOnceInfo info
+    = Just $ info { strictnessInfo = zapUsedOnceSig    (strictnessInfo info)
+                  , demandInfo     = zapUsedOnceDemand (demandInfo     info) }
 
 zapFragileInfo :: IdInfo -> Maybe IdInfo
 -- ^ Zap info that depends on free variables

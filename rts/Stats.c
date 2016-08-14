@@ -163,7 +163,7 @@ initStats0(void)
 void
 initStats1 (void)
 {
-    nat i;
+    uint32_t i;
 
     if (RtsFlags.GcFlags.giveStats >= VERBOSE_GC_STATS) {
         statsPrintf("    Alloc    Copied     Live     GC     GC      TOT      TOT  Page Flts\n");
@@ -232,12 +232,12 @@ stat_startGCSync (gc_thread *gct)
    Called at the beginning of each GC
    -------------------------------------------------------------------------- */
 
-static nat rub_bell = 0;
+static uint32_t rub_bell = 0;
 
 void
 stat_startGC (Capability *cap, gc_thread *gct)
 {
-    nat bell = RtsFlags.GcFlags.ringBell;
+    uint32_t bell = RtsFlags.GcFlags.ringBell;
 
     if (bell) {
         if (bell > 1) {
@@ -272,8 +272,8 @@ stat_startGC (Capability *cap, gc_thread *gct)
 
 void
 stat_endGC (Capability *cap, gc_thread *gct,
-            W_ live, W_ copied, W_ slop, nat gen,
-            nat par_n_threads, W_ par_max_copied, W_ par_tot_copied)
+            W_ live, W_ copied, W_ slop, uint32_t gen,
+            uint32_t par_n_threads, W_ par_max_copied, W_ par_tot_copied)
 {
     W_ tot_alloc;
     W_ alloc;
@@ -299,7 +299,7 @@ stat_endGC (Capability *cap, gc_thread *gct,
                           slop   * sizeof(W_),
                           /* current loss due to fragmentation */
                           (mblocks_allocated * BLOCKS_PER_MBLOCK - n_alloc_blocks)
-                                 * BLOCK_SIZE_W * sizeof(W_),
+                                 * BLOCK_SIZE,
                           par_n_threads,
                           par_max_copied * sizeof(W_),
                           par_tot_copied * sizeof(W_));
@@ -331,7 +331,7 @@ stat_endGC (Capability *cap, gc_thread *gct,
         if (RtsFlags.GcFlags.giveStats == VERBOSE_GC_STATS) {
             W_ faults = getPageFaults();
 
-            statsPrintf("%9" FMT_SizeT " %9" FMT_SizeT " %9" FMT_SizeT,
+            statsPrintf("%9" FMT_Word " %9" FMT_Word " %9" FMT_Word,
                     alloc*sizeof(W_), copied*sizeof(W_),
                         live*sizeof(W_));
             statsPrintf(" %6.3f %6.3f %8.3f %8.3f %4" FMT_Word " %4" FMT_Word "  (Gen: %2d)\n",
@@ -355,7 +355,7 @@ stat_endGC (Capability *cap, gc_thread *gct,
                                  copied*sizeof(W_),
                                  par_max_copied * sizeof(W_),
                                  mblocks_allocated * BLOCKS_PER_MBLOCK
-                                   * BLOCK_SIZE_W * sizeof(W_),
+                                   * BLOCK_SIZE,
                                  slop   * sizeof(W_),
                                  TimeToNS(gc_sync_elapsed),
                                  TimeToNS(gc_elapsed),
@@ -420,9 +420,9 @@ stat_startRP(void)
 #ifdef PROFILING
 void
 stat_endRP(
-  nat retainerGeneration,
+  uint32_t retainerGeneration,
 #ifdef DEBUG_RETAINER
-  nat maxCStackSize,
+  uint32_t maxCStackSize,
   int maxStackSize,
 #endif
   double averageNumVisit)
@@ -540,7 +540,7 @@ stat_exit (void)
         char temp[BIG_STRING_LEN];
         Time tot_cpu;
         Time tot_elapsed;
-        nat i, g, total_collections = 0;
+        uint32_t i, g, total_collections = 0;
 
         getProcessTimes( &tot_cpu, &tot_elapsed );
         tot_elapsed -= start_init_elapsed;
@@ -560,7 +560,7 @@ stat_exit (void)
         if (tot_elapsed == 0.0) tot_elapsed = 1;
 
         if (RtsFlags.GcFlags.giveStats >= VERBOSE_GC_STATS) {
-            statsPrintf("%9" FMT_SizeT " %9.9s %9.9s", (W_)alloc*sizeof(W_), "", "");
+            statsPrintf("%9" FMT_Word " %9.9s %9.9s", (W_)alloc*sizeof(W_), "", "");
             statsPrintf(" %6.3f %6.3f\n\n", 0.0, 0.0);
         }
 
@@ -643,7 +643,7 @@ stat_exit (void)
             statsPrintf("\n");
 
             {
-                nat i;
+                uint32_t i;
                 SparkCounters sparks = { 0, 0, 0, 0, 0, 0};
                 for (i = 0; i < n_capabilities; i++) {
                     sparks.created   += capabilities[i]->spark_stats.created;
@@ -699,8 +699,8 @@ stat_exit (void)
                     TimeToSecondsDbl(tot_cpu - gc_cpu -
                                 PROF_VAL(RP_tot_time + HC_tot_time) - init_cpu) * 100
                     / TimeToSecondsDbl(tot_cpu),
-                    TimeToSecondsDbl(tot_cpu - gc_cpu -
-                                PROF_VAL(RP_tot_time + HC_tot_time) - init_cpu) * 100
+                    TimeToSecondsDbl(tot_elapsed - gc_elapsed -
+                                PROF_VAL(RPe_tot_time + HCe_tot_time) - init_elapsed) * 100
                     / TimeToSecondsDbl(tot_elapsed));
 
             /*
@@ -713,7 +713,7 @@ stat_exit (void)
 
 #if defined(THREADED_RTS) && defined(PROF_SPIN)
             {
-                nat g;
+                uint32_t g;
 
                 statsPrintf("gc_alloc_block_sync: %"FMT_Word64"\n", gc_alloc_block_sync.spin);
                 statsPrintf("whitehole_spin: %"FMT_Word64"\n", whitehole_spin);
@@ -785,7 +785,7 @@ stat_exit (void)
 void
 statDescribeGens(void)
 {
-  nat g, mut, lge, i;
+  uint32_t g, mut, lge, i;
   W_ gen_slop;
   W_ tot_live, tot_slop;
   W_ gen_live, gen_blocks;
@@ -836,7 +836,7 @@ statDescribeGens(void)
       tot_slop += gen_slop;
   }
   debugBelch("----------------------------------------------------------\n");
-  debugBelch("%41s%8" FMT_SizeT " %8" FMT_SizeT "\n",
+  debugBelch("%41s%8" FMT_Word " %8" FMT_Word "\n",
              "",tot_live*sizeof(W_),tot_slop*sizeof(W_));
   debugBelch("----------------------------------------------------------\n");
   debugBelch("\n");
@@ -859,8 +859,8 @@ extern rtsBool getGCStatsEnabled( void )
 
 extern void getGCStats( GCStats *s )
 {
-    nat total_collections = 0;
-    nat g;
+    uint32_t total_collections = 0;
+    uint32_t g;
     Time gc_cpu = 0;
     Time gc_elapsed = 0;
     Time current_elapsed = 0;
@@ -883,6 +883,7 @@ extern void getGCStats( GCStats *s )
     s->max_bytes_used = max_residency*sizeof(W_);
     s->cumulative_bytes_used = cumulative_residency*(StgWord64)sizeof(W_);
     s->peak_megabytes_allocated = (StgWord64)(peak_mblocks_allocated * MBLOCK_SIZE / (1024L * 1024L));
+    s->mblocks_allocated = (StgWord64)mblocks_allocated;
     s->bytes_copied = GC_tot_copied*(StgWord64)sizeof(W_);
     s->max_bytes_slop = max_slop*(StgWord64)sizeof(W_);
     s->current_bytes_used = current_residency*(StgWord64)sizeof(W_);
@@ -904,7 +905,7 @@ extern void getGCStats( GCStats *s )
 // extern void getTaskStats( TaskStats **s ) {}
 #if 0
 extern void getSparkStats( SparkCounters *s ) {
-    nat i;
+    uint32_t i;
     s->created = 0;
     s->dud = 0;
     s->overflowed = 0;

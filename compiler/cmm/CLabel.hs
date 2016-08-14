@@ -6,6 +6,8 @@
 --
 -----------------------------------------------------------------------------
 
+{-# LANGUAGE CPP #-}
+
 module CLabel (
         CLabel, -- abstract type
         ForeignLabelSource(..),
@@ -64,6 +66,7 @@ module CLabel (
         mkSMAP_DIRTY_infoLabel,
         mkEMPTY_MVAR_infoLabel,
         mkArrWords_infoLabel,
+        mkRUBBISH_ENTRY_infoLabel,
 
         mkTopTickyCtrLabel,
         mkCAFBlackHoleInfoTableLabel,
@@ -88,8 +91,9 @@ module CLabel (
 
         mkForeignLabel,
         addLabelSize,
-        foreignLabelStdcallInfo,
 
+        foreignLabelStdcallInfo,
+        isForeignLabel,
         mkCCLabel, mkCCSLabel,
 
         DynamicLinkerLabelInfo(..),
@@ -112,6 +116,8 @@ module CLabel (
         pprCLabel
     ) where
 
+#include "HsVersions.h"
+
 import IdInfo
 import BasicTypes
 import Packages
@@ -126,6 +132,7 @@ import FastString
 import DynFlags
 import Platform
 import UniqSet
+import Util
 import PprCore ( {- instances -} )
 
 -- -----------------------------------------------------------------------------
@@ -238,8 +245,91 @@ data CLabel
   | LargeBitmapLabel
         {-# UNPACK #-} !Unique
 
-  deriving (Eq, Ord)
+  deriving Eq
 
+-- This is laborious, but necessary. We can't derive Ord because
+-- Unique doesn't have an Ord instance. Note nonDetCmpUnique in the
+-- implementation. See Note [No Ord for Unique]
+-- This is non-deterministic but we do not currently support deterministic
+-- code-generation. See Note [Unique Determinism and code generation]
+instance Ord CLabel where
+  compare (IdLabel a1 b1 c1) (IdLabel a2 b2 c2) =
+    compare a1 a2 `thenCmp`
+    compare b1 b2 `thenCmp`
+    compare c1 c2
+  compare (CmmLabel a1 b1 c1) (CmmLabel a2 b2 c2) =
+    compare a1 a2 `thenCmp`
+    compare b1 b2 `thenCmp`
+    compare c1 c2
+  compare (RtsLabel a1) (RtsLabel a2) = compare a1 a2
+  compare (ForeignLabel a1 b1 c1 d1) (ForeignLabel a2 b2 c2 d2) =
+    compare a1 a2 `thenCmp`
+    compare b1 b2 `thenCmp`
+    compare c1 c2 `thenCmp`
+    compare d1 d2
+  compare (CaseLabel u1 a1) (CaseLabel u2 a2) =
+    nonDetCmpUnique u1 u2 `thenCmp`
+    compare a1 a2
+  compare (AsmTempLabel u1) (AsmTempLabel u2) = nonDetCmpUnique u1 u2
+  compare (AsmTempDerivedLabel a1 b1) (AsmTempDerivedLabel a2 b2) =
+    compare a1 a2 `thenCmp`
+    compare b1 b2
+  compare (StringLitLabel u1) (StringLitLabel u2) =
+    nonDetCmpUnique u1 u2
+  compare (PlainModuleInitLabel a1) (PlainModuleInitLabel a2) =
+    compare a1 a2
+  compare (CC_Label a1) (CC_Label a2) =
+    compare a1 a2
+  compare (CCS_Label a1) (CCS_Label a2) =
+    compare a1 a2
+  compare (DynamicLinkerLabel a1 b1) (DynamicLinkerLabel a2 b2) =
+    compare a1 a2 `thenCmp`
+    compare b1 b2
+  compare PicBaseLabel PicBaseLabel = EQ
+  compare (DeadStripPreventer a1) (DeadStripPreventer a2) =
+    compare a1 a2
+  compare (HpcTicksLabel a1) (HpcTicksLabel a2) =
+    compare a1 a2
+  compare (SRTLabel u1) (SRTLabel u2) =
+    nonDetCmpUnique u1 u2
+  compare (LargeSRTLabel u1) (LargeSRTLabel u2) =
+    nonDetCmpUnique u1 u2
+  compare (LargeBitmapLabel u1) (LargeBitmapLabel u2) =
+    nonDetCmpUnique u1 u2
+  compare IdLabel{} _ = LT
+  compare _ IdLabel{} = GT
+  compare CmmLabel{} _ = LT
+  compare _ CmmLabel{} = GT
+  compare RtsLabel{} _ = LT
+  compare _ RtsLabel{} = GT
+  compare ForeignLabel{} _ = LT
+  compare _ ForeignLabel{} = GT
+  compare CaseLabel{} _ = LT
+  compare _ CaseLabel{} = GT
+  compare AsmTempLabel{} _ = LT
+  compare _ AsmTempLabel{} = GT
+  compare AsmTempDerivedLabel{} _ = LT
+  compare _ AsmTempDerivedLabel{} = GT
+  compare StringLitLabel{} _ = LT
+  compare _ StringLitLabel{} = GT
+  compare PlainModuleInitLabel{} _ = LT
+  compare _ PlainModuleInitLabel{} = GT
+  compare CC_Label{} _ = LT
+  compare _ CC_Label{} = GT
+  compare CCS_Label{} _ = LT
+  compare _ CCS_Label{} = GT
+  compare DynamicLinkerLabel{} _ = LT
+  compare _ DynamicLinkerLabel{} = GT
+  compare PicBaseLabel{} _ = LT
+  compare _ PicBaseLabel{} = GT
+  compare DeadStripPreventer{} _ = LT
+  compare _ DeadStripPreventer{} = GT
+  compare HpcTicksLabel{} _ = LT
+  compare _ HpcTicksLabel{} = GT
+  compare SRTLabel{} _ = LT
+  compare _ SRTLabel{} = GT
+  compare LargeSRTLabel{} _ = LT
+  compare _ LargeSRTLabel{} = GT
 
 -- | Record where a foreign label is stored.
 data ForeignLabelSource
@@ -417,7 +507,7 @@ mkDirty_MUT_VAR_Label, mkSplitMarkerLabel, mkUpdInfoLabel,
     mkEMPTY_MVAR_infoLabel, mkTopTickyCtrLabel,
     mkCAFBlackHoleInfoTableLabel, mkCAFBlackHoleEntryLabel,
     mkArrWords_infoLabel, mkSMAP_FROZEN_infoLabel, mkSMAP_FROZEN0_infoLabel,
-    mkSMAP_DIRTY_infoLabel :: CLabel
+    mkSMAP_DIRTY_infoLabel, mkRUBBISH_ENTRY_infoLabel :: CLabel
 mkDirty_MUT_VAR_Label           = mkForeignLabel (fsLit "dirty_MUT_VAR") Nothing ForeignLabelInExternalPackage IsFunction
 mkSplitMarkerLabel              = CmmLabel rtsUnitId (fsLit "__stg_split_marker")    CmmCode
 mkUpdInfoLabel                  = CmmLabel rtsUnitId (fsLit "stg_upd_frame")         CmmInfo
@@ -435,6 +525,7 @@ mkArrWords_infoLabel            = CmmLabel rtsUnitId (fsLit "stg_ARR_WORDS")    
 mkSMAP_FROZEN_infoLabel         = CmmLabel rtsUnitId (fsLit "stg_SMALL_MUT_ARR_PTRS_FROZEN") CmmInfo
 mkSMAP_FROZEN0_infoLabel        = CmmLabel rtsUnitId (fsLit "stg_SMALL_MUT_ARR_PTRS_FROZEN0") CmmInfo
 mkSMAP_DIRTY_infoLabel          = CmmLabel rtsUnitId (fsLit "stg_SMALL_MUT_ARR_PTRS_DIRTY") CmmInfo
+mkRUBBISH_ENTRY_infoLabel       = CmmLabel rtsUnitId (fsLit "stg_RUBBISH_ENTRY")     CmmInfo
 
 -----
 mkCmmInfoLabel,   mkCmmEntryLabel, mkCmmRetInfoLabel, mkCmmRetLabel,
@@ -491,6 +582,11 @@ addLabelSize (ForeignLabel str _ src  fod) sz
     = ForeignLabel str (Just sz) src fod
 addLabelSize label _
     = label
+
+-- | Whether label is a non-haskell label (defined in C code)
+isForeignLabel :: CLabel -> Bool
+isForeignLabel (ForeignLabel _ _ _ _) = True
+isForeignLabel _lbl = False
 
 -- | Get the label size field from a ForeignLabel
 foreignLabelStdcallInfo :: CLabel -> Maybe Int
@@ -1056,28 +1152,36 @@ pprCLbl (CmmLabel _ str CmmPrimCall)    = ftext str
 pprCLbl (RtsLabel (RtsApFast str))   = ftext str <> text "_fast"
 
 pprCLbl (RtsLabel (RtsSelectorInfoTable upd_reqd offset))
-  = hcat [text "stg_sel_", text (show offset),
+  = sdocWithDynFlags $ \dflags ->
+    ASSERT(offset >= 0 && offset <= mAX_SPEC_SELECTEE_SIZE dflags)
+    hcat [text "stg_sel_", text (show offset),
           ptext (if upd_reqd
                  then (sLit "_upd_info")
                  else (sLit "_noupd_info"))
         ]
 
 pprCLbl (RtsLabel (RtsSelectorEntry upd_reqd offset))
-  = hcat [text "stg_sel_", text (show offset),
+  = sdocWithDynFlags $ \dflags ->
+    ASSERT(offset >= 0 && offset <= mAX_SPEC_SELECTEE_SIZE dflags)
+    hcat [text "stg_sel_", text (show offset),
                 ptext (if upd_reqd
                         then (sLit "_upd_entry")
                         else (sLit "_noupd_entry"))
         ]
 
 pprCLbl (RtsLabel (RtsApInfoTable upd_reqd arity))
-  = hcat [text "stg_ap_", text (show arity),
+  = sdocWithDynFlags $ \dflags ->
+    ASSERT(arity > 0 && arity <= mAX_SPEC_AP_SIZE dflags)
+    hcat [text "stg_ap_", text (show arity),
                 ptext (if upd_reqd
                         then (sLit "_upd_info")
                         else (sLit "_noupd_info"))
         ]
 
 pprCLbl (RtsLabel (RtsApEntry upd_reqd arity))
-  = hcat [text "stg_ap_", text (show arity),
+  = sdocWithDynFlags $ \dflags ->
+    ASSERT(arity > 0 && arity <= mAX_SPEC_AP_SIZE dflags)
+    hcat [text "stg_ap_", text (show arity),
                 ptext (if upd_reqd
                         then (sLit "_upd_entry")
                         else (sLit "_noupd_entry"))
@@ -1161,10 +1265,10 @@ underscorePrefix :: Bool   -- leading underscore on assembler labels?
 underscorePrefix = (cLeadingUnderscore == "YES")
 
 asmTempLabelPrefix :: Platform -> LitString  -- for formatting labels
-asmTempLabelPrefix platform =
-    if platformOS platform == OSDarwin
-    then sLit "L"
-    else sLit ".L"
+asmTempLabelPrefix platform = case platformOS platform of
+    OSDarwin -> sLit "L"
+    OSAIX    -> sLit "__L" -- follow IBM XL C's convention
+    _        -> sLit ".L"
 
 pprDynamicLinkerAsmLabel :: Platform -> DynamicLinkerLabelInfo -> CLabel -> SDoc
 pprDynamicLinkerAsmLabel platform dllInfo lbl
@@ -1178,6 +1282,11 @@ pprDynamicLinkerAsmLabel platform dllInfo lbl
         else case dllInfo of
              CodeStub  -> char 'L' <> ppr lbl <> text "$stub"
              SymbolPtr -> char 'L' <> ppr lbl <> text "$non_lazy_ptr"
+             _         -> panic "pprDynamicLinkerAsmLabel"
+
+   else if platformOS platform == OSAIX
+        then case dllInfo of
+             SymbolPtr -> text "LC.." <> ppr lbl -- GCC's naming convention
              _         -> panic "pprDynamicLinkerAsmLabel"
 
    else if osElfTarget (platformOS platform)

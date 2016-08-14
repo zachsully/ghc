@@ -10,6 +10,7 @@ TcMatches: Typecheck some @Matches@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module TcMatches ( tcMatchesFun, tcGRHS, tcGRHSsPat, tcMatchesCase, tcMatchLambda,
                    TcMatchCtxt(..), TcStmtChecker, TcExprStmtChecker, TcCmdStmtChecker,
@@ -68,12 +69,12 @@ so it must be prepared to use tcSkolemise to skolemise it.
 See Note [sig_tau may be polymorphic] in TcPat.
 -}
 
-tcMatchesFun :: Name
+tcMatchesFun :: Located Name
              -> MatchGroup Name (LHsExpr Name)
              -> ExpRhoType     -- Expected type of function
              -> TcM (HsWrapper, MatchGroup TcId (LHsExpr TcId))
                                 -- Returns type of body
-tcMatchesFun fun_name matches exp_ty
+tcMatchesFun fn@(L _ fun_name) matches exp_ty
   = do  {  -- Check that they all have the same no of arguments
            -- Location is in the monad, set the caller so that
            -- any inter-equation error messages get some vaguely
@@ -89,16 +90,14 @@ tcMatchesFun fun_name matches exp_ty
                do { (matches', wrap_fun)
                        <- matchExpectedFunTys herald arity exp_rho $
                           \ pat_tys rhs_ty ->
-                     -- See Note [Case branches must never infer a non-tau type]
-                     do { rhs_ty:pat_tys <- tauifyMultipleMatches matches (rhs_ty:pat_tys)
-                        ; tcMatches match_ctxt pat_tys rhs_ty matches }
+                          tcMatches match_ctxt pat_tys rhs_ty matches
                   ; return (wrap_fun, matches') }
         ; return (wrap_gen <.> wrap_fun, group) }
   where
     arity = matchGroupArity matches
     herald = text "The equation(s) for"
              <+> quotes (ppr fun_name) <+> text "have"
-    match_ctxt = MC { mc_what = FunRhs fun_name, mc_body = tcBody }
+    match_ctxt = MC { mc_what = FunRhs fn Prefix, mc_body = tcBody }
 
 {-
 @tcMatchesCase@ doesn't do the argument-count check because the
@@ -115,24 +114,16 @@ tcMatchesCase :: (Outputable (body Name)) =>
                  -- wrapper goes from MatchGroup's ty to expected ty
 
 tcMatchesCase ctxt scrut_ty matches res_ty
-  = do { [res_ty] <- tauifyMultipleMatches matches [res_ty]
-       ; tcMatches ctxt [mkCheckExpType scrut_ty] res_ty matches }
+  = tcMatches ctxt [mkCheckExpType scrut_ty] res_ty matches
 
 tcMatchLambda :: SDoc -- see Note [Herald for matchExpectedFunTys] in TcUnify
               -> TcMatchCtxt HsExpr
               -> MatchGroup Name (LHsExpr Name)
               -> ExpRhoType   -- deeply skolemised
-              -> TcM (HsWrapper, [TcSigmaType], MatchGroup TcId (LHsExpr TcId))
-                     -- also returns the argument types
+              -> TcM (MatchGroup TcId (LHsExpr TcId), HsWrapper)
 tcMatchLambda herald match_ctxt match res_ty
-  = do { ((match', pat_tys), wrap)
-           <- matchExpectedFunTys herald n_pats res_ty $
-              \ pat_tys rhs_ty ->
-              do { rhs_ty:pat_tys <- tauifyMultipleMatches match (rhs_ty:pat_tys)
-                 ; match' <- tcMatches match_ctxt pat_tys rhs_ty match
-                 ; pat_tys <- mapM readExpType pat_tys
-                 ; return (match', pat_tys) }
-       ; return (wrap, pat_tys, match') }
+  = matchExpectedFunTys herald n_pats res_ty $ \ pat_tys rhs_ty ->
+    tcMatches match_ctxt pat_tys rhs_ty match
   where
     n_pats | isEmptyMatchGroup match = 1   -- must be lambda-case
            | otherwise               = matchGroupArity match
@@ -188,17 +179,14 @@ still gets assigned a polytype.
 -- | When the MatchGroup has multiple RHSs, convert an Infer ExpType in the
 -- expected type into TauTvs.
 -- See Note [Case branches must never infer a non-tau type]
-tauifyMultipleMatches :: MatchGroup id body
+tauifyMultipleMatches :: [LMatch id body]
                       -> [ExpType] -> TcM [ExpType]
 tauifyMultipleMatches group exp_tys
   | isSingletonMatchGroup group = return exp_tys
   | otherwise                   = mapM tauifyExpType exp_tys
   -- NB: In the empty-match case, this ensures we fill in the ExpType
 
--- | Type-check a MatchGroup. If there are multiple RHSs, the expected type
--- must already be tauified.
--- See Note [Case branches must never infer a non-tau type]
--- about tauifyMultipleMatches
+-- | Type-check a MatchGroup.
 tcMatches :: (Outputable (body Name)) => TcMatchCtxt body
           -> [ExpSigmaType]      -- Expected pattern types
           -> ExpRhoType          -- Expected result-type of the Match.
@@ -214,7 +202,10 @@ data TcMatchCtxt body   -- c.f. TcStmtCtxt, also in this module
 
 tcMatches ctxt pat_tys rhs_ty (MG { mg_alts = L l matches
                                   , mg_origin = origin })
-  = do { matches' <- mapM (tcMatch ctxt pat_tys rhs_ty) matches
+  = do { rhs_ty:pat_tys <- tauifyMultipleMatches matches (rhs_ty:pat_tys)
+            -- See Note [Case branches must never infer a non-tau type]
+
+       ; matches' <- mapM (tcMatch ctxt pat_tys rhs_ty) matches
        ; pat_tys  <- mapM readExpType pat_tys
        ; rhs_ty   <- readExpType rhs_ty
        ; return (MG { mg_alts = L l matches'
@@ -236,7 +227,7 @@ tcMatch ctxt pat_tys rhs_ty match
       = add_match_ctxt match $
         do { (pats', grhss') <- tcPats (mc_what ctxt) pats pat_tys $
                                 tc_grhss ctxt maybe_rhs_sig grhss rhs_ty
-           ; return (Match NonFunBindMatch pats' Nothing grhss') }
+           ; return (Match (mc_what ctxt) pats' Nothing grhss') }
 
     tc_grhss ctxt Nothing grhss rhs_ty
       = tcGRHSs ctxt grhss rhs_ty       -- No result signature
@@ -250,7 +241,7 @@ tcMatch ctxt pat_tys rhs_ty match
     add_match_ctxt match thing_inside
         = case mc_what ctxt of
             LambdaExpr -> thing_inside
-            m_ctxt     -> addErrCtxt (pprMatchInCtxt m_ctxt match) thing_inside
+            _          -> addErrCtxt (pprMatchInCtxt match) thing_inside
 
 -------------
 tcGRHSs :: TcMatchCtxt body -> GRHSs Name (Located (body Name)) -> ExpRhoType
@@ -510,7 +501,7 @@ tcLcStmt m_tc ctxt (TransStmt { trS_form = form, trS_stmts = stmts
              tup_ty        = mkBigCoreVarTupTy bndr_ids
              poly_arg_ty   = m_app alphaTy
              poly_res_ty   = m_app (n_app alphaTy)
-             using_poly_ty = mkNamedForAllTy alphaTyVar Invisible $
+             using_poly_ty = mkInvForAllTy alphaTyVar $
                              by_arrow $
                              poly_arg_ty `mkFunTy` poly_res_ty
 
@@ -647,7 +638,7 @@ tcMcStmt ctxt (TransStmt { trS_stmts = stmts, trS_bndrs = bindersMap
              using_arg_ty = m1_ty `mkAppTy` tup_ty
              poly_res_ty  = m2_ty `mkAppTy` n_app alphaTy
              using_res_ty = m2_ty `mkAppTy` n_app tup_ty
-             using_poly_ty = mkNamedForAllTy alphaTyVar Invisible $
+             using_poly_ty = mkInvForAllTy alphaTyVar $
                              by_arrow $
                              poly_arg_ty `mkFunTy` poly_res_ty
 
@@ -687,8 +678,8 @@ tcMcStmt ctxt (TransStmt { trS_stmts = stmts, trS_bndrs = bindersMap
        ; fmap_op' <- case form of
                        ThenForm -> return noExpr
                        _ -> fmap unLoc . tcPolyExpr (noLoc fmap_op) $
-                            mkNamedForAllTy alphaTyVar Invisible $
-                            mkNamedForAllTy betaTyVar  Invisible $
+                            mkInvForAllTy alphaTyVar $
+                            mkInvForAllTy betaTyVar  $
                             (alphaTy `mkFunTy` betaTy)
                             `mkFunTy` (n_app alphaTy)
                             `mkFunTy` (n_app betaTy)

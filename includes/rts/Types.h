@@ -16,10 +16,8 @@
 
 #include <stddef.h>
 
-typedef unsigned int     nat;           /* at least 32 bits (like int) */
-
-// Deprecated; just use StgWord instead
-typedef StgWord lnat;
+// Deprecated, use uint32_t instead.
+typedef unsigned int nat __attribute__((deprecated));  /* uint32_t */
 
 /* ullong (64|128-bit) type: only include if needed (not ANSI) */
 #if defined(__GNUC__) 

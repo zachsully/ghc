@@ -18,7 +18,7 @@ module DataCon (
         -- ** Equality specs
         EqSpec, mkEqSpec, eqSpecTyVar, eqSpecType,
         eqSpecPair, eqSpecPreds,
-        substEqSpec,
+        substEqSpec, filterEqSpec,
 
         -- ** Field labels
         FieldLbl(..), FieldLabel, FieldLabelString,
@@ -30,14 +30,16 @@ module DataCon (
         dataConRepType, dataConSig, dataConInstSig, dataConFullSig,
         dataConName, dataConIdentity, dataConTag, dataConTyCon,
         dataConOrigTyCon, dataConUserType,
-        dataConUnivTyVars, dataConExTyVars, dataConAllTyVars,
+        dataConUnivTyVars, dataConUnivTyVarBinders,
+        dataConExTyVars, dataConExTyVarBinders,
+        dataConAllTyVars,
         dataConEqSpec, dataConTheta,
         dataConStupidTheta,
         dataConInstArgTys, dataConOrigArgTys, dataConOrigResTy,
         dataConInstOrigArgTys, dataConRepArgTys,
         dataConFieldLabels, dataConFieldType,
         dataConSrcBangs,
-        dataConSourceArity, dataConRepArity, dataConRepRepArity,
+        dataConSourceArity, dataConRepArity,
         dataConIsInfix,
         dataConWorkId, dataConWrapId, dataConWrapId_maybe,
         dataConImplicitTyThings,
@@ -47,6 +49,7 @@ module DataCon (
 
         -- ** Predicates on DataCons
         isNullarySrcDataCon, isNullaryRepDataCon, isTupleDataCon, isUnboxedTupleCon,
+        isUnboxedSumCon,
         isVanillaDataCon, classDataCon, dataConCannotMatch,
         isBanged, isMarkedStrict, eqHsBang, isSrcStrict, isSrcUnpacked,
         specialPromotedDc, isLegacyPromotableDataCon, isLegacyPromotableTyCon,
@@ -67,7 +70,6 @@ import FieldLabel
 import Class
 import Name
 import PrelNames
-import NameEnv
 import Var
 import Outputable
 import ListSetOps
@@ -76,9 +78,11 @@ import BasicTypes
 import FastString
 import Module
 import Binary
+import UniqSet
+import UniqFM
+import Unique( mkAlphaTyVarUnique )
 
 import qualified Data.Data as Data
-import qualified Data.Typeable
 import Data.Char
 import Data.Word
 import Data.List( mapAccumL, find )
@@ -288,6 +292,11 @@ data DataCon
         --      dcOrigArgTys  = [x,y]
         --      dcRepTyCon       = T
 
+        -- In general, the dcUnivTyVars are NOT NECESSARILY THE SAME AS THE TYVARS
+        -- FOR THE PARENT TyCon. (This is a change (Oct05): previously, vanilla
+        -- datacons guaranteed to have the same type variables as their parent TyCon,
+        -- but that seems ugly.)
+
         dcVanilla :: Bool,      -- True <=> This is a vanilla Haskell 98 data constructor
                                 --          Its type is of form
                                 --              forall a1..an . t1 -> ... tm -> T a1..an
@@ -298,16 +307,13 @@ data DataCon
                 --       syntax, provided its type looks like the above.
                 --       The declaration format is held in the TyCon (algTcGadtSyntax)
 
-        dcUnivTyVars   :: [TyVar],      -- Universally-quantified type vars [a,b,c]
-                                        -- INVARIANT: length matches arity of the dcRepTyCon
-                                        ---           result type of (rep) data con is exactly (T a b c)
+        -- Universally-quantified type vars [a,b,c]
+        -- INVARIANT: length matches arity of the dcRepTyCon
+        -- INVARIANT: result type of data con worker is exactly (T a b c)
+        dcUnivTyVars    :: [TyVarBinder],
 
-        dcExTyVars     :: [TyVar],    -- Existentially-quantified type vars
-                -- In general, the dcUnivTyVars are NOT NECESSARILY THE SAME AS THE TYVARS
-                -- FOR THE PARENT TyCon. With GADTs the data con might not even have
-                -- the same number of type variables.
-                -- [This is a change (Oct05): previously, vanilla datacons guaranteed to
-                --  have the same type variables as their parent TyCon, but that seems ugly.]
+        -- Existentially-quantified type vars [x,y]
+        dcExTyVars     :: [TyVarBinder],
 
         -- INVARIANT: the UnivTyVars and ExTyVars all have distinct OccNames
         -- Reason: less confusing, and easier to generate IfaceSyn
@@ -376,10 +382,10 @@ data DataCon
         -- Constructor representation
         dcRep      :: DataConRep,
 
-        -- Cached
-          -- dcRepArity == length dataConRepArgTys
+        -- Cached; see Note [DataCon arities]
+        -- INVARIANT: dcRepArity    == length dataConRepArgTys
+        -- INVARIANT: dcSourceArity == length dcOrigArgTys
         dcRepArity    :: Arity,
-          -- dcSourceArity == length dcOrigArgTys
         dcSourceArity :: Arity,
 
         -- Result type of constructor is T t1..tn
@@ -407,7 +413,29 @@ data DataCon
         dcPromoted :: TyCon    -- The promoted TyCon
                                -- See Note [Promoted data constructors] in TyCon
   }
-  deriving Data.Typeable.Typeable
+
+
+{- Note [TyVarBinders in DataCons]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+For the TyVarBinders in a DataCon and PatSyn:
+
+ * Each argument flag is Inferred or Specified.
+   None are Required. (A DataCon is a term-level function; see
+   Note [No Required TyBinder in terms] in TyCoRep.)
+
+Why do we need the TyVarBinders, rather than just the TyVars?  So that
+we can construct the right type for the DataCon with its foralls
+attributed the correce visiblity.  That in turn governs whether you
+can use visible type application at a call of the data constructor.
+
+Note [DataCon arities]
+~~~~~~~~~~~~~~~~~~~~~~
+dcSourceArity does not take constraints into account,
+but dcRepArity does.  For example:
+   MkT :: Ord a => a -> T a
+    dcSourceArity = 1
+    dcRepArity    = 2
+-}
 
 data DataConRep
   = NoDataConRep              -- No wrapper
@@ -467,7 +495,7 @@ data HsSrcBang =
   HsSrcBang (Maybe SourceText) -- Note [Pragma source text] in BasicTypes
             SrcUnpackedness
             SrcStrictness
-  deriving (Data.Data, Data.Typeable)
+  deriving Data.Data
 
 -- | Bangs of data constructor arguments as generated by the compiler
 -- after consulting HsSrcBang, flags, etc.
@@ -477,19 +505,19 @@ data HsImplBang
   | HsUnpack (Maybe Coercion)
     -- ^ Strict and unpacked field
     -- co :: arg-ty ~ product-ty HsBang
-  deriving (Data.Data, Data.Typeable)
+  deriving Data.Data
 
 -- | What strictness annotation the user wrote
 data SrcStrictness = SrcLazy -- ^ Lazy, ie '~'
                    | SrcStrict -- ^ Strict, ie '!'
                    | NoSrcStrict -- ^ no strictness annotation
-     deriving (Eq, Data.Data, Data.Typeable)
+     deriving (Eq, Data.Data)
 
 -- | What unpackedness the user requested
 data SrcUnpackedness = SrcUnpack -- ^ {-# UNPACK #-} specified
                      | SrcNoUnpack -- ^ {-# NOUNPACK #-} specified
                      | NoSrcUnpack -- ^ no unpack pragma
-     deriving (Eq, Data.Data, Data.Typeable)
+     deriving (Eq, Data.Data)
 
 
 
@@ -528,6 +556,14 @@ substEqSpec subst (EqSpec tv ty)
   = EqSpec tv' (substTy subst ty)
   where
     tv' = getTyVar "substEqSpec" (substTyVar subst tv)
+
+-- | Filter out any TyBinders mentioned in an EqSpec
+filterEqSpec :: [EqSpec] -> [TyVarBinder] -> [TyVarBinder]
+filterEqSpec eq_spec
+  = filter not_in_eq_spec
+  where
+    not_in_eq_spec bndr = let var = binderVar bndr in
+                          all (not . (== var) . eqSpecTyVar) eq_spec
 
 instance Outputable EqSpec where
   ppr (EqSpec tv ty) = ppr (tv, ty)
@@ -571,7 +607,7 @@ Terminology:
 
 Note [Data con representation]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The dcRepType field contains the type of the representation of a contructor
+The dcRepType field contains the type of the representation of a constructor
 This may differ from the type of the constructor *Id* (built
 by MkId.mkDataConId) for two reasons:
         a) the constructor Id may be overloaded, but the dictionary isn't stored
@@ -599,13 +635,6 @@ Actually, the unboxed part isn't implemented yet!
 instance Eq DataCon where
     a == b = getUnique a == getUnique b
     a /= b = getUnique a /= getUnique b
-
-instance Ord DataCon where
-    a <= b = getUnique a <= getUnique b
-    a <  b = getUnique a <  getUnique b
-    a >= b = getUnique a >= getUnique b
-    a >  b = getUnique a > getUnique b
-    compare a b = getUnique a `compare` getUnique b
 
 instance Uniquable DataCon where
     getUnique = dcUnique
@@ -699,13 +728,11 @@ isMarkedStrict :: StrictnessMark -> Bool
 isMarkedStrict NotMarkedStrict = False
 isMarkedStrict _               = True   -- All others are strict
 
-{-
-************************************************************************
+{- *********************************************************************
 *                                                                      *
 \subsection{Construction}
 *                                                                      *
-************************************************************************
--}
+********************************************************************* -}
 
 -- | Build a new data constructor
 mkDataCon :: Name
@@ -714,8 +741,9 @@ mkDataCon :: Name
           -> [HsSrcBang]    -- ^ Strictness/unpack annotations, from user
           -> [FieldLabel]   -- ^ Field labels for the constructor,
                             -- if it is a record, otherwise empty
-          -> [TyVar]        -- ^ Universally quantified type variables
-          -> [TyVar]        -- ^ Existentially quantified type variables
+          -> [TyVarBinder]  -- ^ Universals. See Note [TyVarBinders in DataCons]
+          -> [TyVarBinder]  -- ^ Existentials.
+                            -- (These last two must be Named and Inferred/Specified)
           -> [EqSpec]       -- ^ GADT equalities
           -> ThetaType      -- ^ Theta-type occuring before the arguments proper
           -> [Type]         -- ^ Original argument types
@@ -749,7 +777,8 @@ mkDataCon name declared_infix prom_info
     is_vanilla = null ex_tvs && null eq_spec && null theta
     con = MkData {dcName = name, dcUnique = nameUnique name,
                   dcVanilla = is_vanilla, dcInfix = declared_infix,
-                  dcUnivTyVars = univ_tvs, dcExTyVars = ex_tvs,
+                  dcUnivTyVars = univ_tvs,
+                  dcExTyVars = ex_tvs,
                   dcEqSpec = eq_spec,
                   dcOtherTheta = theta,
                   dcStupidTheta = stupid_theta,
@@ -769,24 +798,52 @@ mkDataCon name declared_infix prom_info
 
     tag = assoc "mkDataCon" (tyConDataCons rep_tycon `zip` [fIRST_TAG..]) con
     rep_arg_tys = dataConRepArgTys con
-      -- NB: This type is user-facing for datatypes that don't need wrappers;
-      --     so it's important to use mkSpecForAllTys
-    rep_ty = mkSpecForAllTys univ_tvs $ mkSpecForAllTys ex_tvs $
+
+    rep_ty = mkForAllTys univ_tvs $ mkForAllTys ex_tvs $
              mkFunTys rep_arg_tys $
-             mkTyConApp rep_tycon (mkTyVarTys univ_tvs)
+             mkTyConApp rep_tycon (mkTyVarTys (binderVars univ_tvs))
 
       -- See Note [Promoted data constructors] in TyCon
-    prom_binders = map (mkNamedBinder Specified)
-                       ((univ_tvs `minusList` map eqSpecTyVar eq_spec) ++
-                        ex_tvs) ++
-                   map mkAnonBinder theta ++
-                   map mkAnonBinder orig_arg_tys
-    prom_res_kind = orig_res_ty
-    promoted
-      = mkPromotedDataCon con name prom_info prom_binders prom_res_kind roles rep_info
+    prom_tv_bndrs = [ mkNamedTyConBinder vis tv
+                    | TvBndr tv vis <- filterEqSpec eq_spec univ_tvs ++ ex_tvs ]
+
+    prom_arg_bndrs = mkCleanAnonTyConBinders prom_tv_bndrs (theta ++ orig_arg_tys)
+    prom_res_kind  = orig_res_ty
+    promoted       = mkPromotedDataCon con name prom_info
+                                       (prom_tv_bndrs ++ prom_arg_bndrs)
+                                       prom_res_kind roles rep_info
 
     roles = map (const Nominal) (univ_tvs ++ ex_tvs) ++
             map (const Representational) orig_arg_tys
+
+mkCleanAnonTyConBinders :: [TyConBinder] -> [Type] -> [TyConBinder]
+-- Make sure that the "anonymous" tyvars don't clash in
+-- name or unique with the universal/existential ones.
+-- Tiresome!  And unnecessary because these tyvars are never looked at
+mkCleanAnonTyConBinders tc_bndrs tys
+  = [ mkAnonTyConBinder (mkTyVar name ty)
+    | (name, ty) <- fresh_names `zip` tys ]
+  where
+    fresh_names = freshNames (map getName (binderVars tc_bndrs))
+
+freshNames :: [Name] -> [Name]
+-- Make names whose Uniques and OccNames differ from
+-- those in the 'avoid' list
+freshNames avoids
+  = [ mkSystemName uniq occ
+    | n <- [0..]
+    , let uniq = mkAlphaTyVarUnique n
+          occ = mkTyVarOccFS (mkFastString ('x' : show n))
+
+    , not (uniq `elementOfUniqSet` avoid_uniqs)
+    , not (occ `elemOccSet` avoid_occs) ]
+
+  where
+    avoid_uniqs :: UniqSet Unique
+    avoid_uniqs = mkUniqSet (map getUnique avoids)
+
+    avoid_occs :: OccSet
+    avoid_occs = mkOccSet (map getOccName avoids)
 
 -- | The 'Name' of the 'DataCon', giving it a unique, rooted identification
 dataConName :: DataCon -> Name
@@ -819,16 +876,24 @@ dataConIsInfix = dcInfix
 
 -- | The universally-quantified type variables of the constructor
 dataConUnivTyVars :: DataCon -> [TyVar]
-dataConUnivTyVars = dcUnivTyVars
+dataConUnivTyVars (MkData { dcUnivTyVars = tvbs }) = binderVars tvbs
+
+-- | 'TyBinder's for the universally-quantified type variables
+dataConUnivTyVarBinders :: DataCon -> [TyVarBinder]
+dataConUnivTyVarBinders = dcUnivTyVars
 
 -- | The existentially-quantified type variables of the constructor
 dataConExTyVars :: DataCon -> [TyVar]
-dataConExTyVars = dcExTyVars
+dataConExTyVars (MkData { dcExTyVars = tvbs }) = binderVars tvbs
+
+-- | 'TyBinder's for the existentially-quantified type variables
+dataConExTyVarBinders :: DataCon -> [TyVarBinder]
+dataConExTyVarBinders = dcExTyVars
 
 -- | Both the universal and existentiatial type variables of the constructor
 dataConAllTyVars :: DataCon -> [TyVar]
 dataConAllTyVars (MkData { dcUnivTyVars = univ_tvs, dcExTyVars = ex_tvs })
-  = univ_tvs ++ ex_tvs
+  = binderVars (univ_tvs ++ ex_tvs)
 
 -- | Equalities derived from the result type of the data constructor, as written
 -- by the programmer in any GADT declaration. This includes *all* GADT-like
@@ -921,17 +986,13 @@ dataConSourceArity (MkData { dcSourceArity = arity }) = arity
 dataConRepArity :: DataCon -> Arity
 dataConRepArity (MkData { dcRepArity = arity }) = arity
 
-
--- | The number of fields in the /representation/ of the constructor
--- AFTER taking into account the unpacking of any unboxed tuple fields
-dataConRepRepArity :: DataCon -> RepArity
-dataConRepRepArity dc = typeRepArity (dataConRepArity dc) (dataConRepType dc)
-
 -- | Return whether there are any argument types for this 'DataCon's original source type
+-- See Note [DataCon arities]
 isNullarySrcDataCon :: DataCon -> Bool
-isNullarySrcDataCon dc = null (dcOrigArgTys dc)
+isNullarySrcDataCon dc = dataConSourceArity dc == 0
 
 -- | Return whether there are any argument types for this 'DataCon's runtime representation type
+-- See Note [DataCon arities]
 isNullaryRepDataCon :: DataCon -> Bool
 isNullaryRepDataCon dc = dataConRepArity dc == 0
 
@@ -965,9 +1026,8 @@ dataConBoxer _ = Nothing
 --
 -- 4) The /original/ result type of the 'DataCon'
 dataConSig :: DataCon -> ([TyVar], ThetaType, [Type], Type)
-dataConSig con@(MkData {dcUnivTyVars = univ_tvs, dcExTyVars = ex_tvs,
-                        dcOrigArgTys = arg_tys, dcOrigResTy = res_ty})
-  = (univ_tvs ++ ex_tvs, dataConTheta con, arg_tys, res_ty)
+dataConSig con@(MkData {dcOrigArgTys = arg_tys, dcOrigResTy = res_ty})
+  = (dataConAllTyVars con, dataConTheta con, arg_tys, res_ty)
 
 dataConInstSig
   :: DataCon
@@ -980,12 +1040,13 @@ dataConInstSig (MkData { dcUnivTyVars = univ_tvs, dcExTyVars = ex_tvs
                        , dcEqSpec = eq_spec, dcOtherTheta  = theta
                        , dcOrigArgTys = arg_tys })
                univ_tys
-  = (ex_tvs'
+  = ( ex_tvs'
     , substTheta subst (eqSpecPreds eq_spec ++ theta)
     , substTys   subst arg_tys)
   where
-    univ_subst = zipTvSubst univ_tvs univ_tys
-    (subst, ex_tvs') = mapAccumL Type.substTyVarBndr univ_subst ex_tvs
+    univ_subst = zipTvSubst (binderVars univ_tvs) univ_tys
+    (subst, ex_tvs') = mapAccumL Type.substTyVarBndr univ_subst $
+                       binderVars ex_tvs
 
 
 -- | The \"full signature\" of the 'DataCon' returns, in order:
@@ -1007,7 +1068,7 @@ dataConFullSig :: DataCon
 dataConFullSig (MkData {dcUnivTyVars = univ_tvs, dcExTyVars = ex_tvs,
                         dcEqSpec = eq_spec, dcOtherTheta = theta,
                         dcOrigArgTys = arg_tys, dcOrigResTy = res_ty})
-  = (univ_tvs, ex_tvs, eq_spec, theta, arg_tys, res_ty)
+  = (binderVars univ_tvs, binderVars ex_tvs, eq_spec, theta, arg_tys, res_ty)
 
 dataConOrigResTy :: DataCon -> Type
 dataConOrigResTy dc = dcOrigResTy dc
@@ -1034,11 +1095,12 @@ dataConUserType (MkData { dcUnivTyVars = univ_tvs,
                           dcExTyVars = ex_tvs, dcEqSpec = eq_spec,
                           dcOtherTheta = theta, dcOrigArgTys = arg_tys,
                           dcOrigResTy = res_ty })
-  = mkSpecForAllTys ((univ_tvs `minusList` map eqSpecTyVar eq_spec) ++
-                      ex_tvs) $
+  = mkForAllTys (filterEqSpec eq_spec univ_tvs) $
+    mkForAllTys ex_tvs $
     mkFunTys theta $
     mkFunTys arg_tys $
     res_ty
+  where
 
 -- | Finds the instantiated types of the arguments required to construct a 'DataCon' representation
 -- NB: these INCLUDE any dictionary args
@@ -1054,7 +1116,7 @@ dataConInstArgTys dc@(MkData {dcUnivTyVars = univ_tvs,
  = ASSERT2( length univ_tvs == length inst_tys
           , text "dataConInstArgTys" <+> ppr dc $$ ppr univ_tvs $$ ppr inst_tys)
    ASSERT2( null ex_tvs, ppr dc )
-   map (substTyWith univ_tvs inst_tys) (dataConRepArgTys dc)
+   map (substTyWith (binderVars univ_tvs) inst_tys) (dataConRepArgTys dc)
 
 -- | Returns just the instantiated /value/ argument types of a 'DataCon',
 -- (excluding dictionary args)
@@ -1072,7 +1134,7 @@ dataConInstOrigArgTys dc@(MkData {dcOrigArgTys = arg_tys,
           , text "dataConInstOrigArgTys" <+> ppr dc $$ ppr tyvars $$ ppr inst_tys )
     map (substTyWith tyvars inst_tys) arg_tys
   where
-    tyvars = univ_tvs ++ ex_tvs
+    tyvars = binderVars (univ_tvs ++ ex_tvs)
 
 -- | Returns the argument types of the wrapper, excluding all dictionary arguments
 -- and without substituting for any type variables
@@ -1107,6 +1169,9 @@ isTupleDataCon (MkData {dcRepTyCon = tc}) = isTupleTyCon tc
 isUnboxedTupleCon :: DataCon -> Bool
 isUnboxedTupleCon (MkData {dcRepTyCon = tc}) = isUnboxedTupleTyCon tc
 
+isUnboxedSumCon :: DataCon -> Bool
+isUnboxedSumCon (MkData {dcRepTyCon = tc}) = isUnboxedSumTyCon tc
+
 -- | Vanilla 'DataCon's are those that are nice boring Haskell 98 constructors
 isVanillaDataCon :: DataCon -> Bool
 isVanillaDataCon dc = dcVanilla dc
@@ -1123,8 +1188,7 @@ isLegacyPromotableDataCon dc
   =  null (dataConEqSpec dc)  -- no GADTs
   && null (dataConTheta dc)   -- no context
   && not (isFamInstTyCon (dataConTyCon dc))   -- no data instance constructors
-  && all isLegacyPromotableTyCon (nameEnvElts $
-                                  tyConsOfType (dataConUserType dc))
+  && allUFM isLegacyPromotableTyCon (tyConsOfType (dataConUserType dc))
 
 -- | Was this tycon promotable before GHC 8.0? That is, is it promotable
 -- without -XTypeInType
@@ -1227,14 +1291,13 @@ buildAlgTyCon :: Name
               -> Maybe CType
               -> ThetaType             -- ^ Stupid theta
               -> AlgTyConRhs
-              -> RecFlag
               -> Bool                  -- ^ True <=> was declared in GADT syntax
               -> AlgTyConFlav
               -> TyCon
 
 buildAlgTyCon tc_name ktvs roles cType stupid_theta rhs
-              is_rec gadt_syn parent
-  = mkAlgTyCon tc_name binders liftedTypeKind ktvs roles cType stupid_theta
-               rhs parent is_rec gadt_syn
+              gadt_syn parent
+  = mkAlgTyCon tc_name binders liftedTypeKind roles cType stupid_theta
+               rhs parent gadt_syn
   where
-    binders = mkTyBindersPreferAnon ktvs liftedTypeKind
+    binders = mkTyConBindersPreferAnon ktvs liftedTypeKind

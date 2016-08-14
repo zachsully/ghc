@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, ScopedTypeVariables #-}
+{-# LANGUAGE BangPatterns, CPP, ScopedTypeVariables #-}
 
 -----------------------------------------------------------------------------
 --
@@ -350,7 +350,8 @@ initBlock id block_live
                           Nothing ->
                             setFreeRegsR    (frInitFreeRegs platform)
                           Just live ->
-                            setFreeRegsR $ foldr (frAllocateReg platform) (frInitFreeRegs platform) [ r | RegReal r <- uniqSetToList live ]
+                            setFreeRegsR $ foldr (frAllocateReg platform) (frInitFreeRegs platform) [ r | RegReal r <- nonDetEltsUFM live ]
+                            -- See Note [Unique Determinism and code generation]
                         setAssigR       emptyRegMap
 
                 -- load info about register assignments leading into this block.
@@ -443,8 +444,9 @@ raInsn block_live new_instrs id (LiveInstr (Instr instr) (Just live))
            return (new_instrs, [])
 
         _ -> genRaInsn block_live new_instrs id instr
-                        (uniqSetToList $ liveDieRead live)
-                        (uniqSetToList $ liveDieWrite live)
+                        (nonDetEltsUFM $ liveDieRead live)
+                        (nonDetEltsUFM $ liveDieWrite live)
+                        -- See Note [Unique Determinism and code generation]
 
 raInsn _ _ _ instr
         = pprPanic "raInsn" (text "no match for:" <> ppr instr)
@@ -579,10 +581,9 @@ releaseRegs regs = do
   let platform = targetPlatform dflags
   assig <- getAssigR
   free <- getFreeRegsR
-  let loop _     free _ | free `seq` False = undefined
-      loop assig free [] = do setAssigR assig; setFreeRegsR free; return ()
-      loop assig free (RegReal rr : rs) = loop assig (frReleaseReg platform rr free) rs
-      loop assig free (r:rs) =
+  let loop assig !free [] = do setAssigR assig; setFreeRegsR free; return ()
+      loop assig !free (RegReal rr : rs) = loop assig (frReleaseReg platform rr free) rs
+      loop assig !free (r:rs) =
          case lookupUFM assig r of
          Just (InBoth real _) -> loop (delFromUFM assig r)
                                       (frReleaseReg platform real free) rs
@@ -621,7 +622,10 @@ saveClobberedTemps clobbered dying
         assig   <- getAssigR
         let to_spill
                 = [ (temp,reg)
-                        | (temp, InReg reg) <- ufmToList assig
+                        | (temp, InReg reg) <- nonDetUFMToList assig
+                        -- This is non-deterministic but we do not
+                        -- currently support deterministic code-generation.
+                        -- See Note [Unique Determinism and code generation]
                         , any (realRegsAlias reg) clobbered
                         , temp `notElem` map getUnique dying  ]
 
@@ -683,7 +687,10 @@ clobberRegs clobbered
         setFreeRegsR $! foldr (frAllocateReg platform) freeregs clobbered
 
         assig           <- getAssigR
-        setAssigR $! clobber assig (ufmToList assig)
+        setAssigR $! clobber assig (nonDetUFMToList assig)
+          -- This is non-deterministic but we do not
+          -- currently support deterministic code-generation.
+          -- See Note [Unique Determinism and code generation]
 
    where
         -- if the temp was InReg and clobbered, then we will have
@@ -803,17 +810,23 @@ allocRegsAndSpill_spill reading keep spills alloc r rs assig spill_loc
                 -- the vregs we could kick out that are already in a slot
                 let candidates_inBoth
                         = [ (temp, reg, mem)
-                                | (temp, InBoth reg mem) <- ufmToList assig
-                                , temp `notElem` keep'
-                                , targetClassOfRealReg platform reg == classOfVirtualReg r ]
+                          | (temp, InBoth reg mem) <- nonDetUFMToList assig
+                          -- This is non-deterministic but we do not
+                          -- currently support deterministic code-generation.
+                          -- See Note [Unique Determinism and code generation]
+                          , temp `notElem` keep'
+                          , targetClassOfRealReg platform reg == classOfVirtualReg r ]
 
                 -- the vregs we could kick out that are only in a reg
                 --      this would require writing the reg to a new slot before using it.
                 let candidates_inReg
                         = [ (temp, reg)
-                                | (temp, InReg reg)     <- ufmToList assig
-                                , temp `notElem` keep'
-                                , targetClassOfRealReg platform reg == classOfVirtualReg r ]
+                          | (temp, InReg reg) <- nonDetUFMToList assig
+                          -- This is non-deterministic but we do not
+                          -- currently support deterministic code-generation.
+                          -- See Note [Unique Determinism and code generation]
+                          , temp `notElem` keep'
+                          , targetClassOfRealReg platform reg == classOfVirtualReg r ]
 
                 let result
 
@@ -858,7 +871,7 @@ allocRegsAndSpill_spill reading keep spills alloc r rs assig spill_loc
                         = pprPanic ("RegAllocLinear.allocRegsAndSpill: no spill candidates\n")
                         $ vcat
                                 [ text "allocating vreg:  " <> text (show r)
-                                , text "assignment:       " <> text (show $ ufmToList assig)
+                                , text "assignment:       " <> ppr assig
                                 , text "freeRegs:         " <> text (show freeRegs)
                                 , text "initFreeRegs:     " <> text (show (frInitFreeRegs platform `asTypeOf` freeRegs)) ]
 

@@ -221,7 +221,7 @@ instance Outputable instr
          where  pprRegs :: SDoc -> RegSet -> SDoc
                 pprRegs name regs
                  | isEmptyUniqSet regs  = empty
-                 | otherwise            = name <> (hcat $ punctuate space $ map ppr $ uniqSetToList regs)
+                 | otherwise            = name <> (pprUFM regs (hcat . punctuate space . map ppr))
 
 instance Outputable LiveInfo where
     ppr (LiveInfo mb_static entryIds liveVRegsOnEntry liveSlotsOnEntry)
@@ -462,10 +462,14 @@ slurpReloadCoalesce live
         mergeSlotMaps :: UniqFM Reg -> UniqFM Reg -> UniqFM Reg
         mergeSlotMaps map1 map2
                 = listToUFM
-                $ [ (k, r1)     | (k, r1)       <- ufmToList map1
-                                , case lookupUFM map2 k of
-                                        Nothing -> False
-                                        Just r2 -> r1 == r2 ]
+                $ [ (k, r1)
+                  | (k, r1) <- nonDetUFMToList map1
+                  -- This is non-deterministic but we do not
+                  -- currently support deterministic code-generation.
+                  -- See Note [Unique Determinism and code generation]
+                  , case lookupUFM map2 k of
+                          Nothing -> False
+                          Just r2 -> r1 == r2 ]
 
 
 -- | Strip away liveness information, yielding NatCmmDecl
@@ -568,7 +572,8 @@ patchEraseLive patchF cmm
         patchCmm (CmmProc info label live sccs)
          | LiveInfo static id (Just blockMap) mLiveSlots <- info
          = let
-                patchRegSet set = mkUniqSet $ map patchF $ uniqSetToList set
+                patchRegSet set = mkUniqSet $ map patchF $ nonDetEltsUFM set
+                  -- See Note [Unique Determinism and code generation]
                 blockMap'       = mapMap patchRegSet blockMap
 
                 info'           = LiveInfo static id (Just blockMap') mLiveSlots
@@ -625,9 +630,10 @@ patchRegsLiveInstr patchF li
                 (patchRegsOfInstr instr patchF)
                 (Just live
                         { -- WARNING: have to go via lists here because patchF changes the uniq in the Reg
-                          liveBorn      = mkUniqSet $ map patchF $ uniqSetToList $ liveBorn live
-                        , liveDieRead   = mkUniqSet $ map patchF $ uniqSetToList $ liveDieRead live
-                        , liveDieWrite  = mkUniqSet $ map patchF $ uniqSetToList $ liveDieWrite live })
+                          liveBorn      = mkUniqSet $ map patchF $ nonDetEltsUFM $ liveBorn live
+                        , liveDieRead   = mkUniqSet $ map patchF $ nonDetEltsUFM $ liveDieRead live
+                        , liveDieWrite  = mkUniqSet $ map patchF $ nonDetEltsUFM $ liveDieWrite live })
+                          -- See Note [Unique Determinism and code generation]
 
 
 --------------------------------------------------------------------------------
@@ -679,13 +685,13 @@ sccBlocks blocks entries = map (fmap get_node) sccs
         nodes = [ (block, id, getOutEdges instrs)
                 | block@(BasicBlock id instrs) <- blocks ]
 
-        g1 = graphFromEdgedVertices nodes
+        g1 = graphFromEdgedVerticesUniq nodes
 
         reachable :: BlockSet
         reachable = setFromList [ id | (_,id,_) <- reachablesG g1 roots ]
 
-        g2 = graphFromEdgedVertices [ node | node@(_,id,_) <- nodes
-                                           , id `setMember` reachable ]
+        g2 = graphFromEdgedVerticesUniq [ node | node@(_,id,_) <- nodes
+                                               , id `setMember` reachable ]
 
         sccs = stronglyConnCompG g2
 
@@ -753,7 +759,8 @@ checkIsReverseDependent sccs'
          = let  dests           = slurpJumpDestsOfBlock block
                 blocksSeen'     = unionUniqSets blocksSeen $ mkUniqSet [blockId block]
                 badDests        = dests `minusUniqSet` blocksSeen'
-           in   case uniqSetToList badDests of
+           in   case nonDetEltsUFM badDests of
+                 -- See Note [Unique Determinism and code generation]
                  []             -> go blocksSeen' sccs
                  bad : _        -> Just bad
 
@@ -761,7 +768,8 @@ checkIsReverseDependent sccs'
          = let  dests           = unionManyUniqSets $ map slurpJumpDestsOfBlock blocks
                 blocksSeen'     = unionUniqSets blocksSeen $ mkUniqSet $ map blockId blocks
                 badDests        = dests `minusUniqSet` blocksSeen'
-           in   case uniqSetToList badDests of
+           in   case nonDetEltsUFM badDests of
+                 -- See Note [Unique Determinism and code generation]
                  []             -> go blocksSeen' sccs
                  bad : _        -> Just bad
 
@@ -854,7 +862,8 @@ livenessSCCs platform blockmap done
                 = a' == b'
               where a' = map f $ mapToList a
                     b' = map f $ mapToList b
-                    f (key,elt) = (key, uniqSetToList elt)
+                    f (key,elt) = (key, nonDetEltsUFM elt)
+                    -- See Note [Unique Determinism and code generation]
 
 
 
@@ -990,7 +999,8 @@ liveness1 platform liveregs blockmap (LiveInstr instr _)
             -- registers that are live only in the branch targets should
             -- be listed as dying here.
             live_branch_only = live_from_branch `minusUniqSet` liveregs
-            r_dying_br  = uniqSetToList (mkUniqSet r_dying `unionUniqSets`
+            r_dying_br  = nonDetEltsUFM (mkUniqSet r_dying `unionUniqSets`
                                         live_branch_only)
+                          -- See Note [Unique Determinism and code generation]
 
 

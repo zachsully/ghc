@@ -35,7 +35,9 @@ test('T2910a', normal, compile_and_run, [''])
 test('T3279', normal, compile_and_run, [''])
 
 # This test takes a long time with the default context switch interval
-test('T3429', extra_run_opts('+RTS -C0.001 -RTS'), compile_and_run, [''])
+test('T3429', [ extra_run_opts('+RTS -C0.001 -RTS'),
+                extra_ways(['debug_numa']) ],
+     compile_and_run, [''])
 
 # without -O, goes into an infinite loop
 # GHCi does not detect the infinite loop.  We should really fix this.
@@ -104,8 +106,9 @@ test('allocLimit4', [ extra_run_opts('+RTS -xq300k -RTS'),
                       omit_ways(['ghci']) ],
                     compile_and_run, [''])
 
-test('performGC', [ only_ways(['threaded1','threaded2']), req_smp
-                  , extra_run_opts('400 +RTS -qg -RTS') ],
+test('performGC', [ only_ways(['threaded1','threaded2']), req_smp,
+                    reqlib('random'),
+                    extra_run_opts('400 +RTS -qg -RTS') ],
                     compile_and_run, [''])
 
 # -----------------------------------------------------------------------------
@@ -143,7 +146,7 @@ test('conc020', normal, compile_and_run, [''])
 test('conc021', [ omit_ways(['ghci']), exit_code(1) ], compile_and_run, [''])
 test('conc022', normal, compile_and_run, [''])
 
-# On Windows, the non-threaded RTS creates a real OS thread for each 
+# On Windows, the non-threaded RTS creates a real OS thread for each
 # threadDelay.  conc023 creates 5000 concurrent threadDelays, and the
 # resulting creation of OS threads seems to cause the system to run
 # out of memory sometimes (I'm not sure exactly how/why this happens,
@@ -206,7 +209,7 @@ test('conc037', only_ways(['threaded1','threaded2']), compile_and_run, [''])
 test('conc038', only_ways(['threaded1','threaded2']), compile_and_run, [''])
 
 # Omit for GHCi, uses foreign export
-# Omit for the threaded ways, because in this case the main thread is allowed to 
+# Omit for the threaded ways, because in this case the main thread is allowed to
 # complete, which causes the child thread to be interrupted.
 test('conc039', omit_ways(['ghci'] + threaded_ways), compile_and_run, [''])
 
@@ -236,23 +239,19 @@ test('conc064',
      exit_code(1),
      compile_and_run, [''])
 
-test('conc065', ignore_output, compile_and_run, [''])
-test('conc066', ignore_output, compile_and_run, [''])
-test('conc067', ignore_output, compile_and_run, [''])
+test('conc065', ignore_stdout, compile_and_run, [''])
+test('conc066', ignore_stdout, compile_and_run, [''])
+test('conc067', ignore_stdout, compile_and_run, [''])
 
 # omit threaded2, the behaviour of this test is non-deterministic with more
 # than one CPU.
 test('conc068', [ omit_ways('threaded2'), exit_code(1) ], compile_and_run, [''])
 
-# Commented out, instead of marked expect_broken, because it fails only
-# sometimes. See #10860.
-#test('setnumcapabilities001',
-#     [ only_ways(['threaded1','threaded2']),
-#       extra_run_opts('4 12 2000'),
-#       reqlib('parallel'),
-#       req_smp ],
-#     compile_and_run, [''])
+test('setnumcapabilities001',
+     [ only_ways(['threaded1','threaded2']),
+       extra_run_opts('4 12 2000'),
+       req_smp ],
+     compile_and_run, [''])
 
 # omit ghci, which can't handle unboxed tuples:
 test('compareAndSwap', [omit_ways(['ghci','hpc']), reqlib('primitive')], compile_and_run, [''])
-

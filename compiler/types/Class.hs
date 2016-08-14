@@ -3,14 +3,14 @@
 --
 -- The @Class@ datatype
 
-{-# LANGUAGE CPP, DeriveDataTypeable #-}
+{-# LANGUAGE CPP #-}
 
 module Class (
         Class,
         ClassOpItem,
         ClassATItem(..),
         ClassMinimalDef,
-        DefMethInfo, pprDefMethInfo, defMethSpecOfDefMeth,
+        DefMethInfo, pprDefMethInfo,
 
         FunDep, pprFundeps, pprFunDep,
 
@@ -23,8 +23,8 @@ module Class (
 
 #include "HsVersions.h"
 
-import {-# SOURCE #-} TyCon     ( TyCon, tyConName, tyConUnique )
-import {-# SOURCE #-} TyCoRep   ( Type, PredType )
+import {-# SOURCE #-} TyCon     ( TyCon )
+import {-# SOURCE #-} TyCoRep   ( Type, PredType, pprType )
 import Var
 import Name
 import BasicTypes
@@ -36,7 +36,6 @@ import PrelNames    ( eqTyConKey, coercibleTyConKey, typeableClassKey,
 import Outputable
 import BooleanFormula (BooleanFormula)
 
-import Data.Typeable (Typeable)
 import qualified Data.Data as Data
 
 {-
@@ -79,7 +78,6 @@ data Class
         -- Minimal complete definition
         classMinimalDef :: ClassMinimalDef
      }
-  deriving Typeable
 
 --  | e.g.
 --
@@ -111,14 +109,6 @@ data ClassATItem
                       -- Note [Associated type defaults]
 
 type ClassMinimalDef = BooleanFormula Name -- Required methods
-
--- | Convert a `DefMethInfo` to a `DefMethSpec`, which discards the name field in
---   the `DefMeth` constructor of the `DefMeth`.
-defMethSpecOfDefMeth :: DefMethInfo -> Maybe (DefMethSpec Type)
-defMethSpecOfDefMeth meth
- = case meth of
-     Nothing        -> Nothing
-     Just (_, spec) -> Just spec
 
 {-
 Note [Associated type defaults]
@@ -157,7 +147,7 @@ The @mkClass@ function fills in the indirect superclasses.
 The SrcSpan is for the entire original declaration.
 -}
 
-mkClass :: [TyVar]
+mkClass :: Name -> [TyVar]
         -> [([TyVar], [TyVar])]
         -> [PredType] -> [Id]
         -> [ClassATItem]
@@ -166,10 +156,12 @@ mkClass :: [TyVar]
         -> TyCon
         -> Class
 
-mkClass tyvars fds super_classes superdict_sels at_stuff
+mkClass cls_name tyvars fds super_classes superdict_sels at_stuff
         op_stuff mindef tycon
-  = Class { classKey     = tyConUnique tycon,
-            className    = tyConName tycon,
+  = Class { classKey     = nameUnique cls_name,
+            className    = cls_name,
+                -- NB:  tyConName tycon = cls_name,
+                -- But it takes a module loop to assert it here
             classTyVars  = tyvars,
             classFunDeps = fds,
             classSCTheta = super_classes,
@@ -240,8 +232,7 @@ classATItems :: Class -> [ClassATItem]
 classATItems = classATStuff
 
 classTvsFds :: Class -> ([TyVar], [FunDep TyVar])
-classTvsFds c
-  = (classTyVars c, classFunDeps c)
+classTvsFds c = (classTyVars c, classFunDeps c)
 
 classHasFds :: Class -> Bool
 classHasFds (Class { classFunDeps = fds }) = not (null fds)
@@ -281,13 +272,6 @@ instance Eq Class where
     c1 == c2 = classKey c1 == classKey c2
     c1 /= c2 = classKey c1 /= classKey c2
 
-instance Ord Class where
-    c1 <= c2 = classKey c1 <= classKey c2
-    c1 <  c2 = classKey c1 <  classKey c2
-    c1 >= c2 = classKey c1 >= classKey c2
-    c1 >  c2 = classKey c1 >  classKey c2
-    compare c1 c2 = classKey c1 `compare` classKey c2
-
 instance Uniquable Class where
     getUnique c = classKey c
 
@@ -301,14 +285,14 @@ pprDefMethInfo :: DefMethInfo -> SDoc
 pprDefMethInfo Nothing                  = empty   -- No default method
 pprDefMethInfo (Just (n, VanillaDM))    = text "Default method" <+> ppr n
 pprDefMethInfo (Just (n, GenericDM ty)) = text "Generic default method"
-                                          <+> ppr n <+> dcolon <+> ppr ty
+                                          <+> ppr n <+> dcolon <+> pprType ty
 
 pprFundeps :: Outputable a => [FunDep a] -> SDoc
 pprFundeps []  = empty
 pprFundeps fds = hsep (vbar : punctuate comma (map pprFunDep fds))
 
 pprFunDep :: Outputable a => FunDep a -> SDoc
-pprFunDep (us, vs) = hsep [interppSP us, text "->", interppSP vs]
+pprFunDep (us, vs) = hsep [interppSP us, arrow, interppSP vs]
 
 instance Data.Data Class where
     -- don't traverse?

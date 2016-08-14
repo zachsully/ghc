@@ -46,6 +46,8 @@ import Util
 import Name
 import Outputable
 import BasicTypes ( isGenerated )
+import Unique
+import UniqDFM
 
 import Control.Monad( when, unless )
 import qualified Data.Map as Map
@@ -196,9 +198,9 @@ match vars@(v:_) ty eqns    -- Eqns *can* be empty
     match_group [] = panic "match_group"
     match_group eqns@((group,_) : _)
         = case group of
-            PgCon {}  -> matchConFamily  vars ty (subGroup [(c,e) | (PgCon c, e) <- eqns])
+            PgCon {}  -> matchConFamily  vars ty (subGroupUniq [(c,e) | (PgCon c, e) <- eqns])
             PgSyn {}  -> matchPatSyn     vars ty (dropGroup eqns)
-            PgLit {}  -> matchLiterals   vars ty (subGroup [(l,e) | (PgLit l, e) <- eqns])
+            PgLit {}  -> matchLiterals   vars ty (subGroupOrd [(l,e) | (PgLit l, e) <- eqns])
             PgAny     -> matchVariables  vars ty (dropGroup eqns)
             PgN {}    -> matchNPats      vars ty (dropGroup eqns)
             PgNpK {}  -> matchNPlusKPats vars ty (dropGroup eqns)
@@ -454,6 +456,11 @@ tidy1 _ (TuplePat pats boxity tys)
     arity = length pats
     tuple_ConPat = mkPrefixConPat (tupleDataCon boxity arity) pats tys
 
+tidy1 _ (SumPat pat alt arity tys)
+  = return (idDsWrapper, unLoc sum_ConPat)
+  where
+    sum_ConPat = mkPrefixConPat (sumDataCon alt arity) [pat] tys
+
 -- LitPats: we *might* be able to replace these w/ a simpler form
 tidy1 _ (LitPat lit)
   = return (idDsWrapper, tidyLitPat lit)
@@ -483,6 +490,7 @@ tidy_bang_pat v l (CoPat w p t) = tidy1 v (CoPat w (BangPat (L l p)) t)
 tidy_bang_pat v _ p@(LitPat {})    = tidy1 v p
 tidy_bang_pat v _ p@(ListPat {})   = tidy1 v p
 tidy_bang_pat v _ p@(TuplePat {})  = tidy1 v p
+tidy_bang_pat v _ p@(SumPat {})    = tidy1 v p
 tidy_bang_pat v _ p@(PArrPat {})   = tidy1 v p
 
 -- Data/newtype constructors
@@ -809,21 +817,33 @@ groupEquations dflags eqns
     same_gp :: (PatGroup,EquationInfo) -> (PatGroup,EquationInfo) -> Bool
     (pg1,_) `same_gp` (pg2,_) = pg1 `sameGroup` pg2
 
-subGroup :: Ord a => [(a, EquationInfo)] -> [[EquationInfo]]
+subGroup :: (m -> [[EquationInfo]]) -- Map.elems
+         -> m -- Map.empty
+         -> (a -> m -> Maybe [EquationInfo]) -- Map.lookup
+         -> (a -> [EquationInfo] -> m -> m) -- Map.insert
+         -> [(a, EquationInfo)] -> [[EquationInfo]]
 -- Input is a particular group.  The result sub-groups the
 -- equations by with particular constructor, literal etc they match.
 -- Each sub-list in the result has the same PatGroup
 -- See Note [Take care with pattern order]
-subGroup group
-    = map reverse $ Map.elems $ foldl accumulate Map.empty group
+-- Parameterized by map operations to allow different implementations
+-- and constraints, eg. types without Ord instance.
+subGroup elems empty lookup insert group
+    = map reverse $ elems $ foldl accumulate empty group
   where
     accumulate pg_map (pg, eqn)
-      = case Map.lookup pg pg_map of
-          Just eqns -> Map.insert pg (eqn:eqns) pg_map
-          Nothing   -> Map.insert pg [eqn]      pg_map
-
+      = case lookup pg pg_map of
+          Just eqns -> insert pg (eqn:eqns) pg_map
+          Nothing   -> insert pg [eqn]      pg_map
     -- pg_map :: Map a [EquationInfo]
     -- Equations seen so far in reverse order of appearance
+
+subGroupOrd :: Ord a => [(a, EquationInfo)] -> [[EquationInfo]]
+subGroupOrd = subGroup Map.elems Map.empty Map.lookup Map.insert
+
+subGroupUniq :: Uniquable a => [(a, EquationInfo)] -> [[EquationInfo]]
+subGroupUniq =
+  subGroup eltsUDFM emptyUDFM (flip lookupUDFM) (\k v m -> addToUDFM m k v)
 
 {- Note [Pattern synonym groups]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -929,6 +949,7 @@ viewLExprEq (e1,_) (e2,_) = lexp e1 e2
         lexp e1 e1' && lexp e2 e2'
     exp (ExplicitTuple es1 _) (ExplicitTuple es2 _) =
         eq_list tup_arg es1 es2
+    exp (ExplicitSum _ _ e _) (ExplicitSum _ _ e' _) = lexp e e'
     exp (HsIf _ e e1 e2) (HsIf _ e' e1' e2') =
         lexp e e' && lexp e1 e1' && lexp e2 e2'
 

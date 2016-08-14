@@ -324,17 +324,17 @@ Usually we want the former, but occasionally the latter.
 -}
 
 -- | Build a small tuple holding the specified variables
--- One-tuples are flattened; see Note [Flattening of one-tuples]
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkCoreVarTup :: [Id] -> CoreExpr
 mkCoreVarTup ids = mkCoreTup (map Var ids)
 
--- | Bulid the type of a small tuple that holds the specified variables
--- One-tuples are flattened; see Note [Flattening of one-tuples]
+-- | Build the type of a small tuple that holds the specified variables
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkCoreVarTupTy :: [Id] -> Type
 mkCoreVarTupTy ids = mkBoxedTupleTy (map idType ids)
 
 -- | Build a small tuple holding the specified expressions
--- One-tuples are flattened; see NOte [Flattening of one-tuples]
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkCoreTup :: [CoreExpr] -> CoreExpr
 mkCoreTup []  = Var unitDataConId
 mkCoreTup [c] = c
@@ -358,7 +358,7 @@ mkCoreTupBoxity Boxed   exps = mkCoreTup exps
 mkCoreTupBoxity Unboxed exps = mkCoreUbxTup (map exprType exps) exps
 
 -- | Build a big tuple holding the specified variables
--- One-tuples are flattened; see Note [Flattening of one-tuples]
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkBigCoreVarTup :: [Id] -> CoreExpr
 mkBigCoreVarTup ids = mkBigCoreTup (map Var ids)
 
@@ -370,17 +370,17 @@ mkBigCoreVarTup1 [id] = mkCoreConApps (tupleDataCon Boxed 1)
 mkBigCoreVarTup1 ids  = mkBigCoreTup (map Var ids)
 
 -- | Build the type of a big tuple that holds the specified variables
--- One-tuples are flattened; see Note [Flattening of one-tuples]
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkBigCoreVarTupTy :: [Id] -> Type
 mkBigCoreVarTupTy ids = mkBigCoreTupTy (map idType ids)
 
 -- | Build a big tuple holding the specified expressions
--- One-tuples are flattened; see Note [Flattening of one-tuples]
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkBigCoreTup :: [CoreExpr] -> CoreExpr
 mkBigCoreTup = mkChunkified mkCoreTup
 
 -- | Build the type of a big tuple that holds the specified type of thing
--- One-tuples are flattened; see Note [Flattening of one-tuples]
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkBigCoreTupTy :: [Type] -> Type
 mkBigCoreTupTy = mkChunkified mkBoxedTupleTy
 
@@ -717,35 +717,14 @@ aBSENT_ERROR_ID                 = mkRuntimeErrorId absentErrorName
 tYPE_ERROR_ID                   = mkRuntimeErrorId typeErrorName
 
 mkRuntimeErrorId :: Name -> Id
-mkRuntimeErrorId name = pc_bottoming_Id1 name runtimeErrorTy
-
-runtimeErrorTy :: Type
--- The runtime error Ids take a UTF8-encoded string as argument
-runtimeErrorTy = mkSpecSigmaTy [runtimeRep1TyVar, openAlphaTyVar] []
-                               (mkFunTy addrPrimTy openAlphaTy)
-
-{-
-Note [Error and friends have an "open-tyvar" forall]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-'error' and 'undefined' have types
-        error     :: forall (v :: RuntimeRep) (a :: TYPE v). String -> a
-        undefined :: forall (v :: RuntimeRep) (a :: TYPE v). a
-Notice the runtime-representation polymophism. This ensures that
-"error" can be instantiated at unboxed as well as boxed types.
-This is OK because it never returns, so the return type is irrelevant.
-
-
-************************************************************************
-*                                                                      *
-\subsection{Utilities}
-*                                                                      *
-************************************************************************
--}
-
-pc_bottoming_Id1 :: Name -> Type -> Id
--- Function of arity 1, which diverges after being given one argument
-pc_bottoming_Id1 name ty
- = mkVanillaGlobalWithInfo name ty bottoming_info
+-- Error function
+--   with type:  forall (r:RuntimeRep) (a:TYPE r). Addr# -> a
+--   with arity: 1
+-- which diverges after being given one argument
+-- The Addr# is expected to be the address of
+--   a UTF8-encoded error string
+mkRuntimeErrorId name
+ = mkVanillaGlobalWithInfo name runtime_err_ty bottoming_info
  where
     bottoming_info = vanillaIdInfo `setStrictnessInfo`    strict_sig
                                    `setArityInfo`         1
@@ -762,3 +741,19 @@ pc_bottoming_Id1 name ty
 
     strict_sig = mkClosedStrictSig [evalDmd] exnRes
               -- exnRes: these throw an exception, not just diverge
+
+    -- forall (rr :: RuntimeRep) (a :: rr). Addr# -> a
+    --   See Note [Error and friends have an "open-tyvar" forall]
+    runtime_err_ty = mkSpecSigmaTy [runtimeRep1TyVar, openAlphaTyVar] []
+                                   (mkFunTy addrPrimTy openAlphaTy)
+
+{- Note [Error and friends have an "open-tyvar" forall]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+'error' and 'undefined' have types
+        error     :: forall (v :: RuntimeRep) (a :: TYPE v). String -> a
+        undefined :: forall (v :: RuntimeRep) (a :: TYPE v). a
+Notice the runtime-representation polymophism. This ensures that
+"error" can be instantiated at unboxed as well as boxed types.
+This is OK because it never returns, so the return type is irrelevant.
+-}
+

@@ -34,7 +34,16 @@ struct Capability_ {
     StgFunTable f;
     StgRegTable r;
 
-    nat no;  // capability number.
+    uint32_t no;  // capability number.
+
+    // The NUMA node on which this capability resides.  This is used to allocate
+    // node-local memory in allocate().
+    //
+    // Note: this is always equal to cap->no % n_numa_nodes.
+    // The reason we slice it this way is that if we add or remove capabilities
+    // via setNumCapabilities(), then we keep the number of capabilities on each
+    // NUMA node balanced.
+    uint32_t node;
 
     // The Task currently holding this Capability.  This task has
     // exclusive access to the contents of this Capability (apart from
@@ -47,7 +56,7 @@ struct Capability_ {
     rtsBool in_haskell;
 
     // Has there been any activity on this Capability since the last GC?
-    nat idle;
+    uint32_t idle;
 
     rtsBool disabled;
 
@@ -57,6 +66,7 @@ struct Capability_ {
     // also lock-free.
     StgTSO *run_queue_hd;
     StgTSO *run_queue_tl;
+    uint32_t n_run_queue;
 
     // Tasks currently making safe foreign calls.  Doubly-linked.
     // When returning, a task first acquires the Capability before
@@ -65,6 +75,7 @@ struct Capability_ {
     // the returning_tasks list, we must also migrate its entry from
     // this list.
     InCall *suspended_ccalls;
+    uint32_t n_suspended_ccalls;
 
     // One mutable list per generation, so we don't need to take any
     // locks when updating an old-generation thunk.  This also lets us
@@ -105,7 +116,7 @@ struct Capability_ {
 #if defined(THREADED_RTS)
     // Worker Tasks waiting in the wings.  Singly-linked.
     Task *spare_workers;
-    nat n_spare_workers; // count of above
+    uint32_t n_spare_workers; // count of above
 
     // This lock protects:
     //    running_task
@@ -121,6 +132,7 @@ struct Capability_ {
     // check whether it is NULL without taking the lock, however.
     Task *returning_tasks_hd; // Singly-linked, with head/tail
     Task *returning_tasks_tl;
+    uint32_t n_returning_tasks;
 
     // Messages, or END_TSO_QUEUE.
     // Locks required: cap->lock
@@ -141,7 +153,7 @@ struct Capability_ {
     StgInvariantCheckQueue *free_invariant_check_queues;
     StgTRecChunk *free_trec_chunks;
     StgTRecHeader *free_trec_headers;
-    nat transaction_tokens;
+    uint32_t transaction_tokens;
 } // typedef Capability is defined in RtsAPI.h
   // We never want a Capability to overlap a cache line with anything
   // else, so round it up to a cache line size:
@@ -149,7 +161,6 @@ struct Capability_ {
   ATTRIBUTE_ALIGNED(64)
 #endif
   ;
-
 
 #if defined(THREADED_RTS)
 #define ASSERT_TASK_ID(task) ASSERT(task->id == osThreadId())
@@ -163,15 +174,27 @@ struct Capability_ {
   ASSERT(task->cap == cap);                                             \
   ASSERT_PARTIAL_CAPABILITY_INVARIANTS(cap,task)
 
+#if defined(THREADED_RTS)
+#define ASSERT_THREADED_CAPABILITY_INVARIANTS(cap,task)                  \
+  ASSERT(cap->returning_tasks_hd == NULL ?                              \
+           cap->returning_tasks_tl == NULL && cap->n_returning_tasks == 0 \
+         : 1);
+#else
+#define ASSERT_THREADED_CAPABILITY_INVARIANTS(cap,task) /* nothing */
+#endif
+
 // Sometimes a Task holds a Capability, but the Task is not associated
 // with that Capability (ie. task->cap != cap).  This happens when
 // (a) a Task holds multiple Capabilities, and (b) when the current
 // Task is bound, its thread has just blocked, and it may have been
 // moved to another Capability.
-#define ASSERT_PARTIAL_CAPABILITY_INVARIANTS(cap,task)  \
-  ASSERT(cap->run_queue_hd == END_TSO_QUEUE ?           \
-            cap->run_queue_tl == END_TSO_QUEUE : 1);    \
-  ASSERT(myTask() == task);                             \
+#define ASSERT_PARTIAL_CAPABILITY_INVARIANTS(cap,task)                  \
+  ASSERT(cap->run_queue_hd == END_TSO_QUEUE ?                           \
+            cap->run_queue_tl == END_TSO_QUEUE && cap->n_run_queue == 0 \
+         : 1);                                                          \
+  ASSERT(cap->suspended_ccalls == NULL ? cap->n_suspended_ccalls == 0 : 1); \
+  ASSERT_THREADED_CAPABILITY_INVARIANTS(cap,task);                      \
+  ASSERT(myTask() == task);                                             \
   ASSERT_TASK_ID(task);
 
 #if defined(THREADED_RTS)
@@ -192,7 +215,7 @@ void initCapabilities (void);
 
 // Add and initialise more Capabilities
 //
-void moreCapabilities (nat from, nat to);
+void moreCapabilities (uint32_t from, uint32_t to);
 
 // Release a capability.  This is called by a Task that is exiting
 // Haskell to make a foreign call, or in various other cases when we
@@ -217,22 +240,36 @@ INLINE_HEADER void releaseCapability_ (Capability* cap STG_UNUSED,
 // extern Capability MainCapability;
 
 // declared in includes/rts/Threads.h:
-// extern nat n_capabilities;
-// extern nat enabled_capabilities;
+// extern uint32_t n_capabilities;
+// extern uint32_t enabled_capabilities;
 
 // Array of all the capabilities
-//
 extern Capability **capabilities;
+
+//
+// Types of global synchronisation
+//
+typedef enum {
+    SYNC_OTHER,
+    SYNC_GC_SEQ,
+    SYNC_GC_PAR
+} SyncType;
+
+//
+// Details about a global synchronisation
+//
+typedef struct {
+    SyncType type;              // The kind of synchronisation
+    rtsBool *idle;
+    Task *task;                 // The Task performing the sync
+} PendingSync;
 
 //
 // Indicates that the RTS wants to synchronise all the Capabilities
 // for some reason.  All Capabilities should stop and return to the
 // scheduler.
 //
-#define SYNC_GC_SEQ 1
-#define SYNC_GC_PAR 2
-#define SYNC_OTHER  3
-extern volatile StgWord pending_sync;
+extern PendingSync * volatile pending_sync;
 
 // Acquires a capability at a return point.  If *cap is non-NULL, then
 // this is taken as a preference for the Capability we wish to
@@ -245,7 +282,8 @@ extern volatile StgWord pending_sync;
 //
 void waitForCapability (Capability **cap/*in/out*/, Task *task);
 
-EXTERN_INLINE void recordMutableCap (StgClosure *p, Capability *cap, nat gen);
+EXTERN_INLINE void recordMutableCap (const StgClosure *p, Capability *cap,
+                                        uint32_t gen);
 
 EXTERN_INLINE void recordClosureMutated (Capability *cap, StgClosure *p);
 
@@ -287,7 +325,7 @@ StgClosure *findSpark (Capability *cap);
 rtsBool anySparks (void);
 
 INLINE_HEADER rtsBool emptySparkPoolCap (Capability *cap);
-INLINE_HEADER nat     sparkPoolSizeCap  (Capability *cap);
+INLINE_HEADER uint32_t sparkPoolSizeCap  (Capability *cap);
 INLINE_HEADER void    discardSparksCap  (Capability *cap);
 
 #else // !THREADED_RTS
@@ -324,6 +362,18 @@ void markCapabilities (evac_fn evac, void *user);
 void traverseSparkQueues (evac_fn evac, void *user);
 
 /* -----------------------------------------------------------------------------
+   NUMA
+   -------------------------------------------------------------------------- */
+
+/* Number of logical NUMA nodes */
+extern uint32_t n_numa_nodes;
+
+/* Map logical NUMA node to OS node numbers */
+extern uint32_t numa_map[MAX_NUMA_NODES];
+
+#define capNoToNumaNode(n) ((n) % n_numa_nodes)
+
+/* -----------------------------------------------------------------------------
    Messages
    -------------------------------------------------------------------------- */
 
@@ -338,7 +388,7 @@ INLINE_HEADER rtsBool emptyInbox(Capability *cap);
  * -------------------------------------------------------------------------- */
 
 EXTERN_INLINE void
-recordMutableCap (StgClosure *p, Capability *cap, nat gen)
+recordMutableCap (const StgClosure *p, Capability *cap, uint32_t gen)
 {
     bdescr *bd;
 
@@ -348,7 +398,7 @@ recordMutableCap (StgClosure *p, Capability *cap, nat gen)
     bd = cap->mut_lists[gen];
     if (bd->free >= bd->start + BLOCK_SIZE_W) {
         bdescr *new_bd;
-        new_bd = allocBlock_lock();
+        new_bd = allocBlockOnNode_lock(cap->node);
         new_bd->link = bd;
         bd = new_bd;
         cap->mut_lists[gen] = bd;
@@ -370,7 +420,7 @@ INLINE_HEADER rtsBool
 emptySparkPoolCap (Capability *cap)
 { return looksEmpty(cap->sparks); }
 
-INLINE_HEADER nat
+INLINE_HEADER uint32_t
 sparkPoolSizeCap (Capability *cap)
 { return sparkPoolSize(cap->sparks); }
 

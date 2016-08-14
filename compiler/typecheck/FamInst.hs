@@ -27,7 +27,6 @@ import CoAxiom
 import DynFlags
 import Module
 import Outputable
-import UniqFM
 import Util
 import RdrName
 import DataCon ( dataConName )
@@ -39,9 +38,11 @@ import Name
 import Pair
 import Panic
 import VarSet
+import Bag( Bag, unionBags, unitBag )
 import Control.Monad
-import Data.Map (Map)
-import qualified Data.Map as Map
+import Unique
+import Data.Set (Set)
+import qualified Data.Set as Set
 
 #include "HsVersions.h"
 
@@ -93,6 +94,8 @@ newFamInst flavor axiom@(CoAxiom { co_ax_tc = fam_tc })
 *                                                                      *
 ************************************************************************
 
+Note [Checking family instance consistency]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 For any two family instance modules that we import directly or indirectly, we
 check whether the instances in the two modules are consistent, *unless* we can
 be certain that the instances of the two modules have already been checked for
@@ -119,30 +122,55 @@ certain that the modules in our `HscTypes.dep_finsts' are consistent.)
 -- whose family instances need to be checked for consistency.
 --
 data ModulePair = ModulePair Module Module
+                  -- Invariant: first Module < second Module
+                  -- use the smart constructor
 
--- canonical order of the components of a module pair
---
-canon :: ModulePair -> (Module, Module)
-canon (ModulePair m1 m2) | m1 < m2   = (m1, m2)
-                         | otherwise = (m2, m1)
+-- | Smart constructor that establishes the invariant
+modulePair :: Module -> Module -> ModulePair
+modulePair a b
+  | a < b = ModulePair a b
+  | otherwise = ModulePair b a
 
 instance Eq ModulePair where
-  mp1 == mp2 = canon mp1 == canon mp2
+  (ModulePair a1 b1) == (ModulePair a2 b2) = a1 == a2 && b1 == b2
 
 instance Ord ModulePair where
-  mp1 `compare` mp2 = canon mp1 `compare` canon mp2
+  (ModulePair a1 b1) `compare` (ModulePair a2 b2) =
+    nonDetCmpModule a1 a2 `thenCmp`
+    nonDetCmpModule b1 b2
+    -- See Note [ModulePairSet determinism and performance]
 
 instance Outputable ModulePair where
   ppr (ModulePair m1 m2) = angleBrackets (ppr m1 <> comma <+> ppr m2)
 
--- Sets of module pairs
---
-type ModulePairSet = Map ModulePair ()
+-- Fast, nondeterministic comparison on Module. Don't use when the ordering
+-- can change the ABI. See Note [ModulePairSet determinism and performance]
+nonDetCmpModule :: Module -> Module -> Ordering
+nonDetCmpModule a b =
+  nonDetCmpUnique (getUnique $ moduleUnitId a) (getUnique $ moduleUnitId b)
+  `thenCmp`
+  nonDetCmpUnique (getUnique $ moduleName a) (getUnique $ moduleName b)
+
+type ModulePairSet = Set ModulePair
+{-
+Note [ModulePairSet determinism and performance]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The size of ModulePairSet is quadratic in the number of modules.
+The Ord instance for Module uses string comparison which is linear in the
+length of ModuleNames and UnitIds. This adds up to a significant cost, see
+#12191.
+
+To get reasonable performance ModulePairSet uses nondeterministic ordering
+on Module based on Uniques. It doesn't affect the ABI, because it only
+determines the order the modules are checked for family instance consistency.
+See Note [Unique Determinism] in Unique
+-}
 
 listToSet :: [ModulePair] -> ModulePairSet
-listToSet l = Map.fromList (zip l (repeat ()))
+listToSet l = Set.fromList l
 
 checkFamInstConsistency :: [Module] -> [Module] -> TcM ()
+-- See Note [Checking family instance consistency]
 checkFamInstConsistency famInstMods directlyImpMods
   = do { dflags     <- getDynFlags
        ; (eps, hpt) <- getEpsAndHpt
@@ -158,22 +186,24 @@ checkFamInstConsistency famInstMods directlyImpMods
              ; hmiFamInstEnv = extendFamInstEnvList emptyFamInstEnv
                                . md_fam_insts . hm_details
              ; hpt_fam_insts = mkModuleEnv [ (hmiModule hmi, hmiFamInstEnv hmi)
-                                           | hmi <- eltsUFM hpt]
+                                           | hmi <- eltsHpt hpt]
              ; groups        = map (dep_finsts . mi_deps . modIface)
                                    directlyImpMods
              ; okPairs       = listToSet $ concatMap allPairs groups
                  -- instances of okPairs are consistent
              ; criticalPairs = listToSet $ allPairs famInstMods
                  -- all pairs that we need to consider
-             ; toCheckPairs  = Map.keys $ criticalPairs `Map.difference` okPairs
+             ; toCheckPairs  =
+                 Set.elems $ criticalPairs `Set.difference` okPairs
                  -- the difference gives us the pairs we need to check now
+                 -- See Note [ModulePairSet determinism and performance]
              }
 
        ; mapM_ (check hpt_fam_insts) toCheckPairs
        }
   where
     allPairs []     = []
-    allPairs (m:ms) = map (ModulePair m) ms ++ allPairs ms
+    allPairs (m:ms) = map (modulePair m) ms ++ allPairs ms
 
     check hpt_fam_insts (ModulePair m1 m2)
       = do { env1 <- getFamInsts hpt_fam_insts m1
@@ -246,7 +276,7 @@ tcLookupDataFamInst_maybe fam_inst_envs tc tc_args
   = Nothing
 
 -- | 'tcTopNormaliseNewTypeTF_maybe' gets rid of top-level newtypes,
--- potentially looking through newtype instances.
+-- potentially looking through newtype /instances/.
 --
 -- It is only used by the type inference engine (specifically, when
 -- solving representational equality), and hence it is careful to unwrap
@@ -260,40 +290,45 @@ tcLookupDataFamInst_maybe fam_inst_envs tc tc_args
 -- It does not look through type families.
 -- It does not normalise arguments to a tycon.
 --
--- Always produces a representational coercion.
+-- If the result is Just (rep_ty, (co, gres), rep_ty), then
+--    co : ty ~R rep_ty
+--    gres are the GREs for the data constructors that
+--                          had to be in scope
 tcTopNormaliseNewTypeTF_maybe :: FamInstEnvs
                               -> GlobalRdrEnv
                               -> Type
-                              -> Maybe (TcCoercion, Type)
+                              -> Maybe ((Bag GlobalRdrElt, TcCoercion), Type)
 tcTopNormaliseNewTypeTF_maybe faminsts rdr_env ty
 -- cf. FamInstEnv.topNormaliseType_maybe and Coercion.topNormaliseNewType_maybe
-  = topNormaliseTypeX_maybe stepper ty
+  = topNormaliseTypeX stepper plus ty
   where
+    plus :: (Bag GlobalRdrElt, TcCoercion) -> (Bag GlobalRdrElt, TcCoercion)
+         -> (Bag GlobalRdrElt, TcCoercion)
+    plus (gres1, co1) (gres2, co2) = ( gres1 `unionBags` gres2
+                                     , co1 `mkTransCo` co2 )
+
+    stepper :: NormaliseStepper (Bag GlobalRdrElt, TcCoercion)
     stepper = unwrap_newtype `composeSteppers` unwrap_newtype_instance
 
     -- For newtype instances we take a double step or nothing, so that
-    -- we don't return the reprsentation type of the newtype instance,
+    -- we don't return the representation type of the newtype instance,
     -- which would lead to terrible error messages
     unwrap_newtype_instance rec_nts tc tys
       | Just (tc', tys', co) <- tcLookupDataFamInst_maybe faminsts tc tys
-      = modifyStepResultCo (co `mkTransCo`) $
+      = mapStepResult (\(gres, co1) -> (gres, co `mkTransCo` co1)) $
         unwrap_newtype rec_nts tc' tys'
       | otherwise = NS_Done
 
     unwrap_newtype rec_nts tc tys
-      | data_cons_in_scope tc
-      = unwrapNewTypeStepper rec_nts tc tys
+      | Just con <- newTyConDataCon_maybe tc
+      , Just gre <- lookupGRE_Name rdr_env (dataConName con)
+           -- This is where we check that the
+           -- data constructor is in scope
+      = mapStepResult (\co -> (unitBag gre, co)) $
+        unwrapNewTypeStepper rec_nts tc tys
 
       | otherwise
       = NS_Done
-
-    data_cons_in_scope :: TyCon -> Bool
-    data_cons_in_scope tc
-      = isWiredInName (tyConName tc) ||
-        (not (isAbstractTyCon tc) && all in_scope data_con_names)
-      where
-        data_con_names = map dataConName (tyConDataCons tc)
-        in_scope dc    = not $ null $ lookupGRE_Name rdr_env dc
 
 {-
 ************************************************************************
@@ -471,12 +506,12 @@ unusedInjTvsInRHS tycon injList lhs rhs =
         | otherwise            = mapUnionVarSet collectInjVars tys
       collectInjVars (LitTy {})
         = emptyVarSet
-      collectInjVars (ForAllTy (Anon arg) res)
+      collectInjVars (FunTy arg res)
         = collectInjVars arg `unionVarSet` collectInjVars res
       collectInjVars (AppTy fun arg)
         = collectInjVars fun `unionVarSet` collectInjVars arg
       -- no forall types in the RHS of a type family
-      collectInjVars (ForAllTy _ _)    =
+      collectInjVars (ForAllTy {})    =
           panic "unusedInjTvsInRHS.collectInjVars"
       collectInjVars (CastTy ty _)   = collectInjVars ty
       collectInjVars (CoercionTy {}) = emptyVarSet
@@ -557,22 +592,19 @@ unusedInjectiveVarsErr (Pair invis_vars vis_vars) errorBuilder tyfamEqn
   = errorBuilder (injectivityErrorHerald True $$ msg)
                  [tyfamEqn]
     where
-      tvs = varSetElemsWellScoped (invis_vars `unionVarSet` vis_vars)
+      tvs = invis_vars `unionVarSet` vis_vars
       has_types = not $ isEmptyVarSet vis_vars
       has_kinds = not $ isEmptyVarSet invis_vars
 
       doc = sep [ what <+> text "variable" <>
-                  plural tvs <+> pprQuotedList tvs
+                  pluralVarSet tvs <+> pprVarSet tvs (pprQuotedList . toposortTyVars)
                 , text "cannot be inferred from the right-hand side." ]
       what = case (has_types, has_kinds) of
                (True, True)   -> text "Type and kind"
                (True, False)  -> text "Type"
                (False, True)  -> text "Kind"
                (False, False) -> pprPanic "mkUnusedInjectiveVarsErr" $ ppr tvs
-      print_kinds_info = sdocWithDynFlags $ \ dflags ->
-                         if has_kinds && not (gopt Opt_PrintExplicitKinds dflags)
-                         then text "(enabling -fprint-explicit-kinds might help)"
-                         else empty
+      print_kinds_info = ppWhen has_kinds ppSuggestExplicitKinds
       msg = doc $$ print_kinds_info $$
             text "In the type family equation:"
 

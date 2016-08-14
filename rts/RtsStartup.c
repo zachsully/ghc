@@ -35,6 +35,7 @@
 #include "FileLock.h"
 #include "LinkerInternals.h"
 #include "LibdwPool.h"
+#include "sm/CNF.h"
 
 #if defined(PROFILING)
 # include "ProfHeap.h"
@@ -293,7 +294,7 @@ hs_add_root(void (*init_root)(void) STG_UNUSED)
 static void
 hs_exit_(rtsBool wait_foreign)
 {
-    nat g, i;
+    uint32_t g, i;
 
     if (hs_init_count <= 0) {
         errorBelch("warning: too many hs_exit()s");
@@ -340,7 +341,12 @@ hs_exit_(rtsBool wait_foreign)
 
     /* stop the ticker */
     stopTimer();
-    exitTimer(wait_foreign);
+    /*
+     * it is quite important that we wait here as some timer implementations
+     * (e.g. pthread) may fire even after we exit, which may segfault as we've
+     * already freed the capabilities.
+     */
+    exitTimer(rtsTrue);
 
     // set the terminal settings back to what they were
 #if !defined(mingw32_HOST_OS)
@@ -408,6 +414,9 @@ hs_exit_(rtsBool wait_foreign)
 
 #if defined(TICKY_TICKY)
     if (RtsFlags.TickyFlags.showTickyStats) PrintTickyInfo();
+
+    FILE *tf = RtsFlags.TickyFlags.tickyFile;
+    if (tf != NULL) fclose(tf);
 #endif
 
 #if defined(mingw32_HOST_OS) && !defined(THREADED_RTS)

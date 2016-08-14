@@ -21,7 +21,7 @@ import Id
 import MkId             ( seqId, voidPrimId )
 import MkCore           ( mkImpossibleExpr, castBottomExpr )
 import IdInfo
-import Name             ( Name, mkSystemVarName, isExternalName )
+import Name             ( Name, mkSystemVarName, isExternalName, getOccFS )
 import Coercion hiding  ( substCo, substCoVar )
 import OptCoercion      ( optCoercion )
 import FamInstEnv       ( topNormaliseType_maybe )
@@ -581,14 +581,14 @@ prepareRhs :: TopLevelFlag -> SimplEnv -> OutId -> OutExpr -> SimplM (SimplEnv, 
 prepareRhs top_lvl env id (Cast rhs co)    -- Note [Float coercions]
   | Pair ty1 _ty2 <- coercionKind co       -- Do *not* do this if rhs has an unlifted type
   , not (isUnliftedType ty1)            -- see Note [Float coercions (unlifted)]
-  = do  { (env', rhs') <- makeTrivialWithInfo top_lvl env sanitised_info rhs
+  = do  { (env', rhs') <- makeTrivialWithInfo top_lvl env (getOccFS id) sanitised_info rhs
         ; return (env', Cast rhs' co) }
   where
     sanitised_info = vanillaIdInfo `setStrictnessInfo` strictnessInfo info
                                    `setDemandInfo` demandInfo info
     info = idInfo id
 
-prepareRhs top_lvl env0 _ rhs0
+prepareRhs top_lvl env0 id rhs0
   = do  { (_is_exp, env1, rhs1) <- go 0 env0 rhs0
         ; return (env1, rhs1) }
   where
@@ -601,7 +601,7 @@ prepareRhs top_lvl env0 _ rhs0
     go n_val_args env (App fun arg)
         = do { (is_exp, env', fun') <- go (n_val_args+1) env fun
              ; case is_exp of
-                True -> do { (env'', arg') <- makeTrivial top_lvl env' arg
+                True -> do { (env'', arg') <- makeTrivial top_lvl env' (getOccFS id) arg
                            ; return (True, env'', App fun' arg') }
                 False -> return (False, env, App fun arg) }
     go n_val_args env (Var fun)
@@ -682,32 +682,38 @@ These strange casts can happen as a result of case-of-case
 -}
 
 makeTrivialArg :: SimplEnv -> ArgSpec -> SimplM (SimplEnv, ArgSpec)
-makeTrivialArg env (ValArg e) = do { (env', e') <- makeTrivial NotTopLevel env e
-                                   ; return (env', ValArg e') }
+makeTrivialArg env (ValArg e) = do
+    { (env', e') <- makeTrivial NotTopLevel env (fsLit "arg") e
+    ; return (env', ValArg e') }
 makeTrivialArg env arg        = return (env, arg)  -- CastBy, TyArg
 
-makeTrivial :: TopLevelFlag -> SimplEnv -> OutExpr -> SimplM (SimplEnv, OutExpr)
+makeTrivial :: TopLevelFlag -> SimplEnv
+            -> FastString  -- ^ a "friendly name" to build the new binder from
+            -> OutExpr -> SimplM (SimplEnv, OutExpr)
 -- Binds the expression to a variable, if it's not trivial, returning the variable
-makeTrivial top_lvl env expr = makeTrivialWithInfo top_lvl env vanillaIdInfo expr
+makeTrivial top_lvl env context expr =
+    makeTrivialWithInfo top_lvl env context vanillaIdInfo expr
 
-makeTrivialWithInfo :: TopLevelFlag -> SimplEnv -> IdInfo
-                    -> OutExpr -> SimplM (SimplEnv, OutExpr)
+makeTrivialWithInfo :: TopLevelFlag -> SimplEnv
+                    -> FastString
+                    -- ^ a "friendly name" to build the new binder from
+                    -> IdInfo -> OutExpr -> SimplM (SimplEnv, OutExpr)
 -- Propagate strictness and demand info to the new binder
 -- Note [Preserve strictness when floating coercions]
 -- Returned SimplEnv has same substitution as incoming one
-makeTrivialWithInfo top_lvl env info expr
+makeTrivialWithInfo top_lvl env context info expr
   | exprIsTrivial expr                          -- Already trivial
   || not (bindingOk top_lvl expr expr_ty)       -- Cannot trivialise
                                                 --   See Note [Cannot trivialise]
   = return (env, expr)
   | otherwise           -- See Note [Take care] below
   = do  { uniq <- getUniqueM
-        ; let name = mkSystemVarName uniq (fsLit "a")
+        ; let name = mkSystemVarName uniq context
               var = mkLocalIdOrCoVarWithInfo name expr_ty info
         ; env'  <- completeNonRecX top_lvl env False var var expr
         ; expr' <- simplVar env' var
         ; return (env', expr') }
-        -- The simplVar is needed becase we're constructing a new binding
+        -- The simplVar is needed because we're constructing a new binding
         --     a = rhs
         -- And if rhs is of form (rhs1 |> co), then we might get
         --     a1 = rhs1
@@ -1932,7 +1938,9 @@ tryRules env rules fn args call_cont
   = do { dflags <- getDynFlags
        ; case lookupRule dflags (getUnfoldingInRuleMatch env) (activeRule env)
                          fn (argInfoAppArgs args) rules of {
-           Nothing               -> return Nothing ;   -- No rule matches
+           Nothing ->
+             do { nodump dflags  -- This ensures that an empty file is written
+                ; return Nothing } ;  -- No rule matches
            Just (rule, rule_rhs) ->
              do { checkedTick (RuleFired (ru_name rule))
                 ; let cont' = pushSimplifiedArgs env
@@ -1953,6 +1961,16 @@ tryRules env rules fn args call_cont
       | dopt Opt_D_dump_rule_firings dflags
       = log_rule dflags Opt_D_dump_rule_firings "Rule fired:" $
           ftext (ru_name rule)
+
+      | otherwise
+      = return ()
+
+    nodump dflags
+      | dopt Opt_D_dump_rule_rewrites dflags
+      = liftIO $ dumpSDoc dflags alwaysQualify Opt_D_dump_rule_rewrites "" empty
+
+      | dopt Opt_D_dump_rule_firings dflags
+      = liftIO $ dumpSDoc dflags alwaysQualify Opt_D_dump_rule_firings "" empty
 
       | otherwise
       = return ()
@@ -2659,7 +2677,7 @@ knownCon env scrut dc dc_ty_args dc_args bndr bs rhs cont
 -------------------
 missingAlt :: SimplEnv -> Id -> [InAlt] -> SimplCont -> SimplM (SimplEnv, OutExpr)
                 -- This isn't strictly an error, although it is unusual.
-                -- It's possible that the simplifer might "see" that
+                -- It's possible that the simplifier might "see" that
                 -- an inner case has no accessible alternatives before
                 -- it "sees" that the entire branch of an outer case is
                 -- inaccessible.  So we simply put an error case here instead.
@@ -2785,7 +2803,7 @@ mkDupableCont env (ApplyToVal { sc_arg = arg, sc_dup = dup, sc_env = se, sc_cont
         --              in [...hole...] a
     do  { (env', jbinds, dup_cont, nodup_cont) <- mkDupableCont env cont
         ; (_, se', arg') <- simplArg env' dup se arg
-        ; (env'', arg'') <- makeTrivial NotTopLevel env' arg'
+        ; (env'', arg'') <- makeTrivial NotTopLevel env' (fsLit "karg") arg'
         ; let app_cont = ApplyToVal { sc_arg = arg'', sc_env = se'
                                     , sc_dup = OkToDup, sc_cont = dup_cont }
         ; return (env'', jbinds, app_cont, nodup_cont) }
@@ -2890,8 +2908,8 @@ mkDupableAlt env case_bndr (con, bndrs', rhs') = do
                     else do { rw_id <- newId (fsLit "w") voidPrimTy
                             ; return ([setOneShotLambda rw_id], [Var voidPrimId]) }
 
-        ; join_bndr <- newId (fsLit "$j") (mkPiTypes final_bndrs' rhs_ty')
-                -- Note [Funky mkPiTypes]
+        ; join_bndr <- newId (fsLit "$j") (mkLamTypes final_bndrs' rhs_ty')
+                -- Note [Funky mkLamTypes]
 
         ; let   -- We make the lambdas into one-shot-lambdas.  The
                 -- join point is sure to be applied at most once, and doing so
@@ -3015,9 +3033,9 @@ but we only have one env shared between all the alts.
 (Remember we must zap the subst-env before re-simplifying something).
 Rather than do this we simply agree to re-simplify the original (small) thing later.
 
-Note [Funky mkPiTypes]
+Note [Funky mkLamTypes]
 ~~~~~~~~~~~~~~~~~~~~~~
-Notice the funky mkPiTypes.  If the contructor has existentials
+Notice the funky mkLamTypes.  If the constructor has existentials
 it's possible that the join point will be abstracted over
 type variables as well as term variables.
  Example:  Suppose we have

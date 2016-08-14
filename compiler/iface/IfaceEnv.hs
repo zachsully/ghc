@@ -30,9 +30,10 @@ import Var
 import Name
 import Avail
 import Module
-import UniqFM
 import FastString
+import FastStringEnv
 import IfaceType
+import PrelNames ( gHC_TYPES, gHC_PRIM, gHC_TUPLE )
 import UniqSupply
 import SrcLoc
 import Util
@@ -184,26 +185,37 @@ See Note [The Name Cache] above.
 
 Note [Built-in syntax and the OrigNameCache]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-You might think that usin isBuiltInOcc_maybe in lookupOrigNameCache is
-unnecessary because tuple TyCon/DataCons are parsed as Exact RdrNames
-and *don't* appear as original names in interface files (because
-serialization gives them special treatment), so we will never look
-them up in the original name cache.
 
-However, there are two reasons why we might look up an Orig RdrName:
+Built-in syntax like tuples and unboxed sums are quite ubiquitous. To lower
+their cost we use two tricks,
+
+  b. We specially encode tuple Names in interface files' symbols tables to avoid
+     having to look up their names at all while loading interface files. See
+     Note [Symbol table representation of names] in BinIface for details.
+
+  a. We don't include them in the Orig name cache but instead parse their
+     OccNames (in isBuiltInOcc_maybe) to avoid bloating the name cache with
+     them.
+
+Why is the second measure necessary? Good question; afterall, 1) the parser
+emits built-in syntax directly as Exact RdrNames, and 2) built-in syntax never
+needs to looked-up during interface loading due to (a). It turns out that there
+are two reasons why we might look up an Orig RdrName for built-in syntax,
 
   * If you use setRdrNameSpace on an Exact RdrName it may be
     turned into an Orig RdrName.
 
   * Template Haskell turns a BuiltInSyntax Name into a TH.NameG
     (DsMeta.globalVar), and parses a NameG into an Orig RdrName
-    (Convert.thRdrName).  So, eg $(do { reify '(,); ... }) will
+    (Convert.thRdrName).  So, e.g. $(do { reify '(,); ... }) will
     go this route (Trac #8954).
+
 -}
 
 lookupOrigNameCache :: OrigNameCache -> Module -> OccName -> Maybe Name
 lookupOrigNameCache nc mod occ
-  | Just name <- isBuiltInOcc_maybe occ
+  | mod == gHC_TYPES || mod == gHC_PRIM || mod == gHC_TUPLE
+  , Just name <- isBuiltInOcc_maybe occ
   =     -- See Note [Known-key names], 3(c) in PrelNames
         -- Special case for tuples; there are too many
         -- of them to pre-populate the original-name cache
@@ -259,7 +271,7 @@ initOrigNames names = foldl extendOrigNameCache emptyModuleEnv names
 tcIfaceLclId :: FastString -> IfL Id
 tcIfaceLclId occ
   = do  { lcl <- getLclEnv
-        ; case (lookupUFM (if_id_env lcl) occ) of
+        ; case (lookupFsEnv (if_id_env lcl) occ) of
             Just ty_var -> return ty_var
             Nothing     -> failIfM (text "Iface id out of scope: " <+> ppr occ)
         }
@@ -267,7 +279,7 @@ tcIfaceLclId occ
 extendIfaceIdEnv :: [Id] -> IfL a -> IfL a
 extendIfaceIdEnv ids thing_inside
   = do  { env <- getLclEnv
-        ; let { id_env' = addListToUFM (if_id_env env) pairs
+        ; let { id_env' = extendFsEnvList (if_id_env env) pairs
               ; pairs   = [(occNameFS (getOccName id), id) | id <- ids] }
         ; setLclEnv (env { if_id_env = id_env' }) thing_inside }
 
@@ -275,7 +287,7 @@ extendIfaceIdEnv ids thing_inside
 tcIfaceTyVar :: FastString -> IfL TyVar
 tcIfaceTyVar occ
   = do  { lcl <- getLclEnv
-        ; case (lookupUFM (if_tv_env lcl) occ) of
+        ; case (lookupFsEnv (if_tv_env lcl) occ) of
             Just ty_var -> return ty_var
             Nothing     -> failIfM (text "Iface type variable out of scope: " <+> ppr occ)
         }
@@ -283,20 +295,20 @@ tcIfaceTyVar occ
 lookupIfaceTyVar :: IfaceTvBndr -> IfL (Maybe TyVar)
 lookupIfaceTyVar (occ, _)
   = do  { lcl <- getLclEnv
-        ; return (lookupUFM (if_tv_env lcl) occ) }
+        ; return (lookupFsEnv (if_tv_env lcl) occ) }
 
 lookupIfaceVar :: IfaceBndr -> IfL (Maybe TyCoVar)
 lookupIfaceVar (IfaceIdBndr (occ, _))
   = do  { lcl <- getLclEnv
-        ; return (lookupUFM (if_id_env lcl) occ) }
+        ; return (lookupFsEnv (if_id_env lcl) occ) }
 lookupIfaceVar (IfaceTvBndr (occ, _))
   = do  { lcl <- getLclEnv
-        ; return (lookupUFM (if_tv_env lcl) occ) }
+        ; return (lookupFsEnv (if_tv_env lcl) occ) }
 
 extendIfaceTyVarEnv :: [TyVar] -> IfL a -> IfL a
 extendIfaceTyVarEnv tyvars thing_inside
   = do  { env <- getLclEnv
-        ; let { tv_env' = addListToUFM (if_tv_env env) pairs
+        ; let { tv_env' = extendFsEnvList (if_tv_env env) pairs
               ; pairs   = [(occNameFS (getOccName tv), tv) | tv <- tyvars] }
         ; setLclEnv (env { if_tv_env = tv_env' }) thing_inside }
 

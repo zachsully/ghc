@@ -67,15 +67,15 @@ classifyTyCons convStatus parTyCons tcs = classify [] [] [] [] convStatus parTyC
         refs = ds `delListFromUniqSet` tcs
 
           -- the tycons that directly or indirectly depend on parallel arrays
-        tcs_par | any ((`elemNameSet` parTyCons) . tyConName) . eltsUFM $ refs = tcs
-                | otherwise                                                    = []
+        tcs_par | anyUFM ((`elemNameSet` parTyCons) . tyConName) refs = tcs
+                | otherwise = []
 
         pts' = pts `extendNameSetList` map tyConName tcs_par
 
         can_convert  = (isNullUFM (filterUniqSet ((`elemNameSet` pts) . tyConName) (refs `minusUFM` cs))
                         && all convertable tcs)
                        || isShowClass tcs
-        must_convert = foldUFM (||) False (intersectUFM_C const cs refs)
+        must_convert = anyUFM id (intersectUFM_C const cs refs)
                        && (not . isShowClass $ tcs)
 
         -- We currently admit Haskell 2011-style data and newtype declarations as well as type
@@ -96,10 +96,14 @@ type TyConGroup = ([TyCon], UniqSet TyCon)
 -- Compute mutually recursive groups of tycons in topological order.
 --
 tyConGroups :: [TyCon] -> [TyConGroup]
-tyConGroups tcs = map mk_grp (stronglyConnCompFromEdgedVertices edges)
+tyConGroups tcs = map mk_grp (stronglyConnCompFromEdgedVerticesUniq edges)
   where
-    edges = [((tc, ds), tc, uniqSetToList ds) | tc <- tcs
+    edges = [((tc, ds), tc, nonDetEltsUFM ds) | tc <- tcs
                                 , let ds = tyConsOfTyCon tc]
+            -- It's OK to use nonDetEltsUFM here as
+            -- stronglyConnCompFromEdgedVertices is still deterministic even
+            -- if the edges are in nondeterministic order as explained in
+            -- Note [Deterministic SCC] in Digraph.
 
     mk_grp (AcyclicSCC (tc, ds)) = ([tc], ds)
     mk_grp (CyclicSCC els)       = (tcs, unionManyUniqSets dss)

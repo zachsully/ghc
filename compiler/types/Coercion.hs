@@ -2,7 +2,7 @@
 (c) The University of Glasgow 2006
 -}
 
-{-# LANGUAGE RankNTypes, CPP, DeriveDataTypeable, MultiWayIf #-}
+{-# LANGUAGE RankNTypes, CPP, MultiWayIf #-}
 
 -- | Module for (a) type kinds and (b) type coercions,
 -- as used in System FC. See 'CoreSyn.Expr' for
@@ -45,8 +45,8 @@ module Coercion (
         instNewTyCon_maybe,
 
         NormaliseStepper, NormaliseStepResult(..), composeSteppers,
-        modifyStepResultCo, unwrapNewTypeStepper,
-        topNormaliseNewType_maybe, topNormaliseTypeX_maybe,
+        mapStepResult, unwrapNewTypeStepper,
+        topNormaliseNewType_maybe, topNormaliseTypeX,
 
         decomposeCo, getCoVar_maybe,
         splitTyConAppCo_maybe,
@@ -65,7 +65,7 @@ module Coercion (
 
         -- ** Free variables
         tyCoVarsOfCo, tyCoVarsOfCos, coVarsOfCo,
-        tyCoVarsOfCoAcc, tyCoVarsOfCosAcc, tyCoVarsOfCoDSet,
+        tyCoFVsOfCo, tyCoFVsOfCos, tyCoVarsOfCoDSet,
         coercionSize,
 
         -- ** Substitution
@@ -122,6 +122,7 @@ import PrelNames
 import TysPrim          ( eqPhantPrimTyCon )
 import ListSetOps
 import Maybes
+import UniqFM
 
 import Control.Monad (foldM)
 import Control.Arrow ( first )
@@ -133,7 +134,7 @@ import Data.Function ( on )
      -- The coercion arguments always *precisely* saturate
      -- arity of (that branch of) the CoAxiom.  If there are
      -- any left over, we use AppCo.  See
-     -- See [Coercion axioms applied to coercions]
+     -- See [Coercion axioms applied to coercions] in TyCoRep
 
 \subsection{Coercion variables}
 %*                                                                      *
@@ -300,7 +301,7 @@ ppr_co_ax_branch ppr_rhs
                           , cab_rhs = rhs
                           , cab_loc = loc })
   = foldr1 (flip hangNotEmpty 2)
-        [ pprUserForAll (map (mkNamedBinder Invisible) (tvs ++ cvs))
+        [ pprUserForAll (mkTyVarBinders Inferred (tvs ++ cvs))
         , pprTypeApp fam_tc lhs <+> equals <+> ppr_rhs fam_tc rhs
         , text "-- Defined" <+> pprLoc loc ]
   where
@@ -685,7 +686,7 @@ mkForAllCo :: TyVar -> Coercion -> Coercion -> Coercion
 mkForAllCo tv kind_co co
   | Refl r ty <- co
   , Refl {} <- kind_co
-  = Refl r (mkNamedForAllTy tv Invisible ty)
+  = Refl r (mkInvForAllTy tv ty)
   | otherwise
   = ForAllCo tv kind_co co
 
@@ -842,6 +843,7 @@ mkSymCo    (SubCo (SymCo co))     = SubCo co
 mkSymCo co                        = SymCo co
 
 -- | Create a new 'Coercion' by composing the two given 'Coercion's transitively.
+--   (co1 ; co2)
 mkTransCo :: Coercion -> Coercion -> Coercion
 mkTransCo co1 (Refl {}) = co1
 mkTransCo (Refl {}) co2 = co2
@@ -1265,30 +1267,32 @@ instNewTyCon_maybe tc tys
 -}
 
 -- | A function to check if we can reduce a type by one step. Used
--- with 'topNormaliseTypeX_maybe'.
-type NormaliseStepper = RecTcChecker
-                     -> TyCon     -- tc
-                     -> [Type]    -- tys
-                     -> NormaliseStepResult
+-- with 'topNormaliseTypeX'.
+type NormaliseStepper ev = RecTcChecker
+                         -> TyCon     -- tc
+                         -> [Type]    -- tys
+                         -> NormaliseStepResult ev
 
 -- | The result of stepping in a normalisation function.
--- See 'topNormaliseTypeX_maybe'.
-data NormaliseStepResult
+-- See 'topNormaliseTypeX'.
+data NormaliseStepResult ev
   = NS_Done   -- ^ Nothing more to do
   | NS_Abort  -- ^ Utter failure. The outer function should fail too.
-  | NS_Step RecTcChecker Type Coercion  -- ^ We stepped, yielding new bits;
-                                        -- ^ co :: old type ~ new type
+  | NS_Step RecTcChecker Type ev    -- ^ We stepped, yielding new bits;
+                                    -- ^ ev is evidence;
+                                    -- Usually a co :: old type ~ new type
 
-modifyStepResultCo :: (Coercion -> Coercion)
-                   -> NormaliseStepResult -> NormaliseStepResult
-modifyStepResultCo f (NS_Step rec_nts ty co) = NS_Step rec_nts ty (f co)
-modifyStepResultCo _ result                  = result
+mapStepResult :: (ev1 -> ev2)
+              -> NormaliseStepResult ev1 -> NormaliseStepResult ev2
+mapStepResult f (NS_Step rec_nts ty ev) = NS_Step rec_nts ty (f ev)
+mapStepResult _ NS_Done                 = NS_Done
+mapStepResult _ NS_Abort                = NS_Abort
 
 -- | Try one stepper and then try the next, if the first doesn't make
 -- progress.
 -- So if it returns NS_Done, it means that both steppers are satisfied
-composeSteppers :: NormaliseStepper -> NormaliseStepper
-                -> NormaliseStepper
+composeSteppers :: NormaliseStepper ev -> NormaliseStepper ev
+                -> NormaliseStepper ev
 composeSteppers step1 step2 rec_nts tc tys
   = case step1 rec_nts tc tys of
       success@(NS_Step {}) -> success
@@ -1297,7 +1301,7 @@ composeSteppers step1 step2 rec_nts tc tys
 
 -- | A 'NormaliseStepper' that unwraps newtypes, careful not to fall into
 -- a loop. If it would fall into a loop, it produces 'NS_Abort'.
-unwrapNewTypeStepper :: NormaliseStepper
+unwrapNewTypeStepper :: NormaliseStepper Coercion
 unwrapNewTypeStepper rec_nts tc tys
   | Just (ty', co) <- instNewTyCon_maybe tc tys
   = case checkRecTc rec_nts tc of
@@ -1311,28 +1315,32 @@ unwrapNewTypeStepper rec_nts tc tys
 -- to use the provided 'NormaliseStepper' until that function fails, and then
 -- this function returns. The roles of the coercions produced by the
 -- 'NormaliseStepper' must all be the same, which is the role returned from
--- the call to 'topNormaliseTypeX_maybe'.
-topNormaliseTypeX_maybe :: NormaliseStepper -> Type -> Maybe (Coercion, Type)
-topNormaliseTypeX_maybe stepper
-  = go initRecTc Nothing
-  where
-    go rec_nts mb_co1 ty
+-- the call to 'topNormaliseTypeX'.
+--
+-- Typically ev is Coercion.
+--
+-- If topNormaliseTypeX step plus ty = Just (ev, ty')
+-- then ty ~ev1~ t1 ~ev2~ t2 ... ~evn~ ty'
+-- and ev = ev1 `plus` ev2 `plus` ... `plus` evn
+-- If it returns Nothing then no newtype unwrapping could happen
+topNormaliseTypeX :: NormaliseStepper ev -> (ev -> ev -> ev)
+                  -> Type -> Maybe (ev, Type)
+topNormaliseTypeX stepper plus ty
+ | Just (tc, tys) <- splitTyConApp_maybe ty
+ , NS_Step rec_nts ty' ev <- stepper initRecTc tc tys
+ = go rec_nts ev ty'
+ | otherwise
+ = Nothing
+ where
+    go rec_nts ev ty
       | Just (tc, tys) <- splitTyConApp_maybe ty
       = case stepper rec_nts tc tys of
-          NS_Step rec_nts' ty' co2
-            -> go rec_nts' (mb_co1 `trans` co2) ty'
-
-          NS_Done  -> all_done
+          NS_Step rec_nts' ty' ev' -> go rec_nts' (ev `plus` ev') ty'
+          NS_Done  -> Just (ev, ty)
           NS_Abort -> Nothing
 
       | otherwise
-      = all_done
-      where
-        all_done | Just co <- mb_co1 = Just (co, ty)
-                 | otherwise         = Nothing
-
-    Nothing    `trans` co2 = Just co2
-    (Just co1) `trans` co2 = Just (co1 `mkTransCo` co2)
+      = Just (ev, ty)
 
 topNormaliseNewType_maybe :: Type -> Maybe (Coercion, Type)
 -- ^ Sometimes we want to look through a @newtype@ and get its associated coercion.
@@ -1351,8 +1359,9 @@ topNormaliseNewType_maybe :: Type -> Maybe (Coercion, Type)
 -- the type family environment. If you do have that at hand, consider to use
 -- topNormaliseType_maybe, which should be a drop-in replacement for
 -- topNormaliseNewType_maybe
+-- If topNormliseNewType_maybe ty = Just (co, ty'), then co : ty ~R ty'
 topNormaliseNewType_maybe ty
-  = topNormaliseTypeX_maybe unwrapNewTypeStepper ty
+  = topNormaliseTypeX unwrapNewTypeStepper mkTransCo ty
 
 {-
 %************************************************************************
@@ -1516,9 +1525,8 @@ ty_co_subst lc role ty
                              liftCoSubstTyVar lc r tv
     go r (AppTy ty1 ty2)   = mkAppCo (go r ty1) (go Nominal ty2)
     go r (TyConApp tc tys) = mkTyConAppCo r tc (zipWith go (tyConRolesX r tc) tys)
-    go r (ForAllTy (Anon ty1) ty2)
-                           = mkFunCo r (go r ty1) (go r ty2)
-    go r (ForAllTy (Named v _) ty)
+    go r (FunTy ty1 ty2)   = mkFunCo r (go r ty1) (go r ty2)
+    go r (ForAllTy (TvBndr v _) ty)
                            = let (lc', v', h) = liftCoSubstVarBndr lc v in
                              mkForAllCo v' h $! ty_co_subst lc' r ty
     go r ty@(LitTy {})     = ASSERT( r == Nominal )
@@ -1614,7 +1622,10 @@ liftEnvSubst :: (forall a. Pair a -> a) -> TCvSubst -> LiftCoEnv -> TCvSubst
 liftEnvSubst selector subst lc_env
   = composeTCvSubst (TCvSubst emptyInScopeSet tenv cenv) subst
   where
-    pairs            = varEnvToList lc_env
+    pairs            = nonDetUFMToList lc_env
+                       -- It's OK to use nonDetUFMToList here because we
+                       -- immediately forget the ordering by creating
+                       -- a VarEnv
     (tpairs, cpairs) = partitionWith ty_or_co pairs
     tenv             = mkVarEnv_Directly tpairs
     cenv             = mkVarEnv_Directly cpairs
@@ -1717,8 +1728,13 @@ coercionKind co = go co
       = let Pair _ k2          = go k_co
             tv2                = setTyVarKind tv1 k2
             Pair ty1 ty2       = go co
-            ty2' = substTyWithUnchecked [tv1] [TyVarTy tv2 `mk_cast_ty` mkSymCo k_co] ty2 in
-        mkNamedForAllTy <$> Pair tv1 tv2 <*> pure Invisible <*> Pair ty1 ty2'
+            subst = zipTvSubst [tv1] [TyVarTy tv2 `mk_cast_ty` mkSymCo k_co]
+            ty2' = substTyAddInScope subst ty2 in
+            -- We need free vars of ty2 in scope to satisfy the invariant
+            -- from Note [The substitution invariant]
+            -- This is doing repeated substitutions and probably doesn't
+            -- need to, see #11735
+        mkInvForAllTy <$> Pair tv1 tv2 <*> Pair ty1 ty2'
     go (CoVarCo cv)         = toPair $ coVarTypes cv
     go (AxiomInstCo ax ind cos)
       | CoAxBranch { cab_tvs = tvs, cab_cvs = cvs
@@ -1792,8 +1808,13 @@ coercionKindRole = go
       = let Pair _ k2          = coercionKind k_co
             tv2                = setTyVarKind tv1 k2
             (Pair ty1 ty2, r)  = go co
-            ty2' = substTyWithUnchecked [tv1] [TyVarTy tv2 `mkCastTy` mkSymCo k_co] ty2 in
-        (mkNamedForAllTy <$> Pair tv1 tv2 <*> pure Invisible <*> Pair ty1 ty2', r)
+            subst = zipTvSubst [tv1] [TyVarTy tv2 `mkCastTy` mkSymCo k_co]
+            ty2' = substTyAddInScope subst ty2 in
+            -- We need free vars of ty2 in scope to satisfy the invariant
+            -- from Note [The substitution invariant]
+            -- This is doing repeated substitutions and probably doesn't
+            -- need to, see #11735
+        (mkInvForAllTy <$> Pair tv1 tv2 <*> Pair ty1 ty2', r)
     go (CoVarCo cv) = (toPair $ coVarTypes cv, coVarRole cv)
     go co@(AxiomInstCo ax _ _) = (coercionKind co, coAxiomRole ax)
     go (UnivCo _ r ty1 ty2)  = (Pair ty1 ty2, r)

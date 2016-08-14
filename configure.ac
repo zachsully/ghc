@@ -13,7 +13,7 @@ dnl
 # see what flags are available. (Better yet, read the documentation!)
 #
 
-AC_INIT([The Glorious Glasgow Haskell Compilation System], [8.1], [glasgow-haskell-bugs@haskell.org], [ghc])
+AC_INIT([The Glorious Glasgow Haskell Compilation System], [8.1], [glasgow-haskell-bugs@haskell.org], [ghc-AC_PACKAGE_VERSION])
 
 # Set this to YES for a released version, otherwise NO
 : ${RELEASE=NO}
@@ -32,6 +32,11 @@ if test ! -f mk/config.h.in; then
 fi
 
 AC_SUBST([CONFIGURE_ARGS], [$ac_configure_args])
+
+dnl this makes sure `./configure --target=<cross-compile-target>`
+dnl works as expected, since we're slightly modifying how Autoconf
+dnl interprets build/host/target and how this interacts with $CC tests
+test -n "$target_alias" && ac_tool_prefix=$target_alias-
 
 dnl ----------------------------------------------------------
 dnl ** Find unixy sort and find commands,
@@ -107,6 +112,11 @@ AC_ARG_ENABLE(tarballs-autodownload,
         TarballsAutodownload=YES,
         TarballsAutodownload=NO
 )
+
+dnl CC_STAGE0 is like the "previous" variable CC (inherited by CC_STAGE[123])
+dnl but instead used by stage0 for bootstrapping stage1
+AC_ARG_VAR(CC_STAGE0, [C compiler command (bootstrap)])
+
 if test "$WithGhc" != ""; then
   FPTOOLS_GHC_VERSION([GhcVersion], [GhcMajVersion], [GhcMinVersion], [GhcPatchLevel])dnl
 
@@ -121,10 +131,12 @@ if test "$WithGhc" != ""; then
   GhcMinVersion2=`echo "$GhcMinVersion" | sed 's/^\\(.\\)$/0\\1/'`
   GhcCanonVersion="$GhcMajVersion$GhcMinVersion2"
 
-  BOOTSTRAPPING_GHC_INFO_FIELD([CC_STAGE0],[C compiler command])
-  dnl ToDo, once "ld command" is reliably available.
-  dnl Then, we can remove the LD_STAGE0 hack in mk/build-package-date.mk
-  dnl BOOTSTRAPPING_GHC_INFO_FIELD([LD_STAGE0],[ld command])
+  dnl infer CC_STAGE0 from `ghc --info` unless explicitly set by user
+  if test -z "$CC_STAGE0"; then
+    BOOTSTRAPPING_GHC_INFO_FIELD([CC_STAGE0],[C compiler command])
+  fi
+
+  BOOTSTRAPPING_GHC_INFO_FIELD([LD_STAGE0],[ld command])
   BOOTSTRAPPING_GHC_INFO_FIELD([AR_STAGE0],[ar command])
   BOOTSTRAPPING_GHC_INFO_FIELD([AR_OPTS_STAGE0],[ar flags])
   BOOTSTRAPPING_GHC_INFO_FIELD([ArSupportsAtFile_STAGE0],[ar supports at file])
@@ -165,13 +177,9 @@ then
 
     if test "$ghc_host_os" = "mingw32"
     then
-        if test "${OSTYPE}" = "msys"
-        then
-            WithGhc=`echo "${WithGhc}" | sed "s#^/\([a-zA-Z]\)/#\1:/#"`
-        else
-            # Canonicalise to <drive>:/path/to/ghc
-            WithGhc=`cygpath -m "${WithGhc}"`
-        fi
+        # Canonicalise to <drive>:/path/to/ghc
+        WithGhc=`cygpath -m "${WithGhc}"`
+
         echo "GHC path canonicalised to: ${WithGhc}"
     fi
 fi
@@ -253,15 +261,6 @@ AC_ARG_ENABLE(unregisterised,
 [Unregisterised="$UnregisterisedDefault"]
 )
 AC_SUBST(Unregisterised)
-
-AC_ARG_WITH(hc,
-[AC_HELP_STRING([--with-hc=ARG],
-        [Use ARG as the path to the compiler for compiling ordinary
-         Haskell code  (default= value of --with-ghc)])],
-[WithHc="$withval"],
-[WithHc=$WithGhc]
-)
-AC_SUBST(WithHc)
 
 # Requires FPTOOLS_SET_PLATFORM_VARS to be run first.
 FP_FIND_ROOT
@@ -363,6 +362,8 @@ then
     NM="${mingwbin}nm.exe"
     RANLIB="${mingwbin}ranlib.exe"
     OBJDUMP="${mingwbin}objdump.exe"
+    Windres="${mingwbin}windres.exe"
+    DllWrap="${mingwbin}dllwrap.exe"
     fp_prog_ar="${mingwbin}ar.exe"
 
     # NB. Download the perl binaries if required
@@ -443,13 +444,19 @@ AC_SUBST(TargetPlatformFull)
 
 dnl ** Which gcc to use?
 dnl --------------------------------------------------------------
-FIND_GCC([WhatGccIsCalled], [gcc], [gcc])
-CC="$WhatGccIsCalled"
-export CC
 
-# If --with-gcc was used, and we're not cross-compiling, then it also
-# applies to the stage0 compiler.
-MAYBE_OVERRIDE_STAGE0([gcc],[CC_STAGE0])
+AC_ARG_WITH([gcc],
+        AS_HELP_STRING([--with-gcc=ARG], [Use ARG as the path to gcc (obsolete, use CC=ARG instead) [default=autodetect]]),
+        AC_MSG_ERROR([--with-gcc=$withval is obsolete (use './configure CC=$withval' or 'CC=$withval ./configure' instead)]))
+
+AC_ARG_WITH([clang],
+        AS_HELP_STRING([--with-clang=ARG], [Use ARG as the path to gcc (obsolete, use CC=ARG instead) [default=autodetect]]),
+        AC_MSG_ERROR([--with-clang=$withval is obsolete (use './configure CC=$withval' or 'CC=$withval ./configure' instead)]))
+
+dnl detect compiler (prefer gcc over clang) and set $CC (unless CC already set),
+dnl later CC is copied to CC_STAGE{1,2,3}
+AC_PROG_CC([gcc clang])
+
 MAYBE_OVERRIDE_STAGE0([ar],[AR_STAGE0])
 
 dnl make extensions visible to allow feature-tests to detect them lateron
@@ -462,6 +469,11 @@ AC_PROG_CPP
 FP_CPP_CMD_WITH_ARGS(HaskellCPPCmd, HaskellCPPArgs)
 AC_SUBST([HaskellCPPCmd])
 AC_SUBST([HaskellCPPArgs])
+
+FP_SET_CFLAGS_C99([CC],[CFLAGS],[CPPFLAGS])
+FP_SET_CFLAGS_C99([CC_STAGE0],[CONF_CC_OPTS_STAGE0],[CONF_CPP_OPTS_STAGE0])
+FP_SET_CFLAGS_C99([CC],[CONF_CC_OPTS_STAGE1],[CONF_CPP_OPTS_STAGE1])
+FP_SET_CFLAGS_C99([CC],[CONF_CC_OPTS_STAGE2],[CONF_CPP_OPTS_STAGE2])
 
 dnl ** Which ld to use?
 dnl --------------------------------------------------------------
@@ -509,7 +521,7 @@ esac
 # tools we are looking for. In the past, GHC supported a number of
 # versions of LLVM simultaneously, but that stopped working around
 # 3.5/3.6 release of LLVM.
-LlvmVersion=3.7
+LlvmVersion=3.8
 AC_SUBST([LlvmVersion])
 sUPPORTED_LLVM_VERSION=$(echo \($LlvmVersion\) | sed 's/\./,/')
 AC_DEFINE_UNQUOTED([sUPPORTED_LLVM_VERSION], ${sUPPORTED_LLVM_VERSION}, [The supported LLVM version number])
@@ -719,7 +731,6 @@ AC_SUBST(HaveDtrace)
 AC_PATH_PROG(HSCOLOUR,HsColour)
 # HsColour is passed to Cabal, so we need a native path
 if test "$HostOS"      = "mingw32" && \
-   test "${OSTYPE}"   != "msys"    && \
    test "${HSCOLOUR}" != ""
 then
     # Canonicalise to <drive>:/path/to/gcc
@@ -782,47 +793,37 @@ dnl ** do we have long longs?
 AC_CHECK_TYPES([long long])
 
 dnl ** what are the sizes of various types
-AC_CHECK_SIZEOF(char,               1)
-AC_CHECK_SIZEOF(double,             8)
-AC_CHECK_SIZEOF(float,              4)
-AC_CHECK_SIZEOF(int,                4)
-AC_CHECK_SIZEOF(long,               4)
+FP_CHECK_SIZEOF_AND_ALIGNMENT(char)
+FP_CHECK_SIZEOF_AND_ALIGNMENT(double)
+FP_CHECK_SIZEOF_AND_ALIGNMENT(float)
+FP_CHECK_SIZEOF_AND_ALIGNMENT(int)
+FP_CHECK_SIZEOF_AND_ALIGNMENT(long)
 if test "$ac_cv_type_long_long" = yes; then
-AC_CHECK_SIZEOF(long long,          8)
+FP_CHECK_SIZEOF_AND_ALIGNMENT(long long)
 fi
-AC_CHECK_SIZEOF(short,              2)
-AC_CHECK_SIZEOF(unsigned char,      1)
-AC_CHECK_SIZEOF(unsigned int,       4)
-AC_CHECK_SIZEOF(unsigned long,      4)
+FP_CHECK_SIZEOF_AND_ALIGNMENT(short)
+FP_CHECK_SIZEOF_AND_ALIGNMENT(unsigned char)
+FP_CHECK_SIZEOF_AND_ALIGNMENT(unsigned int)
+FP_CHECK_SIZEOF_AND_ALIGNMENT(unsigned long)
 if test "$ac_cv_type_long_long" = yes; then
-AC_CHECK_SIZEOF(unsigned long long, 8)
+FP_CHECK_SIZEOF_AND_ALIGNMENT(unsigned long long)
 fi
-AC_CHECK_SIZEOF(unsigned short,     2)
-AC_CHECK_SIZEOF(void *,             4)
+FP_CHECK_SIZEOF_AND_ALIGNMENT(unsigned short)
+FP_CHECK_SIZEOF_AND_ALIGNMENT(void *)
+
+FP_CHECK_SIZEOF_AND_ALIGNMENT(int8_t)
+FP_CHECK_SIZEOF_AND_ALIGNMENT(uint8_t)
+FP_CHECK_SIZEOF_AND_ALIGNMENT(int16_t)
+FP_CHECK_SIZEOF_AND_ALIGNMENT(uint16_t)
+FP_CHECK_SIZEOF_AND_ALIGNMENT(int32_t)
+FP_CHECK_SIZEOF_AND_ALIGNMENT(uint32_t)
+FP_CHECK_SIZEOF_AND_ALIGNMENT(int64_t)
+FP_CHECK_SIZEOF_AND_ALIGNMENT(uint64_t)
+
 
 dnl for use in settings.in
 WordSize=$ac_cv_sizeof_void_p
 AC_SUBST(WordSize)
-
-dnl ** what are alignment constraints on various types
-FP_CHECK_ALIGNMENT(char)
-FP_CHECK_ALIGNMENT(double)
-FP_CHECK_ALIGNMENT(float)
-FP_CHECK_ALIGNMENT(int)
-FP_CHECK_ALIGNMENT(long)
-if test "$ac_cv_type_long_long" = yes; then
-FP_CHECK_ALIGNMENT(long long)
-fi
-FP_CHECK_ALIGNMENT(short)
-FP_CHECK_ALIGNMENT(unsigned char)
-FP_CHECK_ALIGNMENT(unsigned int)
-FP_CHECK_ALIGNMENT(unsigned long)
-if test "$ac_cv_type_long_long" = yes; then
-FP_CHECK_ALIGNMENT(unsigned long long)
-fi
-FP_CHECK_ALIGNMENT(unsigned short)
-FP_CHECK_ALIGNMENT(void *)
-
 FP_CHECK_FUNC([WinExec],
   [@%:@include <windows.h>], [WinExec("",0)])
 
@@ -1007,9 +1008,6 @@ AC_COMPILE_IFELSE(
    AC_DEFINE([CC_SUPPORTS_TLS],[0],[Define to 1 if __thread is supported])
   ])
 
-
-AC_CHECK_FUNCS(__mingw_vfprintf)
-
 dnl large address space support (see includes/rts/storage/MBlock.h)
 dnl
 dnl Darwin has vm_allocate/vm_protect
@@ -1061,9 +1059,62 @@ if test "$use_large_address_space" = "yes" ; then
    AC_DEFINE([USE_LARGE_ADDRESS_SPACE], [1], [Enable single heap address space support])
 fi
 
-AC_CHECK_LIB(dw, dwfl_begin, [HaveLibdw=YES], [HaveLibdw=NO])
-AC_SUBST(HaveLibdw)
+dnl ** Use MMAP in the runtime linker?
+dnl --------------------------------------------------------------
 
+case ${TargetOS} in
+    linux|freebsd|dragonfly|netbsd|openbsd|kfreebsdgnu|gnu|solaris2)
+        RtsLinkerUseMmap=1
+        ;;
+    darwin)
+        # Don't use mmap on powerpc/darwin as the mmap there doesn't support
+        # reallocating. Reallocating is needed to allocate jump islands just
+        # after each object image. Jumps to these jump islands use relative
+        # branches which are limited to offsets that can be represented in
+        # 24-bits.
+        if test "$TargetArch" != "powerpc" ; then
+            RtsLinkerUseMmap=1
+        else
+            RtsLinkerUseMmap=0
+        fi
+        ;;
+    *)
+        # Windows (which doesn't have mmap) and everything else.
+        RtsLinkerUseMmap=0
+        ;;
+    esac
+
+AC_DEFINE_UNQUOTED([RTS_LINKER_USE_MMAP], [$RtsLinkerUseMmap],
+                   [Use mmap in the runtime linker])
+
+dnl ** Have libdw?
+dnl --------------------------------------------------------------
+UseLibdw=NO
+USE_LIBDW=0
+AC_ARG_ENABLE(dwarf-unwind,
+    [AC_HELP_STRING([--enable-dwarf-unwind],
+        [Enable DWARF unwinding support in the runtime system via elfutils' libdw [default=no]])],
+    [AC_CHECK_LIB(dw, dwfl_attach_state, [UseLibdw=YES], [UseLibdw=NO])],
+    [UseLibdw=NO]
+)
+AC_SUBST(UseLibdw)
+if test $UseLibdw = "YES" ; then
+	USE_LIBDW=1
+fi
+AC_DEFINE_UNQUOTED([USE_LIBDW], [$USE_LIBDW], [Set to 1 to use libdw])
+
+dnl ** Have libnuma?
+dnl --------------------------------------------------------------
+HaveLibNuma=0
+AC_CHECK_HEADERS([numa.h numaif.h])
+
+if test "$ac_cv_header_numa_h$ac_cv_header_numaif_h" = "yesyes" ; then
+    AC_CHECK_LIB(numa, numa_available,HaveLibNuma=1)
+fi
+AC_DEFINE_UNQUOTED([USE_LIBNUMA], [$HaveLibNuma], [Define to 1 if you have libnuma])
+
+dnl ** Documentation
+dnl --------------------------------------------------------------
 if test -n "$SPHINXBUILD"; then
     BUILD_MAN=YES
     BUILD_SPHINX_HTML=YES
@@ -1091,9 +1142,9 @@ if grep '	' compiler/ghc.cabal.in 2>&1 >/dev/null; then
    AC_MSG_ERROR([compiler/ghc.cabal.in contains tab characters; please remove them])
 fi
 
-# Create the configuration for the Shake-based build system if it is present
-if test -e shake-build/cfg/system.config.in; then
-    AC_CONFIG_FILES([shake-build/cfg/system.config])
+# Create the configuration for the Hadrian build system if it is present
+if test -e hadrian/cfg/system.config.in; then
+    AC_CONFIG_FILES([hadrian/cfg/system.config])
 fi
 
 # We got caught by
@@ -1119,7 +1170,7 @@ checkMake380() {
 checkMake380 make
 checkMake380 gmake
 
-AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal libraries/ghc-boot/ghc-boot.cabal libraries/ghci/ghci.cabal settings docs/users_guide/ghc_config.py docs/index.html libraries/prologue.txt distrib/configure.ac])
+AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal libraries/ghc-boot/ghc-boot.cabal libraries/ghc-boot-th/ghc-boot-th.cabal libraries/ghci/ghci.cabal settings docs/users_guide/ghc_config.py docs/index.html libraries/prologue.txt distrib/configure.ac])
 AC_OUTPUT
 
 if test "$print_make_warning" = "true"; then
@@ -1157,7 +1208,8 @@ else
 fi
 
 echo ["\
-   Using $CompilerName       : $WhatGccIsCalled
+   Using (for bootstrapping) : $CC_STAGE0
+   Using $CompilerName       : $CC
       which is version       : $GccVersion
    Building a cross compiler : $CrossCompiling
    hs-cpp       : $HaskellCPPCmd

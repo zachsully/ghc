@@ -84,6 +84,7 @@ import Util
 import Outputable
 import FastString
 
+import Control.DeepSeq
 import Data.Bits
 import Data.Data
 import Data.List
@@ -226,7 +227,7 @@ data RealSrcSpan
           srcSpanELine    :: {-# UNPACK #-} !Int,
           srcSpanECol     :: {-# UNPACK #-} !Int
         }
-  deriving (Eq, Typeable)
+  deriving Eq
 
 -- | A 'SrcSpan' identifies either a specific portion of a text file
 -- or a human-readable description of a location.
@@ -235,8 +236,11 @@ data SrcSpan =
   | UnhelpfulSpan !FastString   -- Just a general indication
                                 -- also used to indicate an empty span
 
-  deriving (Eq, Ord, Typeable, Show) -- Show is used by Lexer.x, because we
-                                     -- derive Show for Token
+  deriving (Eq, Ord, Show) -- Show is used by Lexer.x, because we
+                           -- derive Show for Token
+
+instance NFData SrcSpan where
+  rnf x = x `seq` ()
 
 -- | Built-in "bad" 'SrcSpan's for common sources of location uncertainty
 noSrcSpan, wiredInSrcSpan, interactiveSrcSpan :: SrcSpan
@@ -485,7 +489,7 @@ pprUserRealSpan show_path (RealSrcSpan' src_path sline scol eline ecol)
 
 -- | We attach SrcSpans to lots of things, so let's have a datatype for it.
 data GenLocated l e = L l e
-  deriving (Eq, Ord, Typeable, Data, Functor, Foldable, Traversable)
+  deriving (Eq, Ord, Data, Functor, Foldable, Traversable)
 
 type Located e = GenLocated SrcSpan e
 type RealLocated e = GenLocated RealSrcSpan e

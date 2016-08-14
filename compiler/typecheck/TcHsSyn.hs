@@ -14,7 +14,7 @@ checker.
 module TcHsSyn (
         mkHsConApp, mkHsDictLet, mkHsApp,
         hsLitType, hsLPatType, hsPatType,
-        mkHsAppTy, mkSimpleHsAlt,
+        mkHsAppTy, mkHsCaseAlt,
         nlHsIntLit,
         shortCutLit, hsOverLitName,
         conLikeResTy,
@@ -27,9 +27,14 @@ module TcHsSyn (
         -- in TcMType
         zonkTopDecls, zonkTopExpr, zonkTopLExpr,
         zonkTopBndrs, zonkTyBndrsX,
+        zonkTyConBinders,
         emptyZonkEnv, mkEmptyZonkEnv,
         zonkTcTypeToType, zonkTcTypeToTypes, zonkTyVarOcc,
-        zonkCoToCo, zonkTcKindToKind
+        zonkCoToCo,
+        zonkEvBinds,
+
+        -- * Validity checking
+        checkForRepresentationPolymorphism
   ) where
 
 #include "HsVersions.h"
@@ -44,11 +49,13 @@ import TcEvidence
 import TysPrim
 import TysWiredIn
 import Type
-import TyCoRep  ( TyBinder(..) )
+import TyCon
 import Coercion
 import ConLike
 import DataCon
+import HscTypes
 import Name
+import NameEnv
 import Var
 import VarSet
 import VarEnv
@@ -60,7 +67,7 @@ import SrcLoc
 import Bag
 import Outputable
 import Util
-import qualified GHC.LanguageExtensions as LangExt
+import UniqFM
 
 import Control.Monad
 import Data.List  ( partition )
@@ -93,6 +100,7 @@ hsPatType (ListPat _ ty Nothing)      = mkListTy ty
 hsPatType (ListPat _ _ (Just (ty,_))) = ty
 hsPatType (PArrPat _ ty)              = mkPArrTy ty
 hsPatType (TuplePat _ bx tys)         = mkTupleTy bx tys
+hsPatType (SumPat _ _ _ tys)          = mkSumTy tys
 hsPatType (ConPatOut { pat_con = L _ con, pat_arg_tys = tys })
                                       = conLikeResTy con tys
 hsPatType (SigPatOut _ ty)            = ty
@@ -184,14 +192,18 @@ type UnboundTyVarZonker = TcTyVar -> TcM Type
 -- | A ZonkEnv carries around several bits.
 -- The UnboundTyVarZonker just zaps unbouned meta-tyvars to Any (as
 -- defined in zonkTypeZapping), except on the LHS of rules. See
--- Note [Zonking the LHS of a RULE]. The (TyCoVarEnv TyVar) and is just
--- an optimisation: when binding a tyvar or covar, we zonk the kind right away
--- and add a mapping to the env. This prevents re-zonking the kind at
--- every occurrence. But this is *just* an optimisation.
--- The final (IdEnv Var) optimises zonking for
--- Ids. It is knot-tied. We must be careful never to put coercion variables
--- (which are Ids, after all) in the knot-tied env, because coercions can
--- appear in types, and we sometimes inspect a zonked type in this module.
+-- Note [Zonking the LHS of a RULE].
+--
+-- The (TyCoVarEnv TyVar) and is just an optimisation: when binding a
+-- tyvar or covar, we zonk the kind right away and add a mapping to
+-- the env. This prevents re-zonking the kind at every occurrence. But
+-- this is *just* an optimisation.
+--
+-- The final (IdEnv Var) optimises zonking for Ids. It is
+-- knot-tied. We must be careful never to put coercion variables
+-- (which are Ids, after all) in the knot-tied env, because coercions
+-- can appear in types, and we sometimes inspect a zonked type in this
+-- module.
 --
 -- Confused by zonking? See Note [What is zonking?] in TcMType.
 data ZonkEnv
@@ -206,7 +218,7 @@ data ZonkEnv
         -- Is only consulted lazily; hence knot-tying
 
 instance Outputable ZonkEnv where
-  ppr (ZonkEnv _ _ty_env var_env) = vcat (map ppr (varEnvElts var_env))
+  ppr (ZonkEnv _ _ty_env var_env) = pprUFM var_env (vcat . map ppr)
 
 
 -- The EvBinds have to already be zonked, but that's usually the case.
@@ -247,8 +259,11 @@ setZonkType :: ZonkEnv -> UnboundTyVarZonker -> ZonkEnv
 setZonkType (ZonkEnv _ ty_env id_env) zonk_ty
   = ZonkEnv zonk_ty ty_env id_env
 
-zonkEnvIds :: ZonkEnv -> [Id]
-zonkEnvIds (ZonkEnv _ _ id_env) = varEnvElts id_env
+zonkEnvIds :: ZonkEnv -> TypeEnv
+zonkEnvIds (ZonkEnv _ _ id_env) =
+  mkNameEnv [(getName id, AnId id) | id <- nonDetEltsUFM id_env]
+  -- It's OK to use nonDetEltsUFM here because we forget the ordering
+  -- immediately by creating a TypeEnv
 
 zonkIdOcc :: ZonkEnv -> TcId -> Id
 -- Ids defined in this module should be in the envt;
@@ -279,6 +294,8 @@ zonkIdOccs env ids = map (zonkIdOcc env) ids
 zonkIdBndr :: ZonkEnv -> TcId -> TcM Id
 zonkIdBndr env id
   = do ty' <- zonkTcTypeToType env (idType id)
+       ensureNotRepresentationPolymorphic ty'
+         (text "In the type of binder" <+> quotes (ppr id))
        return (setIdType id ty')
 
 zonkIdBndrs :: ZonkEnv -> [TcId] -> TcM [Id]
@@ -329,14 +346,13 @@ zonkTyBndrX env tv
        ; let tv' = mkTyVar (tyVarName tv) ki
        ; return (extendTyZonkEnv1 env tv', tv') }
 
-zonkTyBinders :: ZonkEnv -> [TcTyBinder] -> TcM (ZonkEnv, [TyBinder])
-zonkTyBinders = mapAccumLM zonkTyBinder
+zonkTyConBinders :: ZonkEnv -> [TyConBinder] -> TcM (ZonkEnv, [TyConBinder])
+zonkTyConBinders = mapAccumLM zonkTyConBinderX
 
-zonkTyBinder :: ZonkEnv -> TcTyBinder -> TcM (ZonkEnv, TyBinder)
-zonkTyBinder env (Anon ty) = (env, ) <$> (Anon <$> zonkTcTypeToType env ty)
-zonkTyBinder env (Named tv vis)
+zonkTyConBinderX :: ZonkEnv -> TyConBinder -> TcM (ZonkEnv, TyConBinder)
+zonkTyConBinderX env (TvBndr tv vis)
   = do { (env', tv') <- zonkTyBndrX env tv
-       ; return (env', Named tv' vis) }
+       ; return (env', TvBndr tv' vis) }
 
 zonkTopExpr :: HsExpr TcId -> TcM (HsExpr Id)
 zonkTopExpr e = zonkExpr emptyZonkEnv e
@@ -347,7 +363,7 @@ zonkTopLExpr e = zonkLExpr emptyZonkEnv e
 zonkTopDecls :: Bag EvBind
              -> LHsBinds TcId
              -> [LRuleDecl TcId] -> [LVectDecl TcId] -> [LTcSpecPrag] -> [LForeignDecl TcId]
-             -> TcM ([Id],
+             -> TcM (TypeEnv,
                      Bag EvBind,
                      LHsBinds Id,
                      [LForeignDecl Id],
@@ -459,25 +475,43 @@ zonk_bind env (AbsBinds { abs_tvs = tyvars, abs_ev_vars = evs
                         , abe_mono = zonkIdOcc env mono_id
                         , abe_prags = new_prags })
 
-zonk_bind env (AbsBindsSig { abs_tvs         = tyvars
-                           , abs_ev_vars     = evs
-                           , abs_sig_export  = poly
-                           , abs_sig_prags   = prags
-                           , abs_sig_ev_bind = ev_bind
-                           , abs_sig_bind    = bind })
+zonk_bind env outer_bind@(AbsBindsSig { abs_tvs         = tyvars
+                                      , abs_ev_vars     = evs
+                                      , abs_sig_export  = poly
+                                      , abs_sig_prags   = prags
+                                      , abs_sig_ev_bind = ev_bind
+                                      , abs_sig_bind    = lbind })
+  | L bind_loc bind@(FunBind { fun_id      = L loc local
+                             , fun_matches = ms
+                             , fun_co_fn   = co_fn }) <- lbind
   = ASSERT( all isImmutableTyVar tyvars )
     do { (env0, new_tyvars)  <- zonkTyBndrsX env  tyvars
        ; (env1, new_evs)     <- zonkEvBndrsX env0 evs
        ; (env2, new_ev_bind) <- zonkTcEvBinds env1 ev_bind
-       ; new_val_bind        <- zonk_lbind env2 bind
+           -- Inline zonk_bind (FunBind ...) because we wish to skip
+           -- the check for representation-polymorphic binders. The
+           -- local binder in the FunBind in an AbsBindsSig is never actually
+           -- bound in Core -- indeed, that's the whole point of AbsBindsSig.
+           -- just calling zonk_bind causes #11405.
+       ; new_local           <- updateVarTypeM (zonkTcTypeToType env2) local
+       ; (env3, new_co_fn)   <- zonkCoFn env2 co_fn
+       ; new_ms              <- zonkMatchGroup env3 zonkLExpr ms
+           -- If there is a representation polymorphism problem, it will
+           -- be caught here:
        ; new_poly_id         <- zonkIdBndr env2 poly
        ; new_prags           <- zonkSpecPrags env2 prags
+       ; let new_val_bind = L bind_loc (bind { fun_id      = L loc new_local
+                                             , fun_matches = new_ms
+                                             , fun_co_fn   = new_co_fn })
        ; return (AbsBindsSig { abs_tvs         = new_tyvars
                              , abs_ev_vars     = new_evs
                              , abs_sig_export  = new_poly_id
                              , abs_sig_prags   = new_prags
                              , abs_sig_ev_bind = new_ev_bind
                              , abs_sig_bind    = new_val_bind  }) }
+
+  | otherwise
+  = pprPanic "zonk_bind" (ppr outer_bind)
 
 zonk_bind env (PatSynBind bind@(PSB { psb_id = L loc id
                                     , psb_args = details
@@ -599,15 +633,19 @@ zonkExpr env (HsLam matches)
   = do new_matches <- zonkMatchGroup env zonkLExpr matches
        return (HsLam new_matches)
 
-zonkExpr env (HsLamCase arg matches)
-  = do new_arg <- zonkTcTypeToType env arg
-       new_matches <- zonkMatchGroup env zonkLExpr matches
-       return (HsLamCase new_arg new_matches)
+zonkExpr env (HsLamCase matches)
+  = do new_matches <- zonkMatchGroup env zonkLExpr matches
+       return (HsLamCase new_matches)
 
 zonkExpr env (HsApp e1 e2)
   = do new_e1 <- zonkLExpr env e1
        new_e2 <- zonkLExpr env e2
        return (HsApp new_e1 new_e2)
+
+zonkExpr env (HsAppTypeOut e t)
+  = do new_e <- zonkLExpr env e
+       return (HsAppTypeOut new_e t)
+       -- NB: the type is an HsType; can't zonk that!
 
 zonkExpr _ e@(HsRnBracketOut _ _)
   = pprPanic "zonkExpr: HsRnBracketOut" (ppr e)
@@ -655,6 +693,11 @@ zonkExpr env (ExplicitTuple tup_args boxed)
                                         ; return (L l (Present e')) }
     zonk_tup_arg (L l (Missing t)) = do { t' <- zonkTcTypeToType env t
                                         ; return (L l (Missing t')) }
+
+zonkExpr env (ExplicitSum alt arity expr args)
+  = do new_args <- mapM (zonkTcTypeToType env) args
+       new_expr <- zonkLExpr env expr
+       return (ExplicitSum alt arity new_expr new_args)
 
 zonkExpr env (HsCase expr ms)
   = do new_expr <- zonkLExpr env expr
@@ -761,19 +804,15 @@ zonkExpr env (HsProc pat body)
         ; return (HsProc new_pat new_body) }
 
 -- StaticPointers extension
-zonkExpr env (HsStatic expr)
-  = HsStatic <$> zonkLExpr env expr
+zonkExpr env (HsStatic fvs expr)
+  = HsStatic fvs <$> zonkLExpr env expr
 
 zonkExpr env (HsWrap co_fn expr)
   = do (env1, new_co_fn) <- zonkCoFn env co_fn
        new_expr <- zonkExpr env1 expr
        return (HsWrap new_co_fn new_expr)
 
-zonkExpr _ (HsUnboundVar v)
-  = return (HsUnboundVar v)
-
-  -- nothing to do here. The payload is an LHsType, not a Type.
-zonkExpr _ e@(HsTypeOut {}) = return e
+zonkExpr _ e@(HsUnboundVar {}) = return e
 
 zonkExpr _ expr = pprPanic "zonkExpr" (ppr expr)
 
@@ -1135,6 +1174,8 @@ zonk_pat env (ParPat p)
 
 zonk_pat env (WildPat ty)
   = do  { ty' <- zonkTcTypeToType env ty
+        ; ensureNotRepresentationPolymorphic ty'
+            (text "In a wildcard pattern")
         ; return (env, WildPat ty') }
 
 zonk_pat env (VarPat (L l v))
@@ -1181,6 +1222,11 @@ zonk_pat env (TuplePat pats boxed tys)
   = do  { tys' <- mapM (zonkTcTypeToType env) tys
         ; (env', pats') <- zonkPats env pats
         ; return (env', TuplePat pats' boxed tys') }
+
+zonk_pat env (SumPat pat alt arity tys)
+  = do  { tys' <- mapM (zonkTcTypeToType env) tys
+        ; (env', pat') <- zonkPat env pat
+        ; return (env', SumPat pat' alt arity tys') }
 
 zonk_pat env p@(ConPatOut { pat_arg_tys = tys, pat_tvs = tyvars
                           , pat_dicts = evs, pat_binds = binds
@@ -1289,25 +1335,15 @@ zonkRules env rs = mapM (wrapLocM (zonkRule env)) rs
 
 zonkRule :: ZonkEnv -> RuleDecl TcId -> TcM (RuleDecl Id)
 zonkRule env (HsRule name act (vars{-::[RuleBndr TcId]-}) lhs fv_lhs rhs fv_rhs)
-  = do { unbound_tkv_set <- newMutVar emptyVarSet
-       ; let kind_var_set = identify_kind_vars vars
-             env_rule = setZonkType env (zonkTvCollecting kind_var_set unbound_tkv_set)
+  = do { (env_inside, new_bndrs) <- mapAccumLM zonk_bndr env vars
+
+       ; let env_lhs = setZonkType env_inside zonkTvSkolemising
               -- See Note [Zonking the LHS of a RULE]
 
-       ; (env_inside, new_bndrs) <- mapAccumLM zonk_bndr env_rule vars
-
-       ; new_lhs <- zonkLExpr env_inside lhs
+       ; new_lhs <- zonkLExpr env_lhs    lhs
        ; new_rhs <- zonkLExpr env_inside rhs
 
-       ; unbound_tkvs <- readMutVar unbound_tkv_set
-
-       ; let final_bndrs :: [LRuleBndr Var]
-             final_bndrs = map (noLoc . RuleBndr . noLoc)
-                               (varSetElemsWellScoped unbound_tkvs)
-                           ++ new_bndrs
-
-       ; return $
-         HsRule name act final_bndrs new_lhs fv_lhs new_rhs fv_rhs }
+       ; return (HsRule name act new_bndrs new_lhs fv_lhs new_rhs fv_rhs) }
   where
    zonk_bndr env (L l (RuleBndr (L loc v)))
       = do { (env', v') <- zonk_it env v
@@ -1322,18 +1358,6 @@ zonkRule env (HsRule name act (vars{-::[RuleBndr TcId]-}) lhs fv_lhs rhs fv_rhs)
                     -- DV: used to be return (env,v) but that is plain
                     -- wrong because we may need to go inside the kind
                     -- of v and zonk there!
-
-     -- returns the set of type variables mentioned in the kind of another
-     -- type. This is used only when -XPolyKinds is not set.
-   identify_kind_vars :: [LRuleBndr TcId] -> TyVarSet
-   identify_kind_vars rule_bndrs
-     = let vars = map strip_rulebndr rule_bndrs in
-       unionVarSets (map (\v -> if isTyVar v
-                                then tyCoVarsOfType (tyVarKind v)
-                                else emptyVarSet) vars)
-
-   strip_rulebndr (L _ (RuleBndr (L _ v))) = v
-   strip_rulebndr (L _ (RuleBndrSig {}))   = panic "strip_rulebndr zonkRule"
 
 zonkVects :: ZonkEnv -> [LVectDecl TcId] -> TcM [LVectDecl Id]
 zonkVects env = mapM (wrapLocM (zonkVect env))
@@ -1458,31 +1482,6 @@ zonkEvBind env bind@(EvBind { eb_lhs = var, eb_rhs = term })
 *                                                                      *
 ************************************************************************
 
-Note [Zonking the LHS of a RULE]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-We need to gather the type variables mentioned on the LHS so we can
-quantify over them.  Example:
-  data T a = C
-
-  foo :: T a -> Int
-  foo C = 1
-
-  {-# RULES "myrule"  foo C = 1 #-}
-
-After type checking the LHS becomes (foo a (C a))
-and we do not want to zap the unbound tyvar 'a' to (), because
-that limits the applicability of the rule.  Instead, we
-want to quantify over it!
-
-It's easiest to get zonkTvCollecting to gather the free tyvars
-here. Attempts to do so earlier are tiresome, because (a) the data
-type is big and (b) finding the free type vars of an expression is
-necessarily monadic operation. (consider /\a -> f @ b, where b is
-side-effected to a)
-
-And that in turn is why ZonkEnv carries the function to use for
-type variables!
-
 Note [Zonking mutable unbound type or kind variables]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 In zonkTypeZapping, we zonk mutable but unbound type or kind variables to an
@@ -1592,37 +1591,170 @@ zonkTcTypeToType = mapType zonk_tycomapper
 zonkTcTypeToTypes :: ZonkEnv -> [TcType] -> TcM [Type]
 zonkTcTypeToTypes env tys = mapM (zonkTcTypeToType env) tys
 
--- | Used during kind-checking in TcTyClsDecls, where it's more convenient
--- to keep the binders and result kind separate.
-zonkTcKindToKind :: [TcTyBinder] -> TcKind -> TcM ([TyBinder], Kind)
-zonkTcKindToKind binders res_kind
-  = do { (env, binders') <- zonkTyBinders emptyZonkEnv binders
-       ; res_kind' <- zonkTcTypeToType env res_kind
-       ; return (binders', res_kind') }
-
 zonkCoToCo :: ZonkEnv -> Coercion -> TcM Coercion
 zonkCoToCo = mapCoercion zonk_tycomapper
 
-zonkTvCollecting :: TyVarSet -> TcRef TyVarSet -> UnboundTyVarZonker
--- This variant collects unbound type variables in a mutable variable
--- Works on both types and kinds
-zonkTvCollecting kind_vars unbound_tv_set tv
-  = do { poly_kinds <- xoptM LangExt.PolyKinds
-       ; if tv `elemVarSet` kind_vars && not poly_kinds then defaultKindVar tv else do
-       { ty_or_tv <- zonkQuantifiedTyVarOrType tv
-       ; case ty_or_tv of
-           Right ty -> return ty
-           Left tv' -> do
-             { tv_set <- readMutVar unbound_tv_set
-             ; writeMutVar unbound_tv_set (extendVarSet tv_set tv')
-             ; return (mkTyVarTy tv') } } }
+zonkTvSkolemising :: UnboundTyVarZonker
+-- This variant is used for the LHS of rules
+-- See Note [Zonking the LHS of a RULE].
+zonkTvSkolemising tv
+  = do { tv' <- skolemiseUnboundMetaTyVar tv vanillaSkolemTv
+       ; return (mkTyVarTy tv') }
 
 zonkTypeZapping :: UnboundTyVarZonker
 -- This variant is used for everything except the LHS of rules
--- It zaps unbound type variables to (), or some other arbitrary type
+-- It zaps unbound type variables to Any, except for RuntimeRep
+-- vars which it zonks to PtrRepLIfted
 -- Works on both types and kinds
 zonkTypeZapping tv
   = do { let ty | isRuntimeRepVar tv = ptrRepLiftedTy
                 | otherwise          = anyTypeOfKind (tyVarKind tv)
        ; writeMetaTyVar tv ty
        ; return ty }
+
+---------------------------------------
+{- Note [Zonking the LHS of a RULE]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+See also DsBinds Note [Free tyvars on rule LHS]
+
+We need to gather the type variables mentioned on the LHS so we can
+quantify over them.  Example:
+  data T a = C
+
+  foo :: T a -> Int
+  foo C = 1
+
+  {-# RULES "myrule"  foo C = 1 #-}
+
+After type checking the LHS becomes (foo alpha (C alpha)) and we do
+not want to zap the unbound meta-tyvar 'alpha' to Any, because that
+limits the applicability of the rule.  Instead, we want to quantify
+over it!
+
+We do this in two stages.
+
+* During zonking, we skolemise 'alpha' to 'a'.  We do this by using
+  zonkTvSkolemising as the UnboundTyVarZonker in the ZonkEnv.
+  (This is the whole reason that the ZonkEnv has a UnboundTyVarZonker.)
+
+* In DsBinds, we quantify over it.  See DsBinds
+  Note [Free tyvars on rule LHS]
+
+Quantifying here is awkward because (a) the data type is big and (b)
+finding the free type vars of an expression is necessarily monadic
+operation. (consider /\a -> f @ b, where b is side-effected to a)
+
+Note [Unboxed tuples in representation polymorphism check]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Recall that all types that have values (that is, lifted and unlifted
+types) have kinds that look like (TYPE rep), where (rep :: RuntimeRep)
+tells how the values are represented at runtime. Lifted types have
+kind (TYPE PtrRepLifted) (for which * is just a synonym) and, say,
+Int# has kind (TYPE IntRep).
+
+It would be terrible if the code generator came upon a binder of a type
+whose kind is something like TYPE r, where r is a skolem type variable.
+The code generator wouldn't know what to do. So we eliminate that case
+here.
+
+Although representation polymorphism and the RuntimeRep type catch
+most ways of abusing unlifted types, it still isn't quite satisfactory
+around unboxed tuples. That's because all unboxed tuple types have kind
+TYPE UnboxedTupleRep, which is clearly a lie: it doesn't actually tell
+you what the representation is.
+
+Naively, when checking for representation polymorphism, you might think we can
+just look for free variables in a type's RuntimeRep. But this misses the
+UnboxedTupleRep case.
+
+So, instead, we handle unboxed tuples specially. Only after unboxed tuples
+are handled do we look for free tyvars in a RuntimeRep.
+
+We must still be careful in the UnboxedTupleRep case. A binder whose type
+has kind UnboxedTupleRep is OK -- only as long as the type is really an
+unboxed tuple, which the code generator treats specially. So we do this:
+ 1. Check if the type is an unboxed tuple. If so, recur.
+ 2. Check if the kind is TYPE UnboxedTupleRep. If so, error.
+ 3. Check if the kind has any free variables. If so, error.
+
+In case 1, we have a type that looks like
+
+  (# , #) PtrRepLifted IntRep Bool Int#
+
+recalling that
+
+  (# , #) :: forall (r1 :: RuntimeRep) (r2 :: RuntimeRep).
+             TYPE r1 -> TYPE r2 -> TYPE UnboxedTupleRep
+
+It's tempting just to look at the RuntimeRep arguments to make sure
+that they are devoid of free variables and not UnboxedTupleRep. This
+naive check, though, fails on nested unboxed tuples, like
+(# Int#, (# Bool, Void# #) #). Thus, instead of looking at the RuntimeRep
+args to the unboxed tuple constructor, we look at the types themselves.
+
+Here are a few examples:
+
+   type family F r :: TYPE r
+
+   x :: (F r :: TYPE r)   -- REJECTED: simple representation polymorphism
+     where r is an in-scope type variable of kind RuntimeRep
+
+   x :: (F PtrRepLifted :: TYPE PtrRepLifted)   -- OK
+   x :: (F IntRep       :: TYPE IntRep)         -- OK
+
+   x :: (F UnboxedTupleRep :: TYPE UnboxedTupleRep)  -- REJECTED
+
+   x :: ((# Int, Bool #) :: TYPE UnboxedTupleRep)    -- OK
+-}
+
+-- | According to the rules around representation polymorphism
+-- (see https://ghc.haskell.org/trac/ghc/wiki/NoSubKinds), no binder
+-- can have a representation-polymorphic type. This check ensures
+-- that we respect this rule. It is a bit regrettable that this error
+-- occurs in zonking, after which we should have reported all errors.
+-- But it's hard to see where else to do it, because this can be discovered
+-- only after all solving is done. And, perhaps most importantly, this
+-- isn't really a compositional property of a type system, so it's
+-- not a terrible surprise that the check has to go in an awkward spot.
+ensureNotRepresentationPolymorphic
+  :: Type  -- its zonked type
+  -> SDoc  -- where this happened
+  -> TcM ()
+ensureNotRepresentationPolymorphic ty doc
+  = whenNoErrs $   -- sometimes we end up zonking bogus definitions of type
+                   -- forall a. a. See, for example, test ghci/scripts/T9140
+    checkForRepresentationPolymorphism doc ty
+
+   -- See Note [Unboxed tuples in representation polymorphism check]
+checkForRepresentationPolymorphism :: SDoc -> Type -> TcM ()
+checkForRepresentationPolymorphism extra ty
+  | Just (tc, tys) <- splitTyConApp_maybe ty
+  , isUnboxedTupleTyCon tc || isUnboxedSumTyCon tc
+  = mapM_ (checkForRepresentationPolymorphism extra) (dropRuntimeRepArgs tys)
+
+  | tuple_rep || sum_rep
+  = addErr (vcat [ text "The type" <+> quotes (ppr tidy_ty) <+>
+                     (text "is not an unboxed" <+> tuple_or_sum <> comma)
+                 , text "and yet its kind suggests that it has the representation"
+                 , text "of an unboxed" <+> tuple_or_sum <> text ". This is not allowed." ] $$
+            extra)
+
+  | not (isEmptyVarSet (tyCoVarsOfType runtime_rep))
+  = addErr $
+    hang (text "A representation-polymorphic type is not allowed here:")
+       2 (vcat [ text "Type:" <+> ppr tidy_ty
+               , text "Kind:" <+> ppr tidy_ki ]) $$
+    extra
+
+  | otherwise
+  = return ()
+  where
+    tuple_rep    = runtime_rep `eqType` unboxedTupleRepDataConTy
+    sum_rep      = runtime_rep `eqType` unboxedSumRepDataConTy
+    tuple_or_sum = text (if tuple_rep then "tuple" else "sum")
+
+    ki          = typeKind ty
+    runtime_rep = getRuntimeRepFromKind "check_type" ki
+
+    (tidy_env, tidy_ty) = tidyOpenType emptyTidyEnv ty
+    tidy_ki             = tidyType tidy_env (typeKind ty)

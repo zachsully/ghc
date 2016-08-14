@@ -53,9 +53,9 @@
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 
 module Lexer (
-   Token(..), lexer, pragState, mkPState, PState(..),
-   P(..), ParseResult(..), getSrcLoc,
-   getPState, getDynFlags, withThisPackage,
+   Token(..), lexer, pragState, mkPState, mkPStatePure, PState(..),
+   P(..), ParseResult(..), mkParserFlags, ParserFlags(..), getSrcLoc,
+   getPState, extopt, withThisPackage,
    failLocMsgP, failSpanMsgP, srcParseFail,
    getMessages,
    popContext, pushCurrentContext, setLastToken, setSrcLoc,
@@ -84,6 +84,9 @@ import Data.Char
 import Data.List
 import Data.Maybe
 import Data.Word
+
+import Data.IntSet (IntSet)
+import qualified Data.IntSet as IntSet
 
 -- ghc-boot
 import qualified GHC.LanguageExtensions as LangExt
@@ -363,14 +366,17 @@ $tab          { warnTab }
 }
 
 <0> {
-  "[|"        / { ifExtension thQuotesEnabled } { token (ITopenExpQuote NoE) }
+  "[|"        / { ifExtension thQuotesEnabled } { token (ITopenExpQuote NoE
+                                                                NormalSyntax) }
   "[||"       / { ifExtension thQuotesEnabled } { token (ITopenTExpQuote NoE) }
-  "[e|"       / { ifExtension thQuotesEnabled } { token (ITopenExpQuote HasE) }
+  "[e|"       / { ifExtension thQuotesEnabled } { token (ITopenExpQuote HasE
+                                                                NormalSyntax) }
   "[e||"      / { ifExtension thQuotesEnabled } { token (ITopenTExpQuote HasE) }
   "[p|"       / { ifExtension thQuotesEnabled } { token ITopenPatQuote }
   "[d|"       / { ifExtension thQuotesEnabled } { layout_token ITopenDecQuote }
   "[t|"       / { ifExtension thQuotesEnabled } { token ITopenTypQuote }
-  "|]"        / { ifExtension thQuotesEnabled } { token ITcloseQuote }
+  "|]"        / { ifExtension thQuotesEnabled } { token (ITcloseQuote
+                                                                NormalSyntax) }
   "||]"       / { ifExtension thQuotesEnabled } { token ITcloseTExpQuote }
   \$ @varid   / { ifExtension thEnabled } { skip_one_varid ITidEscape }
   "$$" @varid / { ifExtension thEnabled } { skip_two_varid ITidTyEscape }
@@ -383,6 +389,15 @@ $tab          { warnTab }
   -- qualified quasi-quote (#5555)
   "[" @qvarid "|"  / { ifExtension qqEnabled }
                      { lex_qquasiquote_tok }
+
+  $unigraphic -- ⟦
+    / { ifCurrentChar '⟦' `alexAndPred`
+        ifExtension (\i -> unicodeSyntaxEnabled i && thQuotesEnabled i) }
+    { token (ITopenExpQuote NoE UnicodeSyntax) }
+  $unigraphic -- ⟧
+    / { ifCurrentChar '⟧' `alexAndPred`
+        ifExtension (\i -> unicodeSyntaxEnabled i && thQuotesEnabled i) }
+    { token (ITcloseQuote UnicodeSyntax) }
 }
 
   -- See Note [Lexing type applications]
@@ -395,8 +410,17 @@ $tab          { warnTab }
 
 <0> {
   "(|" / { ifExtension arrowsEnabled `alexAndPred` notFollowedBySymbol }
-                                        { special IToparenbar }
-  "|)" / { ifExtension arrowsEnabled }  { special ITcparenbar }
+                                        { special (IToparenbar NormalSyntax) }
+  "|)" / { ifExtension arrowsEnabled }  { special (ITcparenbar NormalSyntax) }
+
+  $unigraphic -- ⦇
+    / { ifCurrentChar '⦇' `alexAndPred`
+        ifExtension (\i -> unicodeSyntaxEnabled i && arrowsEnabled i) }
+    { special (IToparenbar UnicodeSyntax) }
+  $unigraphic -- ⦈
+    / { ifCurrentChar '⦈' `alexAndPred`
+        ifExtension (\i -> unicodeSyntaxEnabled i && arrowsEnabled i) }
+    { special (ITcparenbar UnicodeSyntax) }
 }
 
 <0> {
@@ -409,9 +433,9 @@ $tab          { warnTab }
 }
 
 <0> {
-  "(#" / { ifExtension unboxedTuplesEnabled }
+  "(#" / { orExtensions unboxedTuplesEnabled unboxedSumsEnabled }
          { token IToubxparen }
-  "#)" / { ifExtension unboxedTuplesEnabled }
+  "#)" / { orExtensions unboxedTuplesEnabled unboxedSumsEnabled }
          { token ITcubxparen }
 }
 
@@ -517,7 +541,7 @@ $tab          { warnTab }
 -- expressions and patterns use the same parser, and also because we want
 -- to allow type patterns within expression patterns.
 --
--- Disambiguation is accomplished by requiring *something* to appear betwen
+-- Disambiguation is accomplished by requiring *something* to appear between
 -- type application and the preceding token. This something must end with
 -- a character that cannot be the end of the variable bound in an as-pattern.
 -- Currently (June 2015), this means that the something cannot end with a
@@ -680,18 +704,18 @@ data Token
   | ITprimdouble FractionalLit
 
   -- Template Haskell extension tokens
-  | ITopenExpQuote HasE         --  [| or [e|
-  | ITopenPatQuote              --  [p|
-  | ITopenDecQuote              --  [d|
-  | ITopenTypQuote              --  [t|
-  | ITcloseQuote                --  |]
-  | ITopenTExpQuote HasE        --  [|| or [e||
-  | ITcloseTExpQuote            --  ||]
-  | ITidEscape   FastString     --  $x
-  | ITparenEscape               --  $(
-  | ITidTyEscape   FastString   --  $$x
-  | ITparenTyEscape             --  $$(
-  | ITtyQuote                   --  ''
+  | ITopenExpQuote HasE IsUnicodeSyntax --  [| or [e|
+  | ITopenPatQuote                      --  [p|
+  | ITopenDecQuote                      --  [d|
+  | ITopenTypQuote                      --  [t|
+  | ITcloseQuote IsUnicodeSyntax        --  |]
+  | ITopenTExpQuote HasE                --  [|| or [e||
+  | ITcloseTExpQuote                    --  ||]
+  | ITidEscape   FastString             --  $x
+  | ITparenEscape                       --  $(
+  | ITidTyEscape   FastString           --  $$x
+  | ITparenTyEscape                     --  $$(
+  | ITtyQuote                           --  ''
   | ITquasiQuote (FastString,FastString,RealSrcSpan)
     -- ITquasiQuote(quoter, quote, loc)
     -- represents a quasi-quote of the form
@@ -704,8 +728,8 @@ data Token
   -- Arrow notation extension
   | ITproc
   | ITrec
-  | IToparenbar                  --  (|
-  | ITcparenbar                  --  |)
+  | IToparenbar  IsUnicodeSyntax --  (|
+  | ITcparenbar  IsUnicodeSyntax --  |)
   | ITlarrowtail IsUnicodeSyntax --  -<
   | ITrarrowtail IsUnicodeSyntax --  >-
   | ITLarrowtail IsUnicodeSyntax --  -<<
@@ -942,6 +966,10 @@ followedByDigit :: AlexAccPred ExtsBitmap
 followedByDigit _ _ _ (AI _ buf)
   = afterOptionalSpace buf (\b -> nextCharIs b (`elem` ['0'..'9']))
 
+ifCurrentChar :: Char -> AlexAccPred ExtsBitmap
+ifCurrentChar char _ (AI _ buf) _ _
+  = nextCharIs buf (== char)
+
 -- We must reject doc comments as being ordinary comments everywhere.
 -- In some cases the doc comment will be selected as the lexeme due to
 -- maximal munch, but not always, because the nested comment rule is
@@ -966,6 +994,9 @@ atEOL _ _ _ (AI _ buf) = atEnd buf || currentChar buf == '\n'
 
 ifExtension :: (ExtsBitmap -> Bool) -> AlexAccPred ExtsBitmap
 ifExtension pred bits _ _ _ = pred bits
+
+orExtensions :: (ExtsBitmap -> Bool) -> (ExtsBitmap -> Bool) -> AlexAccPred ExtsBitmap
+orExtensions pred1 pred2 bits _ _ _ = pred1 bits || pred2 bits
 
 multiline_doc_comment :: Action
 multiline_doc_comment span buf _len = withLexedDocType (worker "")
@@ -1170,8 +1201,8 @@ varid span buf len =
       maybe_layout keyword
       return $ L span keyword
     Just (ITstatic, _) -> do
-      flags <- getDynFlags
-      if xopt LangExt.StaticPointers flags
+      staticPointers <- extension staticPointersEnabled
+      if staticPointers
         then return $ L span ITstatic
         else return $ L span $ ITvarid fs
     Just (keyword, 0) -> do
@@ -1722,18 +1753,34 @@ data ParseResult a
                         -- show this span, e.g. by highlighting it.
         MsgDoc          -- The error message
 
+-- | Test whether a 'WarningFlag' is set
+warnopt :: WarningFlag -> ParserFlags -> Bool
+warnopt f options = fromEnum f `IntSet.member` pWarningFlags options
+
+-- | Test whether a 'LangExt.Extension' is set
+extopt :: LangExt.Extension -> ParserFlags -> Bool
+extopt f options = fromEnum f `IntSet.member` pExtensionFlags options
+
+-- | The subset of the 'DynFlags' used by the parser
+data ParserFlags = ParserFlags {
+    pWarningFlags   :: IntSet
+  , pExtensionFlags :: IntSet
+  , pThisPackage    :: UnitId      -- ^ key of package currently being compiled
+  , pExtsBitmap     :: !ExtsBitmap -- ^ bitmap of permitted extensions
+  }
+
 data PState = PState {
         buffer     :: StringBuffer,
-        dflags     :: DynFlags,
-        messages   :: Messages,
+        options    :: ParserFlags,
+        -- This needs to take DynFlags as an argument until
+        -- we have a fix for #10143
+        messages   :: DynFlags -> Messages,
         tab_first  :: Maybe RealSrcSpan, -- pos of first tab warning in the file
         tab_count  :: !Int,              -- number of tab warnings in the file
         last_tk    :: Maybe Token,
         last_loc   :: RealSrcSpan, -- pos of previous token
         last_len   :: !Int,        -- len of previous token
         loc        :: RealSrcLoc,  -- current loc (end of prev token + 1)
-        extsBitmap :: !ExtsBitmap,    -- bitmap that determines permitted
-                                   -- extensions
         context    :: [LayoutContext],
         lex_state  :: [Int],
         srcfiles   :: [FastString],
@@ -1820,22 +1867,21 @@ failSpanMsgP span msg = P $ \_ -> PFailed span msg
 getPState :: P PState
 getPState = P $ \s -> POk s s
 
-instance HasDynFlags P where
-    getDynFlags = P $ \s -> POk s (dflags s)
-
 withThisPackage :: (UnitId -> a) -> P a
-withThisPackage f
- = do pkg <- liftM thisPackage getDynFlags
-      return $ f pkg
+withThisPackage f = P $ \s@(PState{options = o}) -> POk s (f (pThisPackage o))
 
 extension :: (ExtsBitmap -> Bool) -> P Bool
-extension p = P $ \s -> POk s (p $! extsBitmap s)
+extension p = P $ \s -> POk s (p $! (pExtsBitmap . options) s)
 
 getExts :: P ExtsBitmap
-getExts = P $ \s -> POk s (extsBitmap s)
+getExts = P $ \s -> POk s (pExtsBitmap . options $ s)
 
 setExts :: (ExtsBitmap -> ExtsBitmap) -> P ()
-setExts f = P $ \s -> POk s{ extsBitmap = f (extsBitmap s) } ()
+setExts f = P $ \s -> POk s {
+  options =
+    let p = options s
+    in  p { pExtsBitmap = f (pExtsBitmap p) }
+  } ()
 
 setSrcLoc :: RealSrcLoc -> P ()
 setSrcLoc new_loc = P $ \s -> POk s{loc=new_loc} ()
@@ -1983,6 +2029,10 @@ getALRContext = P $ \s@(PState {alr_context = cs}) -> POk s cs
 setALRContext :: [ALRContext] -> P ()
 setALRContext cs = P $ \s -> POk (s {alr_context = cs}) ()
 
+getALRTransitional :: P Bool
+getALRTransitional = P $ \s@PState {options = o} ->
+  POk s (extopt LangExt.AlternativeLayoutRuleTransitional o)
+
 getJustClosedExplicitLetBlock :: P Bool
 getJustClosedExplicitLetBlock
  = P $ \s@(PState {alr_justClosedExplicitLetBlock = b}) -> POk s b
@@ -2047,6 +2097,7 @@ data ExtBits
   | RecursiveDoBit -- mdo
   | UnicodeSyntaxBit -- the forall symbol, arrow symbols, etc
   | UnboxedTuplesBit -- (# and #)
+  | UnboxedSumsBit -- (# and #)
   | DatatypeContextsBit
   | TransformComprehensionsBit
   | QqBit -- enable quasiquoting
@@ -2064,6 +2115,7 @@ data ExtBits
   | BinaryLiteralsBit
   | NegativeLiteralsBit
   | TypeApplicationsBit
+  | StaticPointersBit
   deriving Enum
 
 
@@ -2093,6 +2145,8 @@ unicodeSyntaxEnabled :: ExtsBitmap -> Bool
 unicodeSyntaxEnabled = xtest UnicodeSyntaxBit
 unboxedTuplesEnabled :: ExtsBitmap -> Bool
 unboxedTuplesEnabled = xtest UnboxedTuplesBit
+unboxedSumsEnabled :: ExtsBitmap -> Bool
+unboxedSumsEnabled = xtest UnboxedSumsBit
 datatypeContextsEnabled :: ExtsBitmap -> Bool
 datatypeContextsEnabled = xtest DatatypeContextsBit
 qqEnabled :: ExtsBitmap -> Bool
@@ -2126,6 +2180,8 @@ patternSynonymsEnabled :: ExtsBitmap -> Bool
 patternSynonymsEnabled = xtest PatternSynonymsBit
 typeApplicationEnabled :: ExtsBitmap -> Bool
 typeApplicationEnabled = xtest TypeApplicationsBit
+staticPointersEnabled :: ExtsBitmap -> Bool
+staticPointersEnabled = xtest StaticPointersBit
 
 -- PState for parsing options pragmas
 --
@@ -2134,35 +2190,16 @@ pragState dynflags buf loc = (mkPState dynflags buf loc) {
                                  lex_state = [bol, option_prags, 0]
                              }
 
--- create a parse state
---
-mkPState :: DynFlags -> StringBuffer -> RealSrcLoc -> PState
-mkPState flags buf loc =
-  PState {
-      buffer        = buf,
-      dflags        = flags,
-      messages      = emptyMessages,
-      tab_first     = Nothing,
-      tab_count     = 0,
-      last_tk       = Nothing,
-      last_loc      = mkRealSrcSpan loc loc,
-      last_len      = 0,
-      loc           = loc,
-      extsBitmap    = bitmap,
-      context       = [],
-      lex_state     = [bol, 0],
-      srcfiles      = [],
-      alr_pending_implicit_tokens = [],
-      alr_next_token = Nothing,
-      alr_last_loc = alrInitialLoc (fsLit "<no file>"),
-      alr_context = [],
-      alr_expecting_ocurly = Nothing,
-      alr_justClosedExplicitLetBlock = False,
-      annotations = [],
-      comment_q = [],
-      annotations_comments = []
+-- | Extracts the flag information needed for parsing
+mkParserFlags :: DynFlags -> ParserFlags
+mkParserFlags flags =
+    ParserFlags {
+      pWarningFlags = DynFlags.warningFlags flags
+    , pExtensionFlags = DynFlags.extensionFlags flags
+    , pThisPackage = DynFlags.thisPackage flags
+    , pExtsBitmap = bitmap
     }
-    where
+  where
       bitmap =     FfiBit                      `setBitIf` xopt LangExt.ForeignFunctionInterface flags
                .|. InterruptibleFfiBit         `setBitIf` xopt LangExt.InterruptibleFFI         flags
                .|. CApiFfiBit                  `setBitIf` xopt LangExt.CApiFFI                  flags
@@ -2180,6 +2217,7 @@ mkPState flags buf loc =
                .|. RecursiveDoBit              `setBitIf` xopt LangExt.RecursiveDo              flags
                .|. UnicodeSyntaxBit            `setBitIf` xopt LangExt.UnicodeSyntax            flags
                .|. UnboxedTuplesBit            `setBitIf` xopt LangExt.UnboxedTuples            flags
+               .|. UnboxedSumsBit              `setBitIf` xopt LangExt.UnboxedSums              flags
                .|. DatatypeContextsBit         `setBitIf` xopt LangExt.DatatypeContexts         flags
                .|. TransformComprehensionsBit  `setBitIf` xopt LangExt.TransformListComp        flags
                .|. TransformComprehensionsBit  `setBitIf` xopt LangExt.MonadComprehensions      flags
@@ -2197,32 +2235,67 @@ mkPState flags buf loc =
                .|. NegativeLiteralsBit         `setBitIf` xopt LangExt.NegativeLiterals         flags
                .|. PatternSynonymsBit          `setBitIf` xopt LangExt.PatternSynonyms          flags
                .|. TypeApplicationsBit         `setBitIf` xopt LangExt.TypeApplications         flags
+               .|. StaticPointersBit           `setBitIf` xopt LangExt.StaticPointers           flags
 
-      --
       setBitIf :: ExtBits -> Bool -> ExtsBitmap
       b `setBitIf` cond | cond      = xbit b
                         | otherwise = 0
 
+-- | Creates a parse state from a 'DynFlags' value
+mkPState :: DynFlags -> StringBuffer -> RealSrcLoc -> PState
+mkPState flags = mkPStatePure (mkParserFlags flags)
+
+-- | Creates a parse state from a 'ParserFlags' value
+mkPStatePure :: ParserFlags -> StringBuffer -> RealSrcLoc -> PState
+mkPStatePure options buf loc =
+  PState {
+      buffer        = buf,
+      options       = options,
+      messages      = const emptyMessages,
+      tab_first     = Nothing,
+      tab_count     = 0,
+      last_tk       = Nothing,
+      last_loc      = mkRealSrcSpan loc loc,
+      last_len      = 0,
+      loc           = loc,
+      context       = [],
+      lex_state     = [bol, 0],
+      srcfiles      = [],
+      alr_pending_implicit_tokens = [],
+      alr_next_token = Nothing,
+      alr_last_loc = alrInitialLoc (fsLit "<no file>"),
+      alr_context = [],
+      alr_expecting_ocurly = Nothing,
+      alr_justClosedExplicitLetBlock = False,
+      annotations = [],
+      comment_q = [],
+      annotations_comments = []
+    }
+
 addWarning :: WarningFlag -> SrcSpan -> SDoc -> P ()
 addWarning option srcspan warning
- = P $ \s@PState{messages=(ws,es), dflags=d} ->
-       let warning' = makeIntoWarning (Reason option) $
+ = P $ \s@PState{messages=m, options=o} ->
+       let
+           m' d =
+               let (ws, es) = m d
+                   warning' = makeIntoWarning (Reason option) $
                       mkWarnMsg d srcspan alwaysQualify warning
-           ws' = if wopt option d then ws `snocBag` warning' else ws
-       in POk s{messages=(ws', es)} ()
+                   ws' = if warnopt option o then ws `snocBag` warning' else ws
+               in (ws', es)
+       in POk s{messages=m'} ()
 
 addTabWarning :: RealSrcSpan -> P ()
 addTabWarning srcspan
- = P $ \s@PState{tab_first=tf, tab_count=tc, dflags=d} ->
+ = P $ \s@PState{tab_first=tf, tab_count=tc, options=o} ->
        let tf' = if isJust tf then tf else Just srcspan
            tc' = tc + 1
-           s' = if wopt Opt_WarnTabs d
+           s' = if warnopt Opt_WarnTabs o
                 then s{tab_first = tf', tab_count = tc'}
                 else s
        in POk s' ()
 
-mkTabWarning :: PState -> Maybe ErrMsg
-mkTabWarning PState{tab_first=tf, tab_count=tc, dflags=d} =
+mkTabWarning :: PState -> DynFlags -> Maybe ErrMsg
+mkTabWarning PState{tab_first=tf, tab_count=tc} d =
   let middle = if tc == 1
         then text ""
         else text ", and in" <+> speakNOf (tc - 1) (text "further location")
@@ -2233,9 +2306,10 @@ mkTabWarning PState{tab_first=tf, tab_count=tc, dflags=d} =
   in fmap (\s -> makeIntoWarning (Reason Opt_WarnTabs) $
                  mkWarnMsg d (RealSrcSpan s) alwaysQualify message) tf
 
-getMessages :: PState -> Messages
-getMessages p@PState{messages=(ws,es)} =
-  let tabwarning = mkTabWarning p
+getMessages :: PState -> DynFlags -> Messages
+getMessages p@PState{messages=m} d =
+  let (ws, es) = m d
+      tabwarning = mkTabWarning p d
       ws' = maybe ws (`consBag` ws) tabwarning
   in (ws', es)
 
@@ -2246,11 +2320,11 @@ setContext :: [LayoutContext] -> P ()
 setContext ctx = P $ \s -> POk s{context=ctx} ()
 
 popContext :: P ()
-popContext = P $ \ s@(PState{ buffer = buf, dflags = flags, context = ctx,
+popContext = P $ \ s@(PState{ buffer = buf, options = o, context = ctx,
                               last_len = len, last_loc = last_loc }) ->
   case ctx of
         (_:tl) -> POk s{ context = tl } ()
-        []     -> PFailed (RealSrcSpan last_loc) (srcParseErr flags buf len)
+        []     -> PFailed (RealSrcSpan last_loc) (srcParseErr o buf len)
 
 -- Push a new layout context at the indentation of the last token read.
 -- This is only used at the outer level of a module when the 'module'
@@ -2272,11 +2346,11 @@ getOffside = P $ \s@PState{last_loc=loc, context=stk} ->
 -- Construct a parse error
 
 srcParseErr
-  :: DynFlags
+  :: ParserFlags
   -> StringBuffer       -- current buffer (placed just after the last token)
   -> Int                -- length of the previous token
   -> MsgDoc
-srcParseErr dflags buf len
+srcParseErr options buf len
   = if null token
          then text "parse error (possibly incorrect indentation or mismatched brackets)"
          else text "parse error on input" <+> quotes (text token)
@@ -2288,15 +2362,15 @@ srcParseErr dflags buf len
                         (text "Perhaps you need a 'let' in a 'do' block?"
                          $$ text "e.g. 'let x = 5' instead of 'x = 5'")
   where token = lexemeToString (offsetBytes (-len) buf) len
-        th_enabled = xopt LangExt.TemplateHaskell dflags
+        th_enabled = extopt LangExt.TemplateHaskell options
 
 -- Report a parse failure, giving the span of the previous token as
 -- the location of the error.  This is the entry point for errors
 -- detected during parsing.
 srcParseFail :: P a
-srcParseFail = P $ \PState{ buffer = buf, dflags = flags, last_len = len,
+srcParseFail = P $ \PState{ buffer = buf, options = o, last_len = len,
                             last_loc = last_loc } ->
-    PFailed (RealSrcSpan last_loc) (srcParseErr flags buf len)
+    PFailed (RealSrcSpan last_loc) (srcParseErr o buf len)
 
 -- A lexical error is reported at a particular position in the source file,
 -- not over a token range.
@@ -2356,11 +2430,10 @@ alternativeLayoutRuleToken t
     = do context <- getALRContext
          lastLoc <- getAlrLastLoc
          mExpectingOCurly <- getAlrExpectingOCurly
+         transitional <- getALRTransitional
          justClosedExplicitLetBlock <- getJustClosedExplicitLetBlock
          setJustClosedExplicitLetBlock False
-         dflags <- getDynFlags
-         let transitional = xopt LangExt.AlternativeLayoutRuleTransitional dflags
-             thisLoc = getLoc t
+         let thisLoc = getLoc t
              thisCol = srcSpanStartCol thisLoc
              newLine = srcSpanStartLine thisLoc > srcSpanEndLine lastLoc
          case (unLoc t, context, mExpectingOCurly) of

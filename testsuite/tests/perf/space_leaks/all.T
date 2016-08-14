@@ -12,9 +12,10 @@ test('space_leak_001',
                         # 417016 (x86/OS X)
                         # 415672 (x86/Windows)
                         # 481456 (unreg amd64/Linux)
-           (wordsize(32), 405650, 10)]),
+           (wordsize(32), 361400, 10)]),
              # 2013-02-10 372072 (x86/OSX)
              # 2013-02-10 439228 (x86/OSX)
+             # 2016-04-06 361400 (x86/Linux)
 
       stats_num_field('bytes allocated', 
            [ (wordsize(64), 11315747416, 5),
@@ -56,11 +57,18 @@ test('T4018',
 
 test('T4029',
      [stats_num_field('peak_megabytes_allocated',
-          [(wordsize(64), 66, 10)]),
+          [(wordsize(64), 82, 10)]),
             # 2016-02-26: 66 (amd64/Linux)           INITIAL
+            # 2016-05-23: 82 (amd64/Linux)           Use -G1
+            # 2016-07-13: 92 (amd64/Linux)           Changes to tidyType
       stats_num_field('max_bytes_used',
-          [(wordsize(64), 24071720, 5)])
+          [(wordsize(64), 22920616, 5)]),
             # 2016-02-26: 24071720 (amd64/Linux)     INITIAL
+            # 2016-04-21: 25542832 (amd64/Linux)
+            # 2016-05-23: 25247216 (amd64/Linux)     Use -G1
+            # 2016-07-13: 27575416 (amd64/Linux)     Changes to tidyType
+            # 2016-07-20: 22920616 (amd64/Linux)     Fix laziness of instance matching
+      extra_hc_opts('+RTS -G1 -RTS' ),
       ],
      ghci_script,
      ['T4029.script'])

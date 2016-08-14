@@ -39,7 +39,7 @@ test('T3001-2', [only_ways(['prof_hb']), extra_ways(['prof_hb'])],
 
 # As with ioprof001, the unoptimised profile is different but
 # not badly wrong (CAF attribution is different).
-test('scc001', [expect_broken_for_10037], compile_and_run,
+test('scc001', [], compile_and_run,
      ['-fno-state-hack -fno-full-laziness']) # Note [consistent stacks]
 
 test('scc002', [], compile_and_run, [''])
@@ -94,7 +94,26 @@ test('callstack001', [expect_broken_for_10037],
 test('callstack002', [], compile_and_run,
      ['-fprof-auto-calls -fno-full-laziness -fno-state-hack'])
 
-# Should not stack overflow with -prof -auto-all
+# Should not stack overflow with -prof -fprof-auto
 test('T5363', [], compile_and_run, [''])
 
 test('profinline001', [], compile_and_run, [''])
+
+test('T11627a', [extra_ways(extra_prof_ways)], compile_and_run, [''])
+
+test('T11627b', [ extra_run_opts('+RTS -i0 -RTS')  # census after each GC
+                , extra_ways(extra_prof_ways)
+                , when(opsys('mingw32'),
+                       expect_broken_for(12236, ['prof_hc_hb']))
+                ]
+                , compile_and_run
+                , [''])
+
+test('T11978a',
+     [only_ways(['profthreaded']), extra_run_opts('+RTS -hb -N10')],
+     compile_and_run, [''])
+
+test('toplevel_scc_1',
+     [extra_ways(['prof_no_auto']), only_ways(['prof_no_auto'])],
+     compile_and_run,
+     [''])

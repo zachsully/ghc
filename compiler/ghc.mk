@@ -177,11 +177,6 @@ compiler/stage1/$(PLATFORM_H) : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	@echo "#define BUILD_OS \"$(BuildOS_CPP)\""               >> $@
 	@echo "#define HOST_OS \"$(HostOS_CPP)\""                 >> $@
 	@echo "#define TARGET_OS \"$(TargetOS_CPP)\""             >> $@
-ifeq "$(TargetOS_CPP)" "irix"
-	@echo "#ifndef $(IRIX_MAJOR)_TARGET_OS"                   >> $@
-	@echo "#define $(IRIX_MAJOR)_TARGET_OS 1"                 >> $@
-	@echo "#endif"                                            >> $@
-endif
 	@echo                                                     >> $@
 	@echo "#define $(BuildVendor_CPP)_BUILD_VENDOR 1"         >> $@
 	@echo "#define $(HostVendor_CPP)_HOST_VENDOR 1"           >> $@
@@ -223,11 +218,6 @@ compiler/stage2/$(PLATFORM_H) : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	@echo "#define BUILD_OS \"$(HostOS_CPP)\""                >> $@
 	@echo "#define HOST_OS \"$(TargetOS_CPP)\""               >> $@
 	@echo "#define TARGET_OS \"$(TargetOS_CPP)\""             >> $@
-ifeq "$(TargetOS_CPP)" "irix"
-	@echo "#ifndef $(IRIX_MAJOR)_TARGET_OS"                   >> $@
-	@echo "#define $(IRIX_MAJOR)_TARGET_OS 1"                 >> $@
-	@echo "#endif"                                            >> $@
-endif
 	@echo                                                     >> $@
 	@echo "#define $(HostVendor_CPP)_BUILD_VENDOR 1"          >> $@
 	@echo "#define $(TargetVendor_CPP)_HOST_VENDOR 1"         >> $@
@@ -379,20 +369,6 @@ compiler/stage1/build/Parser_HC_OPTS += -O0 -fno-ignore-interface-pragmas -fcmm-
 compiler/stage2/build/Parser_HC_OPTS += -O0 -fno-ignore-interface-pragmas -fcmm-sink
 compiler/stage3/build/Parser_HC_OPTS += -O0 -fno-ignore-interface-pragmas -fcmm-sink
 
-# On IBM AIX we need to wrokaround XCOFF's TOC limitations (see also
-# comment in `aclocal.m4` about `-mminimal-toc` for more details)
-# However, Parser.hc defines so many symbols that `-mminimal-toc`
-# generates instructions with offsets exceeding the PPC offset
-# addressing limits.  So we need to counter-act this via `-mfull-toc`
-# which disables a preceding `-mminimal-toc` again.
-ifeq "$(HostOS_CPP)" "aix"
-compiler/stage1/build/Parser_HC_OPTS += -optc-mfull-toc
-endif
-ifeq "$(TargetOS_CPP)" "aix"
-compiler/stage2/build/Parser_HC_OPTS += -optc-mfull-toc
-compiler/stage3/build/Parser_HC_OPTS += -optc-mfull-toc
-endif
-
 ifeq "$(GhcProfiled)" "YES"
 # If we're profiling GHC then we want SCCs.  However, adding -auto-all
 # everywhere tends to give a hard-to-read profile, and adds lots of
@@ -541,6 +517,7 @@ compiler_stage2_dll0_MODULES = \
 	PrelRules \
 	Pretty \
 	PrimOp \
+	RepType \
 	RdrName \
 	Rules \
 	SrcLoc \

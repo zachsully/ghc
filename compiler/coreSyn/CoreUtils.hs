@@ -24,6 +24,7 @@ module CoreUtils (
         -- * Properties of expressions
         exprType, coreAltType, coreAltsType,
         exprIsDupable, exprIsTrivial, getIdFromTrivialExpr, exprIsBottom,
+        getIdFromTrivialExpr_maybe,
         exprIsCheap, exprIsExpandable, exprIsCheap', CheapAppFun,
         exprIsHNF, exprOkForSpeculation, exprOkForSideEffects, exprIsWorkFree,
         exprIsBig, exprIsConLike,
@@ -46,6 +47,9 @@ module CoreUtils (
         stripTicksTop, stripTicksTopE, stripTicksTopT,
         stripTicksE, stripTicksT,
 
+        -- * StaticPtr
+        collectStaticPtrSatArgs,
+
         -- * Join points
         isJoinBind
     ) where
@@ -53,6 +57,7 @@ module CoreUtils (
 #include "HsVersions.h"
 
 import CoreSyn
+import PrelNames ( staticPtrDataConName )
 import PprCore
 import CoreFVs( exprFreeVars )
 import Var
@@ -105,7 +110,7 @@ exprType (Let bind body)
 exprType (Case _ _ ty _)     = ty
 exprType (Cast _ co)         = pSnd (coercionKind co)
 exprType (Tick _ e)          = exprType e
-exprType (Lam binder expr)   = mkPiType binder (exprType expr)
+exprType (Lam binder expr)   = mkLamType binder (exprType expr)
 exprType e@(App _ _)
   = case collectArgs e of
         (fun, args) -> applyTypeToArgs e (exprType fun) args
@@ -716,7 +721,7 @@ missed the first one.)
 combineIdenticalAlts :: [AltCon]    -- Constructors that cannot match DEFAULT
                      -> [CoreAlt]
                      -> (Bool,      -- True <=> something happened
-                         [AltCon],  -- New contructors that cannot match DEFAULT
+                         [AltCon],  -- New constructors that cannot match DEFAULT
                          [CoreAlt]) -- New alternatives
 -- See Note [Combine identical alternatives]
 -- True <=> we did some combining, result is a single DEFAULT alternative
@@ -756,8 +761,8 @@ Note [exprIsTrivial]
                 applications.  Note that primop Ids aren't considered
                 trivial unless
 
-Note [Variable are trivial]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note [Variables are trivial]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 There used to be a gruesome test for (hasNoBinding v) in the
 Var case:
         exprIsTrivial (Var v) | hasNoBinding v = idArity v == 0
@@ -809,20 +814,36 @@ exprIsTrivial (Case e _ _ [])  = exprIsTrivial e  -- See Note [Empty case is tri
 exprIsTrivial _                = False
 
 {-
+Note [getIdFromTrivialExpr]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 When substituting in a breakpoint we need to strip away the type cruft
 from a trivial expression and get back to the Id.  The invariant is
 that the expression we're substituting was originally trivial
-according to exprIsTrivial.
+according to exprIsTrivial, AND the expression is not a literal.
+See Note [substTickish] for how breakpoint substitution preserves
+this extra invariant.
+
+We also need this functionality in CorePrep to extract out Id of a
+function which we are saturating.  However, in this case we don't know
+if the variable actually refers to a literal; thus we use
+'getIdFromTrivialExpr_maybe' to handle this case.  See test
+T12076lit for an example where this matters.
 -}
 
 getIdFromTrivialExpr :: CoreExpr -> Id
-getIdFromTrivialExpr e = go e
-  where go (Var v) = v
+getIdFromTrivialExpr e
+    = fromMaybe (pprPanic "getIdFromTrivialExpr" (ppr e))
+                (getIdFromTrivialExpr_maybe e)
+
+getIdFromTrivialExpr_maybe :: CoreExpr -> Maybe Id
+-- See Note [getIdFromTrivialExpr]
+getIdFromTrivialExpr_maybe e = go e
+  where go (Var v) = Just v
         go (App f t) | not (isRuntimeArg t) = go f
         go (Tick t e) | not (tickishIsCode t) = go e
         go (Cast e _) = go e
         go (Lam b e) | not (isRuntimeVar b) = go e
-        go e = pprPanic "getIdFromTrivialExpr" (ppr e)
+        go _ = Nothing
 
 {-
 exprIsBottom is a very cheap and cheerful function; it may return
@@ -1518,7 +1539,7 @@ dataConInstPat :: [FastString]          -- A long enough list of FSs to use for 
                -> DataCon
                -> [Type]                -- Types to instantiate the universally quantified tyvars
                -> ([TyVar], [Id])       -- Return instantiated variables
--- dataConInstPat arg_fun fss us con inst_tys returns a triple
+-- dataConInstPat arg_fun fss us con inst_tys returns a tuple
 -- (ex_tvs, arg_ids),
 --
 --   ex_tvs are intended to be used as binders for existential type args
@@ -1567,8 +1588,8 @@ dataConInstPat fss uniqs con inst_tys
                                        (zip3 ex_tvs ex_fss ex_uniqs)
 
     mk_ex_var :: TCvSubst -> (TyVar, FastString, Unique) -> (TCvSubst, TyVar)
-    mk_ex_var subst (tv, fs, uniq) = (Type.extendTvSubst subst tv
-                                       (mkTyVarTy new_tv)
+    mk_ex_var subst (tv, fs, uniq) = (Type.extendTvSubstWithClone subst tv
+                                       new_tv
                                      , new_tv)
       where
         new_tv = mkTyVar (mkSysTvName uniq fs) kind
@@ -1577,7 +1598,7 @@ dataConInstPat fss uniqs con inst_tys
       -- Make value vars, instantiating types
     arg_ids = zipWith4 mk_id_var id_uniqs id_fss arg_tys arg_strs
     mk_id_var uniq fs ty str
-      = mkLocalIdOrCoVarWithInfo name (Type.substTyUnchecked full_subst ty) info
+      = mkLocalIdOrCoVarWithInfo name (Type.substTy full_subst ty) info
       where
         name = mkInternalName uniq (mkVarOccFS fs) noSrcSpan
         info | isMarkedStrict str = vanillaIdInfo `setUnfoldingInfo` evaldUnfolding
@@ -2104,7 +2125,7 @@ rhsIsStatic :: Platform
 -- This is a bit like CoreUtils.exprIsHNF, with the following differences:
 --    a) scc "foo" (\x -> ...) is updatable (so we catch the right SCC)
 --
---    b) (C x xs), where C is a contructor is updatable if the application is
+--    b) (C x xs), where C is a constructor is updatable if the application is
 --         dynamic
 --
 --    c) don't look through unfolding of f in (f x).
@@ -2189,6 +2210,28 @@ isEmptyTy ty
     = True
     | otherwise
     = False
+
+{-
+*****************************************************
+*
+* StaticPtr
+*
+*****************************************************
+-}
+
+-- | @collectStaticPtrSatArgs e@ yields @Just (s, args)@ when @e = s args@
+-- and @s = StaticPtr@ and the application of @StaticPtr@ is saturated.
+--
+-- Yields @Nothing@ otherwise.
+collectStaticPtrSatArgs :: Expr b -> Maybe (Expr b, [Arg b])
+collectStaticPtrSatArgs e
+    | (fun@(Var b), args, _) <- collectArgsTicks (const True) e
+    , Just con <- isDataConId_maybe b
+    , dataConName con == staticPtrDataConName
+    , length args == 5
+    = Just (fun, args)
+collectStaticPtrSatArgs _
+    = Nothing
 
 {-
 ************************************************************************

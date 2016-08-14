@@ -9,14 +9,14 @@ const int ARRSIZE  = 64;
 const int LOOPS    = 1000;
 const int SEED     = 0xf00f00;
 
-extern lnat mblocks_allocated;
+extern StgWord mblocks_allocated;
 
 int main (int argc, char *argv[])
 {
     int i, j, b;
 
     void *a[ARRSIZE];
-    nat sizes[ARRSIZE];
+    uint32_t sizes[ARRSIZE];
 
     srand(SEED);
 

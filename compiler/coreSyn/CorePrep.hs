@@ -166,10 +166,12 @@ type CpeRhs  = CoreExpr    -- Non-terminal 'rhs'
 ************************************************************************
 -}
 
-corePrepPgm :: HscEnv -> ModLocation -> CoreProgram -> [TyCon] -> IO CoreProgram
-corePrepPgm hsc_env mod_loc binds data_tycons = do
-    let dflags = hsc_dflags hsc_env
-    showPass dflags "CorePrep"
+corePrepPgm :: HscEnv -> Module -> ModLocation -> CoreProgram -> [TyCon]
+            -> IO CoreProgram
+corePrepPgm hsc_env this_mod mod_loc binds data_tycons =
+    withTiming (pure dflags)
+               (text "CorePrep"<+>brackets (ppr this_mod))
+               (const ()) $ do
     us <- mkSplitUniqSupply 's'
     initialCorePrepEnv <- mkInitialCorePrepEnv dflags hsc_env
 
@@ -184,10 +186,12 @@ corePrepPgm hsc_env mod_loc binds data_tycons = do
 
     endPassIO hsc_env alwaysQualify CorePrep binds_out []
     return binds_out
+  where
+    dflags = hsc_dflags hsc_env
 
 corePrepExpr :: DynFlags -> HscEnv -> CoreExpr -> IO CoreExpr
-corePrepExpr dflags hsc_env expr = do
-    showPass dflags "CorePrep"
+corePrepExpr dflags hsc_env expr =
+    withTiming (pure dflags) (text "CorePrep [expr]") (const ()) $ do
     us <- mkSplitUniqSupply 's'
     initialCorePrepEnv <- mkInitialCorePrepEnv dflags hsc_env
     let new_expr = initUs_ us (cpeBodyNF initialCorePrepEnv expr)
@@ -376,13 +380,18 @@ cpeBind top_lvl env (NonRec bndr rhs)
                                           dmd
                                           is_unlifted
                                           env bndr1 rhs
+       -- See Note [Inlining in CorePrep]
+       ; if cpe_ExprIsTrivial rhs2 && isNotTopLevel top_lvl
+            then return (extendCorePrepEnvExpr env bndr rhs2, floats, Nothing)
+            else do {
+
        ; let new_float = mkFloat dmd is_unlifted bndr2 rhs2
 
         -- We want bndr'' in the envt, because it records
         -- the evaluated-ness of the binder
        ; return (extendCorePrepEnv env bndr bndr2,
                  addFloat floats new_float,
-                 Nothing) }
+                 Nothing) }}
   | otherwise
   = ASSERT(not (isTopLevel top_lvl))
     do { (_, bndr1) <- cpCloneBndr env bndr
@@ -462,8 +471,6 @@ cpePair top_lvl is_rec dmd is_unlifted env bndr rhs
 
        ; return (floats4, bndr', rhs4) }
   where
-    is_strict_or_unlifted = not (isJoinId bndr) && (isStrictDmd dmd || is_unlifted)
-
     platform = targetPlatform (cpe_dynFlags env)
 
     arity = idArity bndr        -- We must match this arity
@@ -471,14 +478,14 @@ cpePair top_lvl is_rec dmd is_unlifted env bndr rhs
     ---------------------
     float_from_rhs floats rhs
       | isEmptyFloats floats = return (emptyFloats, rhs)
-      | isTopLevel top_lvl    = float_top    floats rhs
-      | otherwise             = float_nested floats rhs
+      | isTopLevel top_lvl   = float_top    floats rhs
+      | otherwise            = float_nested floats rhs
 
     ---------------------
     float_nested floats rhs
-      | wantFloatNested is_rec is_strict_or_unlifted floats rhs
+      | wantFloatNested is_rec dmd is_unlifted floats rhs
                   = return (floats, rhs)
-      | otherwise = dont_float floats rhs
+      | otherwise = dontFloat floats rhs
 
     ---------------------
     float_top floats rhs        -- Urhgh!  See Note [CafInfo and floating]
@@ -491,16 +498,17 @@ cpePair top_lvl is_rec dmd is_unlifted env bndr rhs
       = return (floats', rhs')
 
       | otherwise
-      = dont_float floats rhs
+      = dontFloat floats rhs
 
-    ---------------------
-    dont_float floats rhs
-      -- Non-empty floats, but do not want to float from rhs
-      -- So wrap the rhs in the floats
-      -- But: rhs1 might have lambdas, and we can't
-      --      put them inside a wrapBinds
-      = do { body <- rhsToBodyNF rhs
-           ; return (emptyFloats, wrapBinds floats body) }
+dontFloat :: Floats -> CpeRhs -> UniqSM (Floats, CpeBody)
+-- Non-empty floats, but do not want to float from rhs
+-- So wrap the rhs in the floats
+-- But: rhs1 might have lambdas, and we can't
+--      put them inside a wrapBinds
+dontFloat floats1 rhs
+  = do { (floats2, body) <- rhsToBody rhs
+        ; return (emptyFloats, wrapBinds floats1 $
+                               wrapBinds floats2 body) }
 
 {- Note [Silly extra arguments]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -600,7 +608,8 @@ cpeRhsE env (Tick tickish expr)
        ; return (emptyFloats, mkTick tickish' body) }
   where
     tickish' | Breakpoint n fvs <- tickish
-             = Breakpoint n (map (lookupCorePrepEnv env) fvs)
+             -- See also 'substTickish'
+             = Breakpoint n (map (getIdFromTrivialExpr . lookupCorePrepEnv env) fvs)
              | otherwise
              = tickish
 
@@ -653,12 +662,26 @@ cvtLitInteger dflags mk_integer _ i
 --              CpeBody: produces a result satisfying CpeBody
 -- ---------------------------------------------------------------------------
 
+-- | Convert a 'CoreExpr' so it satisfies 'CpeBody', without
+-- producing any floats (any generated floats are immediately
+-- let-bound using 'wrapBinds').  Generally you want this, esp.
+-- when you've reached a binding form (e.g., a lambda) and
+-- floating any further would be incorrect.
 cpeBodyNF :: CorePrepEnv -> CoreExpr -> UniqSM CpeBody
 cpeBodyNF env expr
   = do { (floats, body) <- cpeBody env expr
        ; return (wrapBinds floats body) }
 
---------
+-- | Convert a 'CoreExpr' so it satisfies 'CpeBody'; also produce
+-- a list of 'Floats' which are being propagated upwards.  In
+-- fact, this function is used in only two cases: to
+-- implement 'cpeBodyNF' (which is what you usually want),
+-- and in the case when a let-binding is in a case scrutinee--here,
+-- we can always float out:
+--
+--      case (let x = y in z) of ...
+--      ==> let x = y in case z of ...
+--
 cpeBody :: CorePrepEnv -> CoreExpr -> UniqSM (Floats, CpeBody)
 cpeBody env expr
   = do { (floats1, rhs) <- cpeRhsE env expr
@@ -709,14 +732,14 @@ rhsToBody expr = return (emptyFloats, expr)
 cpeApp :: CorePrepEnv -> CoreExpr -> UniqSM (Floats, CpeRhs)
 -- May return a CpeRhs because of saturating primops
 cpeApp env expr
-  = do { (app, (head,depth), _, floats, ss) <- collect_args expr 0
+  = do { (app, head, _, floats, ss) <- collect_args expr 0
        ; MASSERT(null ss)       -- make sure we used all the strictness info
 
         -- Now deal with the function
        ; case head of
-           Var fn_id -> do { sat_app <- maybeSaturate env fn_id app depth
-                           ; return (floats, sat_app) }
-           _other    -> return (floats, app) }
+           Just (fn_id, depth) -> do { sat_app <- maybeSaturate env fn_id app depth
+                                     ; return (floats, sat_app) }
+           _other              -> return (floats, app) }
 
   where
     -- Deconstruct and rebuild the application, floating any non-atomic
@@ -727,13 +750,13 @@ cpeApp env expr
 
     collect_args
         :: CoreExpr
-        -> Int                     -- Current app depth
-        -> UniqSM (CpeApp,         -- The rebuilt expression
-                   (CoreExpr,Int), -- The head of the application,
-                                   -- and no. of args it was applied to
-                   Type,           -- Type of the whole expr
-                   Floats,         -- Any floats we pulled out
-                   [Demand])       -- Remaining argument demands
+        -> Int                       -- Current app depth
+        -> UniqSM (CpeApp,           -- The rebuilt expression
+                   Maybe (Id, Int),  -- The head of the application,
+                                     -- and no. of args it was applied to
+                   Type,             -- Type of the whole expr
+                   Floats,           -- Any floats we pulled out
+                   [Demand])         -- Remaining argument demands
 
     collect_args (App fun arg@(Type arg_ty)) depth
       = do { (fun',hd,fun_ty,floats,ss) <- collect_args fun depth
@@ -745,20 +768,28 @@ cpeApp env expr
 
     collect_args (App fun arg) depth
       = do { (fun',hd,fun_ty,floats,ss) <- collect_args fun (depth+1)
-           ; let
-              (ss1, ss_rest)   = case ss of
-                                   (ss1:ss_rest)             -> (ss1,     ss_rest)
-                                   []                        -> (topDmd, [])
-              (arg_ty, res_ty) = expectJust "cpeBody:collect_args" $
-                                 splitFunTy_maybe fun_ty
+           ; let (ss1, ss_rest)  -- See Note [lazyId magic] in MkId
+                    = case (ss, isLazyExpr arg) of
+                        (_   : ss_rest, True)  -> (topDmd, ss_rest)
+                        (ss1 : ss_rest, False) -> (ss1,    ss_rest)
+                        ([],            _)     -> (topDmd, [])
+                 (arg_ty, res_ty) = expectJust "cpeBody:collect_args" $
+                                    splitFunTy_maybe fun_ty
 
            ; (fs, arg') <- cpeArg env ss1 arg arg_ty
            ; return (App fun' arg', hd, res_ty, fs `appendFloats` floats, ss_rest) }
 
     collect_args (Var v) depth
       = do { v1 <- fiddleCCall v
-           ; let v2 = lookupCorePrepEnv env v1
-           ; return (Var v2, (Var v2, depth), idType v2, emptyFloats, stricts) }
+           ; let e2 = lookupCorePrepEnv env v1
+                 mb_v2 = getIdFromTrivialExpr_maybe e2
+                 hd = fmap (\v2 -> (v2, depth)) mb_v2
+           -- NB: current depth is right, because e2 is a trivial expression
+           -- and thus its embedded Id *must* be at the same depth as any
+           -- Apps it is under are type applications only (c.f.
+           -- cpe_ExprIsTrivial).  But note that we need the type of the
+           -- expression, not the id.
+           ; return (e2, hd, exprType e2, emptyFloats, stricts) }
         where
           stricts = case idStrictness v of
                             StrictSig (DmdType _ demands _)
@@ -784,13 +815,20 @@ cpeApp env expr
            ; return (fun',hd,fun_ty,addFloat floats (FloatTick tickish),ss) }
 
         -- N-variable fun, better let-bind it
-    collect_args fun depth
+    collect_args fun _
       = do { (fun_floats, fun') <- cpeArg env evalDmd fun ty
                           -- The evalDmd says that it's sure to be evaluated,
                           -- so we'll end up case-binding it
-           ; return (fun', (fun', depth), ty, fun_floats, []) }
+           ; return (fun', Nothing, ty, fun_floats, []) }
         where
           ty = exprType fun
+
+isLazyExpr :: CoreExpr -> Bool
+-- See Note [lazyId magic] in MkId
+isLazyExpr (Cast e _)              = isLazyExpr e
+isLazyExpr (Tick _ e)              = isLazyExpr e
+isLazyExpr (Var f `App` _ `App` _) = f `hasKey` lazyIdKey
+isLazyExpr _                       = False
 
 -- ---------------------------------------------------------------------------
 --      CpeArg: produces a result satisfying CpeArg
@@ -803,8 +841,7 @@ cpeArg env dmd arg arg_ty
   = do { (floats1, arg1) <- cpeRhsE env arg     -- arg1 can be a lambda
        ; (floats2, arg2) <- if want_float floats1 arg1
                             then return (floats1, arg1)
-                            else do { body1 <- rhsToBodyNF arg1
-                                    ; return (emptyFloats, wrapBinds floats1 body1) }
+                            else dontFloat floats1 arg1
                 -- Else case: arg1 might have lambdas, and we can't
                 --            put them inside a wrapBinds
 
@@ -817,8 +854,7 @@ cpeArg env dmd arg arg_ty
        ; return (addFloat floats2 arg_float, varToCoreExpr v) } }
   where
     is_unlifted = isUnliftedType arg_ty
-    is_strict   = isStrictDmd dmd
-    want_float  = wantFloatNested NonRecursive (is_strict || is_unlifted)
+    want_float  = wantFloatNested NonRecursive dmd is_unlifted
 
 {-
 Note [Floating unlifted arguments]
@@ -907,6 +943,7 @@ of the scope of a `seq`, or dropped the `seq` altogether.
 
 cpe_ExprIsTrivial :: CoreExpr -> Bool
 -- Version that doesn't consider an scc annotation to be trivial.
+-- See also 'exprIsTrivial'
 cpe_ExprIsTrivial (Var _)         = True
 cpe_ExprIsTrivial (Type _)        = True
 cpe_ExprIsTrivial (Coercion _)    = True
@@ -1010,8 +1047,13 @@ tryEtaReducePrep bndrs (Let bind@(NonRec _ r) body)
   where
     fvs = exprFreeVars r
 
-tryEtaReducePrep bndrs (Tick tickish e)
-  = fmap (mkTick tickish) $ tryEtaReducePrep bndrs e
+-- NB: do not attempt to eta-reduce across ticks
+-- Otherwise we risk reducing
+--       \x. (Tick (Breakpoint {x}) f x)
+--   ==> Tick (breakpoint {x}) f
+-- which is bogus (Trac #17228)
+-- tryEtaReducePrep bndrs (Tick tickish e)
+--   = fmap (mkTick tickish) $ tryEtaReducePrep bndrs e
 
 tryEtaReducePrep _ _ = Nothing
 
@@ -1192,10 +1234,11 @@ canFloatFromNoCaf platform (Floats ok_to_spec fs) rhs
                          (\i -> pprPanic "rhsIsStatic" (integer i))
                          -- Integer literals should not show up
 
-wantFloatNested :: RecFlag -> Bool -> Floats -> CpeRhs -> Bool
-wantFloatNested is_rec strict_or_unlifted floats rhs
+wantFloatNested :: RecFlag -> Demand -> Bool -> Floats -> CpeRhs -> Bool
+wantFloatNested is_rec dmd is_unlifted floats rhs
   =  isEmptyFloats floats
-  || strict_or_unlifted
+  || isStrictDmd dmd
+  || is_unlifted
   || (allLazyNested is_rec floats && exprIsHNF rhs)
         -- Why the test for allLazyNested?
         --      v = f (x `divInt#` y)
@@ -1223,9 +1266,80 @@ allLazyNested is_rec (Floats IfUnboxedOk _) = isNonRec is_rec
 --                      The environment
 -- ---------------------------------------------------------------------------
 
+-- Note [Inlining in CorePrep]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- There is a subtle but important invariant that must be upheld in the output
+-- of CorePrep: there are no "trivial" updatable thunks.  Thus, this Core
+-- is impermissible:
+--
+--      let x :: ()
+--          x = y
+--
+-- (where y is a reference to a GLOBAL variable).  Thunks like this are silly:
+-- they can always be profitably replaced by inlining x with y. Consequently,
+-- the code generator/runtime does not bother implementing this properly
+-- (specifically, there is no implementation of stg_ap_0_upd_info, which is the
+-- stack frame that would be used to update this thunk.  The "0" means it has
+-- zero free variables.)
+--
+-- In general, the inliner is good at eliminating these let-bindings.  However,
+-- there is one case where these trivial updatable thunks can arise: when
+-- we are optimizing away 'lazy' (see Note [lazyId magic], and also
+-- 'cpeRhsE'.)  Then, we could have started with:
+--
+--      let x :: ()
+--          x = lazy @ () y
+--
+-- which is a perfectly fine, non-trivial thunk, but then CorePrep will
+-- drop 'lazy', giving us 'x = y' which is trivial and impermissible.
+-- The solution is CorePrep to have a miniature inlining pass which deals
+-- with cases like this.  We can then drop the let-binding altogether.
+--
+-- Why does the removal of 'lazy' have to occur in CorePrep?
+-- The gory details are in Note [lazyId magic] in MkId, but the
+-- main reason is that lazy must appear in unfoldings (optimizer
+-- output) and it must prevent call-by-value for catch# (which
+-- is implemented by CorePrep.)
+--
+-- An alternate strategy for solving this problem is to have the
+-- inliner treat 'lazy e' as a trivial expression if 'e' is trivial.
+-- We decided not to adopt this solution to keep the definition
+-- of 'exprIsTrivial' simple.
+--
+-- There is ONE caveat however: for top-level bindings we have
+-- to preserve the binding so that we float the (hacky) non-recursive
+-- binding for data constructors; see Note [Data constructor workers].
+--
+-- Note [CorePrep inlines trivial CoreExpr not Id]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- Why does cpe_env need to be an IdEnv CoreExpr, as opposed to an
+-- IdEnv Id?  Naively, we might conjecture that trivial updatable thunks
+-- as per Note [Inlining in CorePrep] always have the form
+-- 'lazy @ SomeType gbl_id'.  But this is not true: the following is
+-- perfectly reasonable Core:
+--
+--      let x :: ()
+--          x = lazy @ (forall a. a) y @ Bool
+--
+-- When we inline 'x' after eliminating 'lazy', we need to replace
+-- occurences of 'x' with 'y @ bool', not just 'y'.  Situations like
+-- this can easily arise with higher-rank types; thus, cpe_env must
+-- map to CoreExprs, not Ids.
+
 data CorePrepEnv
   = CPE { cpe_dynFlags        :: DynFlags
-        , cpe_env             :: IdEnv Id   -- Clone local Ids
+        , cpe_env             :: IdEnv CoreExpr   -- Clone local Ids
+        -- ^ This environment is used for three operations:
+        --
+        --      1. To support cloning of local Ids so that they are
+        --      all unique (see item (6) of CorePrep overview).
+        --
+        --      2. To support beta-reduction of runRW, see
+        --      Note [runRW magic] and Note [runRW arg].
+        --
+        --      3. To let us inline trivial RHSs of non top-level let-bindings,
+        --      see Note [lazyId magic], Note [Inlining in CorePrep]
+        --      and Note [CorePrep inlines trivial CoreExpr not Id] (#12076)
         , cpe_mkIntegerId     :: Id
         , cpe_integerSDataCon :: Maybe DataCon
         , cpe_addingVoidParam :: IdSet
@@ -1265,17 +1379,22 @@ mkInitialCorePrepEnv dflags hsc_env
 
 extendCorePrepEnv :: CorePrepEnv -> Id -> Id -> CorePrepEnv
 extendCorePrepEnv cpe id id'
-    = cpe { cpe_env = extendVarEnv (cpe_env cpe) id id' }
+    = cpe { cpe_env = extendVarEnv (cpe_env cpe) id (Var id') }
+
+extendCorePrepEnvExpr :: CorePrepEnv -> Id -> CoreExpr -> CorePrepEnv
+extendCorePrepEnvExpr cpe id expr
+    = cpe { cpe_env = extendVarEnv (cpe_env cpe) id expr }
 
 extendCorePrepEnvList :: CorePrepEnv -> [(Id,Id)] -> CorePrepEnv
 extendCorePrepEnvList cpe prs
-    = cpe { cpe_env = extendVarEnvList (cpe_env cpe) prs }
+    = cpe { cpe_env = extendVarEnvList (cpe_env cpe)
+                        (map (\(id, id') -> (id, Var id')) prs) }
 
-lookupCorePrepEnv :: CorePrepEnv -> Id -> Id
+lookupCorePrepEnv :: CorePrepEnv -> Id -> CoreExpr
 lookupCorePrepEnv cpe id
   = case lookupVarEnv (cpe_env cpe) id of
-        Nothing  -> id
-        Just id' -> id'
+        Nothing  -> Var id
+        Just exp -> exp
 
 getMkIntegerId :: CorePrepEnv -> Id
 getMkIntegerId = cpe_mkIntegerId

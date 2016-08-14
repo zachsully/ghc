@@ -8,7 +8,7 @@ It's hard to put these functions anywhere else without causing
 some unnecessary loops in the module dependency graph.
 -}
 
-{-# LANGUAGE CPP, DeriveDataTypeable, ScopedTypeVariables #-}
+{-# LANGUAGE CPP, ScopedTypeVariables #-}
 
 module Panic (
      GhcException(..), showGhcException,
@@ -27,13 +27,12 @@ module Panic (
 ) where
 #include "HsVersions.h"
 
-import {-# SOURCE #-} Outputable (SDoc)
+import {-# SOURCE #-} Outputable (SDoc, showSDocUnsafe)
 
 import Config
 import Exception
 
 import Control.Concurrent
-import Data.Dynamic
 import Debug.Trace        ( trace )
 import System.IO.Unsafe
 import System.Environment
@@ -86,7 +85,6 @@ data GhcException
   -- | An error in the user's code, probably.
   | ProgramError    String
   | PprProgramError String SDoc
-  deriving (Typeable)
 
 instance Exception GhcException
 
@@ -125,35 +123,47 @@ safeShowException e = do
         forceList xs@(x : xt) = x `seq` forceList xt `seq` xs
 
 -- | Append a description of the given exception to this string.
-showGhcException :: GhcException -> String -> String
+--
+-- Note that this uses 'DynFlags.unsafeGlobalDynFlags', which may have some
+-- uninitialized fields if invoked before 'GHC.initGhcMonad' has been called.
+-- If the error message to be printed includes a pretty-printer document
+-- which forces one of these fields this call may bottom.
+showGhcException :: GhcException -> ShowS
 showGhcException exception
  = case exception of
         UsageError str
          -> showString str . showChar '\n' . showString short_usage
 
         CmdLineError str        -> showString str
-        PprProgramError str  _  ->
-            showGhcException (ProgramError (str ++ "\n<<details unavailable>>"))
+        PprProgramError str  sdoc  ->
+            showString str . showString "\n\n" .
+            showString (showSDocUnsafe sdoc)
         ProgramError str        -> showString str
         InstallationError str   -> showString str
         Signal n                -> showString "signal: " . shows n
 
-        PprPanic  s _ ->
-            showGhcException (Panic (s ++ "\n<<details unavailable>>"))
-        Panic s
-         -> showString $
-                "panic! (the 'impossible' happened)\n"
-                ++ "  (GHC version " ++ cProjectVersion ++ " for " ++ TargetPlatform_NAME ++ "):\n\t"
-                ++ s ++ "\n\n"
-                ++ "Please report this as a GHC bug:  http://www.haskell.org/ghc/reportabug\n"
+        PprPanic  s sdoc ->
+            panicMsg $ showString s . showString "\n\n"
+                     . showString (showSDocUnsafe sdoc)
+        Panic s -> panicMsg (showString s)
 
-        PprSorry  s _ ->
-            showGhcException (Sorry (s ++ "\n<<details unavailable>>"))
-        Sorry s
-         -> showString $
-                "sorry! (unimplemented feature or known bug)\n"
-                 ++ "  (GHC version " ++ cProjectVersion ++ " for " ++ TargetPlatform_NAME ++ "):\n\t"
-                 ++ s ++ "\n"
+        PprSorry  s sdoc ->
+            sorryMsg $ showString s . showString "\n\n"
+                     . showString (showSDocUnsafe sdoc)
+        Sorry s -> sorryMsg (showString s)
+  where
+    sorryMsg :: ShowS -> ShowS
+    sorryMsg s =
+        showString "sorry! (unimplemented feature or known bug)\n"
+      . showString ("  (GHC version " ++ cProjectVersion ++ " for " ++ TargetPlatform_NAME ++ "):\n\t")
+      . s . showString "\n"
+
+    panicMsg :: ShowS -> ShowS
+    panicMsg s =
+        showString "panic! (the 'impossible' happened)\n"
+      . showString ("  (GHC version " ++ cProjectVersion ++ " for " ++ TargetPlatform_NAME ++ "):\n\t")
+      . s . showString "\n\n"
+      . showString "Please report this as a GHC bug:  http://www.haskell.org/ghc/reportabug\n"
 
 
 throwGhcException :: GhcException -> a

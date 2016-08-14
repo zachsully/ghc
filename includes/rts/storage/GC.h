@@ -15,41 +15,35 @@
 /* -----------------------------------------------------------------------------
  * Generational GC
  *
- * We support an arbitrary number of generations, with an arbitrary number
- * of steps per generation.  Notes (in no particular order):
+ * We support an arbitrary number of generations.  Notes (in no particular
+ * order):
  *
- *       - all generations except the oldest should have the same
- *         number of steps.  Multiple steps gives objects a decent
- *         chance to age before being promoted, and helps ensure that
- *         we don't end up with too many thunks being updated in older
- *         generations.
+ *       - Objects "age" in the nursery for one GC cycle before being promoted
+ *         to the next generation.  There is no aging in other generations.
  *
- *       - the oldest generation has one step.  There's no point in aging
- *         objects in the oldest generation.
- *
- *       - generation 0, step 0 (G0S0) is the allocation area.  It is given
+ *       - generation 0 is the allocation area.  It is given
  *         a fixed set of blocks during initialisation, and these blocks
  *         normally stay in G0S0.  In parallel execution, each
  *         Capability has its own nursery.
  *
- *       - during garbage collection, each step which is an evacuation
- *         destination (i.e. all steps except G0S0) is allocated a to-space.
- *         evacuated objects are allocated into the step's to-space until
- *         GC is finished, when the original step's contents may be freed
- *         and replaced by the to-space.
+ *       - during garbage collection, each generation which is an
+ *         evacuation destination (i.e. all generations except G0) is
+ *         allocated a to-space.  evacuated objects are allocated into
+ *         the generation's to-space until GC is finished, when the
+ *         original generations's contents may be freed and replaced
+ *         by the to-space.
  *
- *       - the mutable-list is per-generation (not per-step).  G0 doesn't
- *         have one (since every garbage collection collects at least G0).
+ *       - the mutable-list is per-generation.  G0 doesn't have one
+ *         (since every garbage collection collects at least G0).
  *
- *       - block descriptors contain pointers to both the step and the
- *         generation that the block belongs to, for convenience.
+ *       - block descriptors contain a pointer to the generation that
+ *         the block belongs to, for convenience.
  *
  *       - static objects are stored in per-generation lists.  See GC.c for
  *         details of how we collect CAFs in the generational scheme.
  *
- *       - large objects are per-step, and are promoted in the same way
- *         as small objects, except that we may allocate large objects into
- *         generation 1 initially.
+ *       - large objects are per-generation, and are promoted in the
+ *         same way as small objects.
  *
  * ------------------------------------------------------------------------- */
 
@@ -88,7 +82,7 @@ typedef struct nursery_ {
 // memory allocation is tracked.
 
 typedef struct generation_ {
-    nat            no;                  // generation number
+    uint32_t       no;                  // generation number
 
     bdescr *       blocks;              // blocks in this gen
     memcount       n_blocks;            // number of blocks
@@ -100,6 +94,22 @@ typedef struct generation_ {
     memcount       n_new_large_words;   // words of new large objects
                                         // (for doYouWantToGC())
 
+    bdescr *       compact_objects;     // compact objects chain
+                                        // the second block in each compact is
+                                        // linked from the closure object, while
+                                        // the second compact object in the
+                                        // chain is linked from bd->link (like
+                                        // large objects)
+    memcount       n_compact_blocks;    // no. of blocks used by all compacts
+    bdescr *       compact_blocks_in_import; // compact objects being imported
+                                             // (not known to the GC because
+                                             // potentially invalid, but we
+                                             // need to keep track of them
+                                             // to avoid assertions in Sanity)
+                                             // this is a list shaped like compact_objects
+    memcount       n_compact_blocks_in_import; // no. of blocks used by compacts
+                                               // being imported
+
     memcount       max_blocks;          // max blocks
 
     StgTSO *       threads;             // threads in this gen
@@ -109,9 +119,9 @@ typedef struct generation_ {
     struct generation_ *to;             // destination gen for live objects
 
     // stats information
-    nat collections;
-    nat par_collections;
-    nat failed_promotions;
+    uint32_t collections;
+    uint32_t par_collections;
+    uint32_t failed_promotions;
 
     // ------------------------------------
     // Fields below are used during GC only
@@ -135,6 +145,9 @@ typedef struct generation_ {
 
     bdescr *     scavenged_large_objects;  // live large objs after GC (d-link)
     memcount     n_scavenged_large_blocks; // size (not count) of above
+
+    bdescr *     live_compact_objects;  // live compact objs after GC (d-link)
+    memcount     n_live_compact_blocks; // size (not count) of above
 
     bdescr *     bitmap;                // bitmap for compacting collection
 
@@ -224,6 +237,7 @@ typedef struct _GCStats {
   StgWord64 current_bytes_slop;
   StgWord64 max_bytes_slop;
   StgWord64 peak_megabytes_allocated;
+  StgWord64 mblocks_allocated;
   StgWord64 par_tot_bytes_copied;
   StgWord64 par_max_bytes_copied;
   StgDouble mutator_cpu_seconds;

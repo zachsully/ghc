@@ -17,7 +17,7 @@
    position-independent code.
 
    Note [x86-64-relative]
-   There is a complication on the x86_64 platform, where pointeres are
+   There is a complication on the x86_64 platform, where pointers are
    64 bits, but the tools don't support 64-bit relative relocations.
    However, the default memory model (small) ensures that all symbols
    have values in the lower 2Gb of the address space, so offsets all
@@ -73,7 +73,8 @@ typedef struct {
 
 extern StgWord16 closure_flags[];
 
-#define closureFlags(c)         (closure_flags[get_itbl(UNTAG_CLOSURE(c))->type])
+#define closureFlags(c)         (closure_flags[get_itbl \
+                                    (UNTAG_CONST_CLOSURE(c))->type])
 
 #define closure_HNF(c)          (  closureFlags(c) & _HNF)
 #define closure_BITMAP(c)       (  closureFlags(c) & _BTM)
@@ -125,7 +126,7 @@ extern StgWord16 closure_flags[];
  */
 typedef struct {
   StgWord size;
-  StgWord bitmap[FLEXIBLE_ARRAY];
+  StgWord bitmap[];
 } StgLargeBitmap;
 
 /* -----------------------------------------------------------------------------
@@ -206,9 +207,9 @@ typedef struct StgInfoTable_ {
        */
 
 #ifdef TABLES_NEXT_TO_CODE
-    StgCode         code[FLEXIBLE_ARRAY];
+    StgCode         code[];
 #endif
-} *StgInfoTablePtr;
+} *StgInfoTablePtr; // StgInfoTable defined in rts/Types.h
 
 
 /* -----------------------------------------------------------------------------
@@ -343,9 +344,10 @@ typedef struct StgConInfoTable_ {
  * info must be a StgConInfoTable*.
  */
 #ifdef TABLES_NEXT_TO_CODE
-#define GET_CON_DESC(info) ((char *)((StgWord)((info)+1) + (info->con_desc)))
+#define GET_CON_DESC(info) \
+            ((const char *)((StgWord)((info)+1) + (info->con_desc)))
 #else
-#define GET_CON_DESC(info) ((info)->con_desc)
+#define GET_CON_DESC(info) ((const char *)(info)->con_desc)
 #endif
 
 /*

@@ -164,6 +164,7 @@ import CmdLineParser
 import Constants
 import Panic
 import Util
+import UniqFM
 import Maybes
 import MonadUtils
 import qualified Pretty
@@ -240,8 +241,8 @@ import qualified GHC.LanguageExtensions as LangExt
 --
 --  * Adding the extension to GHC.LanguageExtensions
 --
---    The Extension type in libraries/ghc-boot/GHC/LanguageExtensions.hs is
---    the canonical list of language extensions known by GHC.
+--    The Extension type in libraries/ghc-boot-th/GHC/LanguageExtensions/Type.hs
+--    is the canonical list of language extensions known by GHC.
 --
 --  * Adding a flag to DynFlags.xFlags
 --
@@ -294,15 +295,19 @@ data DumpFlag
 
    -- debugging flags
    = Opt_D_dump_cmm
+   | Opt_D_dump_cmm_from_stg
    | Opt_D_dump_cmm_raw
-   -- All of the cmm subflags (there are a lot!)  Automatically
-   -- enabled if you run -ddump-cmm
+   | Opt_D_dump_cmm_verbose
+   -- All of the cmm subflags (there are a lot!) automatically
+   -- enabled if you run -ddump-cmm-verbose
+   -- Each flag corresponds to exact stage of Cmm pipeline.
    | Opt_D_dump_cmm_cfg
    | Opt_D_dump_cmm_cbe
    | Opt_D_dump_cmm_switch
    | Opt_D_dump_cmm_proc
-   | Opt_D_dump_cmm_sink
    | Opt_D_dump_cmm_sp
+   | Opt_D_dump_cmm_sink
+   | Opt_D_dump_cmm_caf
    | Opt_D_dump_cmm_procmap
    | Opt_D_dump_cmm_split
    | Opt_D_dump_cmm_info
@@ -388,6 +393,7 @@ data GeneralFlag
    | Opt_PrintExplicitForalls
    | Opt_PrintExplicitKinds
    | Opt_PrintExplicitCoercions
+   | Opt_PrintExplicitRuntimeReps
    | Opt_PrintEqualityRelations
    | Opt_PrintUnicodeSyntax
    | Opt_PrintExpandedSynonyms
@@ -429,7 +435,6 @@ data GeneralFlag
    | Opt_CmmSink
    | Opt_CmmElimCommonBlocks
    | Opt_OmitYields
-   | Opt_SimpleListLiterals
    | Opt_FunToThunk               -- allow WwLib.mkWorkerArgs to remove all value lambdas
    | Opt_DictsStrict                     -- be strict in argument dictionaries
    | Opt_DmdTxDictSel              -- use a special demand transformer for dictionary selectors
@@ -507,6 +512,8 @@ data GeneralFlag
    | Opt_Hpc
    | Opt_FlatCache
    | Opt_ExternalInterpreter
+   | Opt_OptimalApplicativeDo
+   | Opt_VersionMacros
 
    -- PreInlining is on by default. The option is there just to see how
    -- bad things get if you turn it off!
@@ -548,6 +555,8 @@ data GeneralFlag
    | Opt_KeepTmpFiles
    | Opt_KeepRawTokenStream
    | Opt_KeepLlvmFiles
+   | Opt_KeepHiFiles
+   | Opt_KeepOFiles
 
    | Opt_BuildDynamicToo
 
@@ -625,6 +634,7 @@ data WarningFlag =
    | Opt_WarnNonCanonicalMonoidInstances  -- since 8.0
    | Opt_WarnMissingPatternSynonymSignatures -- since 8.0
    | Opt_WarnUnrecognisedWarningFlags     -- since 8.0
+   | Opt_WarnSimplifiableClassConstraints -- Since 8.2
    deriving (Eq, Show, Enum)
 
 data Language = Haskell98 | Haskell2010
@@ -650,10 +660,10 @@ instance Show SafeHaskellMode where
 instance Outputable SafeHaskellMode where
     ppr = text . show
 
-type SigOf = Map ModuleName Module
+type SigOf = ModuleNameEnv Module
 
 getSigOf :: DynFlags -> ModuleName -> Maybe Module
-getSigOf dflags n = Map.lookup n (sigOf dflags)
+getSigOf dflags n = lookupUFM (sigOf dflags) n
 
 -- | Contains not only a collection of 'GeneralFlag's but also a plethora of
 -- information relating to the compilation of a single file or GHC session
@@ -682,6 +692,8 @@ data DynFlags = DynFlags {
 
   maxRelevantBinds      :: Maybe Int,   -- ^ Maximum number of bindings from the type envt
                                         --   to show in type error messages
+  maxUncoveredPatterns  :: Int,         -- ^ Maximum number of unmatched patterns to show
+                                        --   in non-exhaustiveness warnings
   simplTickFactor       :: Int,         -- ^ Multiplier for simplifier ticks
   specConstrThreshold   :: Maybe Int,   -- ^ Threshold for SpecConstr
   specConstrCount       :: Maybe Int,   -- ^ Max number of specialisations for any one function
@@ -697,7 +709,7 @@ data DynFlags = DynFlags {
   lateFloatCloGrowth    :: Maybe Int,   -- ^ Limit on # additional free variables for closures in which the function occurs
   lateFloatCloGrowthInLam :: Maybe Int,
 
-  historySize           :: Int,
+  historySize           :: Int,         -- ^ Simplification history size
 
   importPaths           :: [FilePath],
   mainModIs             :: Module,
@@ -1074,9 +1086,10 @@ opt_i dflags = sOpt_i (settings dflags)
 -- | The directory for this version of ghc in the user's app directory
 -- (typically something like @~/.ghc/x86_64-linux-7.6.3@)
 --
-versionedAppDir :: DynFlags -> IO FilePath
+versionedAppDir :: DynFlags -> MaybeT IO FilePath
 versionedAppDir dflags = do
-  appdir <- getAppUserDataDirectory (programName dflags)
+  -- Make sure we handle the case the HOME isn't set (see #11678)
+  appdir <- tryMaybeT $ getAppUserDataDirectory (programName dflags)
   return $ appdir </> versionedFilePath dflags
 
 -- | A filepath like @x86_64-linux-7.6.3@ with the platform string to use when
@@ -1283,6 +1296,7 @@ allowed_combination way = and [ x `allowedWith` y
         (WayCustom {}) `allowedWith` _          = True
         WayThreaded `allowedWith` WayProf       = True
         WayThreaded `allowedWith` WayEventLog   = True
+        WayProf     `allowedWith` WayEventLog   = True
         _ `allowedWith` _                       = False
 
 mkBuildTag :: [Way] -> String
@@ -1462,15 +1476,16 @@ defaultDynFlags mySettings =
         ghcMode                 = CompManager,
         ghcLink                 = LinkBinary,
         hscTarget               = defaultHscTarget (sTargetPlatform mySettings),
-        sigOf                   = Map.empty,
+        sigOf                   = emptyUFM,
         verbosity               = 0,
         optLevel                = 0,
         debugLevel              = 0,
         simplPhases             = 2,
         maxSimplIterations      = 4,
-        maxPmCheckIterations    = 10000000,
+        maxPmCheckIterations    = 2000000,
         ruleCheck               = Nothing,
         maxRelevantBinds        = Just 6,
+        maxUncoveredPatterns    = 4,
         simplTickFactor         = 100,
         specConstrThreshold     = Just 2000,
         specConstrCount         = Just 3,
@@ -2018,7 +2033,7 @@ parseSigOf :: String -> SigOf
 parseSigOf str = case filter ((=="").snd) (readP_to_S parse str) of
     [(r, "")] -> r
     _ -> throwGhcException $ CmdLineError ("Can't parse -sig-of: " ++ str)
-  where parse = Map.fromList <$> sepBy parseEntry (R.char ',')
+  where parse = listToUFM <$> sepBy parseEntry (R.char ',')
         parseEntry = do
             n <- tok $ parseModuleName
             -- ToDo: deprecate this 'is' syntax?
@@ -2539,6 +2554,22 @@ dynamic_flags_deps = [
      -- This only makes sense as plural
   , make_ord_flag defGhcFlag "keep-tmp-files"
         (NoArg (setGeneralFlag Opt_KeepTmpFiles))
+  , make_ord_flag defGhcFlag "keep-hi-file"
+        (NoArg (setGeneralFlag Opt_KeepHiFiles))
+  , make_ord_flag defGhcFlag "no-keep-hi-file"
+        (NoArg (unSetGeneralFlag Opt_KeepHiFiles))
+  , make_ord_flag defGhcFlag "keep-hi-files"
+        (NoArg (setGeneralFlag Opt_KeepHiFiles))
+  , make_ord_flag defGhcFlag "no-keep-hi-files"
+        (NoArg (unSetGeneralFlag Opt_KeepHiFiles))
+  , make_ord_flag defGhcFlag "keep-o-file"
+        (NoArg (setGeneralFlag Opt_KeepOFiles))
+  , make_ord_flag defGhcFlag "no-keep-o-file"
+        (NoArg (unSetGeneralFlag Opt_KeepOFiles))
+  , make_ord_flag defGhcFlag "keep-o-files"
+        (NoArg (setGeneralFlag Opt_KeepOFiles))
+  , make_ord_flag defGhcFlag "no-keep-o-files"
+        (NoArg (unSetGeneralFlag Opt_KeepOFiles))
 
         ------- Miscellaneous ----------------------------------------------
   , make_ord_flag defGhcFlag "no-auto-link-packages"
@@ -2615,8 +2646,12 @@ dynamic_flags_deps = [
 
   , make_ord_flag defGhcFlag "ddump-cmm"
         (setDumpFlag Opt_D_dump_cmm)
+  , make_ord_flag defGhcFlag "ddump-cmm-from-stg"
+        (setDumpFlag Opt_D_dump_cmm_from_stg)
   , make_ord_flag defGhcFlag "ddump-cmm-raw"
         (setDumpFlag Opt_D_dump_cmm_raw)
+  , make_ord_flag defGhcFlag "ddump-cmm-verbose"
+        (setDumpFlag Opt_D_dump_cmm_verbose)
   , make_ord_flag defGhcFlag "ddump-cmm-cfg"
         (setDumpFlag Opt_D_dump_cmm_cfg)
   , make_ord_flag defGhcFlag "ddump-cmm-cbe"
@@ -2625,10 +2660,12 @@ dynamic_flags_deps = [
         (setDumpFlag Opt_D_dump_cmm_switch)
   , make_ord_flag defGhcFlag "ddump-cmm-proc"
         (setDumpFlag Opt_D_dump_cmm_proc)
-  , make_ord_flag defGhcFlag "ddump-cmm-sink"
-        (setDumpFlag Opt_D_dump_cmm_sink)
   , make_ord_flag defGhcFlag "ddump-cmm-sp"
         (setDumpFlag Opt_D_dump_cmm_sp)
+  , make_ord_flag defGhcFlag "ddump-cmm-sink"
+        (setDumpFlag Opt_D_dump_cmm_sink)
+  , make_ord_flag defGhcFlag "ddump-cmm-caf"
+        (setDumpFlag Opt_D_dump_cmm_caf)
   , make_ord_flag defGhcFlag "ddump-cmm-procmap"
         (setDumpFlag Opt_D_dump_cmm_procmap)
   , make_ord_flag defGhcFlag "ddump-cmm-split"
@@ -2854,6 +2891,8 @@ dynamic_flags_deps = [
       (intSuffix (\n d -> d { maxRelevantBinds = Just n }))
   , make_ord_flag defFlag "fno-max-relevant-binds"
       (noArg (\d -> d { maxRelevantBinds = Nothing }))
+  , make_ord_flag defFlag "fmax-uncovered-patterns"
+      (intSuffix (\n d -> d { maxUncoveredPatterns = n }))
   , make_ord_flag defFlag "fsimplifier-phases"
       (intSuffix (\n d -> d { simplPhases = n }))
   , make_ord_flag defFlag "fmax-simplifier-iterations"
@@ -2956,18 +2995,24 @@ dynamic_flags_deps = [
         ------ Profiling ----------------------------------------------------
 
         -- OLD profiling flags
-  , make_ord_flag defGhcFlag "auto-all"    (noArg (\d ->
-                                                 d { profAuto = ProfAutoAll } ))
-  , make_ord_flag defGhcFlag "no-auto-all" (noArg (\d ->
-                                                  d { profAuto = NoProfAuto } ))
-  , make_ord_flag defGhcFlag "auto"        (noArg (\d ->
-                                             d { profAuto = ProfAutoExports } ))
-  , make_ord_flag defGhcFlag "no-auto"     (noArg (\d ->
-                                                  d { profAuto = NoProfAuto } ))
-  , make_ord_flag defGhcFlag "caf-all"
-      (NoArg (setGeneralFlag Opt_AutoSccsOnIndividualCafs))
-  , make_ord_flag defGhcFlag "no-caf-all"
-      (NoArg (unSetGeneralFlag Opt_AutoSccsOnIndividualCafs))
+  , make_dep_flag defGhcFlag "auto-all"
+                    (noArg (\d -> d { profAuto = ProfAutoAll } ))
+                    "Use -fprof-auto instead"
+  , make_dep_flag defGhcFlag "no-auto-all"
+                    (noArg (\d -> d { profAuto = NoProfAuto } ))
+                    "Use -fno-prof-auto instead"
+  , make_dep_flag defGhcFlag "auto"
+                    (noArg (\d -> d { profAuto = ProfAutoExports } ))
+                    "Use -fprof-auto-exported instead"
+  , make_dep_flag defGhcFlag "no-auto"
+            (noArg (\d -> d { profAuto = NoProfAuto } ))
+                    "Use -fno-prof-auto instead"
+  , make_dep_flag defGhcFlag "caf-all"
+            (NoArg (setGeneralFlag Opt_AutoSccsOnIndividualCafs))
+                    "Use -fprof-cafs instead"
+  , make_dep_flag defGhcFlag "no-caf-all"
+            (NoArg (unSetGeneralFlag Opt_AutoSccsOnIndividualCafs))
+                    "Use -fno-prof-cafs instead"
 
         -- NEW profiling flags
   , make_ord_flag defGhcFlag "fprof-auto"
@@ -3029,9 +3074,9 @@ dynamic_flags_deps = [
     wWarningFlagsDeps
  ++ map (mkFlag turnOff "fno-warn-" unSetWarningFlag . hideFlag)
     wWarningFlagsDeps
- ++ [ (NotDeprecated, unrecognisedWarning "W")
-    , (NotDeprecated, unrecognisedWarning "fwarn-")
-    , (NotDeprecated, unrecognisedWarning "fno-warn-") ]
+ ++ [ (NotDeprecated, unrecognisedWarning "W"),
+      (Deprecated,    unrecognisedWarning "fwarn-"),
+      (Deprecated,    unrecognisedWarning "fno-warn-") ]
  ++ map (mkFlag turnOn  "f"         setExtensionFlag  ) fLangFlagsDeps
  ++ map (mkFlag turnOff "fno-"      unSetExtensionFlag) fLangFlagsDeps
  ++ map (mkFlag turnOn  "X"         setExtensionFlag  ) xFlagsDeps
@@ -3050,7 +3095,7 @@ dynamic_flags_deps = [
 -- | This is where we handle unrecognised warning flags. We only issue a warning
 -- if -Wunrecognised-warning-flags is set. See Trac #11429 for context.
 unrecognisedWarning :: String -> Flag (CmdLineP DynFlags)
-unrecognisedWarning prefix = defFlag prefix (Prefix action)
+unrecognisedWarning prefix = defHiddenFlag prefix (Prefix action)
   where
     action :: String -> EwM (CmdLineP DynFlags) ()
     action flag = do
@@ -3331,6 +3376,7 @@ wWarningFlagsDeps = [
   flagSpec "wrong-do-bind"               Opt_WarnWrongDoBind,
   flagSpec "missing-pattern-synonym-signatures"
                                     Opt_WarnMissingPatternSynonymSignatures,
+  flagSpec "simplifiable-class-constraints" Opt_WarnSimplifiableClassConstraints,
   flagSpec "unrecognised-warning-flags"  Opt_WarnUnrecognisedWarningFlags ]
 
 -- | These @-\<blah\>@ flags can all be reversed with @-no-\<blah\>@
@@ -3411,6 +3457,7 @@ fFlagsDeps = [
   flagSpec "loopification"                    Opt_Loopification,
   flagSpec "omit-interface-pragmas"           Opt_OmitInterfacePragmas,
   flagSpec "omit-yields"                      Opt_OmitYields,
+  flagSpec "optimal-applicative-do"           Opt_OptimalApplicativeDo,
   flagSpec "pedantic-bottoms"                 Opt_PedanticBottoms,
   flagSpec "pre-inlining"                     Opt_SimplPreInlining,
   flagGhciSpec "print-bind-contents"          Opt_PrintBindContents,
@@ -3419,6 +3466,7 @@ fFlagsDeps = [
   flagSpec "print-explicit-foralls"           Opt_PrintExplicitForalls,
   flagSpec "print-explicit-kinds"             Opt_PrintExplicitKinds,
   flagSpec "print-explicit-coercions"         Opt_PrintExplicitCoercions,
+  flagSpec "print-explicit-runtime-reps"      Opt_PrintExplicitRuntimeReps,
   flagSpec "print-equality-relations"         Opt_PrintEqualityRelations,
   flagSpec "print-unicode-syntax"             Opt_PrintUnicodeSyntax,
   flagSpec "print-expanded-synonyms"          Opt_PrintExpandedSynonyms,
@@ -3431,7 +3479,6 @@ fFlagsDeps = [
   depFlagSpec' "rewrite-rules"                Opt_EnableRewriteRules
     (useInstead "enable-rewrite-rules"),
   flagSpec "shared-implib"                    Opt_SharedImplib,
-  flagSpec "simple-list-literals"             Opt_SimpleListLiterals,
   flagSpec "spec-constr"                      Opt_SpecConstr,
   flagSpec "specialise"                       Opt_Specialise,
   flagSpec "specialise-aggressively"          Opt_SpecialiseAggressively,
@@ -3444,6 +3491,7 @@ fFlagsDeps = [
   flagSpec "unbox-strict-fields"              Opt_UnboxStrictFields,
   flagSpec "vectorisation-avoidance"          Opt_VectorisationAvoidance,
   flagSpec "vectorise"                        Opt_Vectorise,
+  flagSpec "version-macros"                   Opt_VersionMacros,
   flagSpec "worker-wrapper"                   Opt_WorkerWrapper,
   flagSpec "show-warning-groups"              Opt_ShowWarnGroups,
   flagSpec "float-joins-only-to-top"          Opt_FloatJoinsOnlyToTop,
@@ -3679,6 +3727,7 @@ xFlagsDeps = [
   flagSpec "TypeOperators"                    LangExt.TypeOperators,
   flagSpec "TypeSynonymInstances"             LangExt.TypeSynonymInstances,
   flagSpec "UnboxedTuples"                    LangExt.UnboxedTuples,
+  flagSpec "UnboxedSums"                      LangExt.UnboxedSums,
   flagSpec "UndecidableInstances"             LangExt.UndecidableInstances,
   flagSpec "UndecidableSuperClasses"          LangExt.UndecidableSuperClasses,
   flagSpec "UnicodeSyntax"                    LangExt.UnicodeSyntax,
@@ -3696,12 +3745,15 @@ defaultFlags settings
       Opt_GhciHistory,
       Opt_GhciSandbox,
       Opt_HelpfulErrors,
+      Opt_KeepHiFiles,
+      Opt_KeepOFiles,
       Opt_OmitYields,
       Opt_PrintBindContents,
       Opt_ProfCountEntries,
       Opt_RPath,
       Opt_SharedImplib,
-      Opt_SimplPreInlining
+      Opt_SimplPreInlining,
+      Opt_VersionMacros
     ]
 
     ++ [f | (ns,f) <- optLevelFlags, 0 `elem` ns]
@@ -3789,7 +3841,6 @@ impliedXFlags
 
     , (LangExt.TemplateHaskell, turnOn, LangExt.TemplateHaskellQuotes)
     , (LangExt.Strict, turnOn, LangExt.StrictData)
-    , (LangExt.TypeApplications, turnOn, LangExt.AllowAmbiguousTypes)
   ]
 
 -- Note [Documenting optimisation flags]
@@ -3941,7 +3992,8 @@ standardWarnings -- see Note [Documenting warning flags]
         Opt_WarnAlternativeLayoutRuleTransitional,
         Opt_WarnUnsupportedLlvmVersion,
         Opt_WarnTabs,
-        Opt_WarnUnrecognisedWarningFlags
+        Opt_WarnUnrecognisedWarningFlags,
+        Opt_WarnSimplifiableClassConstraints
       ]
 
 -- | Things you get with -W
@@ -4418,7 +4470,7 @@ interpretPackageEnv dflags = do
 
     namedEnvPath :: String -> MaybeT IO FilePath
     namedEnvPath name = do
-     appdir <- liftMaybeT $ versionedAppDir dflags
+     appdir <- versionedAppDir dflags
      return $ appdir </> "environments" </> name
 
     probeEnvName :: String -> MaybeT IO FilePath
@@ -4478,7 +4530,7 @@ interpretPackageEnv dflags = do
     findLocalEnvFile :: MaybeT IO FilePath
     findLocalEnvFile = do
         curdir  <- liftMaybeT getCurrentDirectory
-        homedir <- liftMaybeT getHomeDirectory
+        homedir <- tryMaybeT getHomeDirectory
         let probe dir | isDrive dir || dir == homedir
                       = mzero
             probe dir = do
@@ -4917,7 +4969,15 @@ makeDynFlagsConsistent dflags
 -- Do not use it if you can help it. You may get the wrong value, or this
 -- panic!
 
-GLOBAL_VAR(v_unsafeGlobalDynFlags, panic "v_unsafeGlobalDynFlags: not initialised", DynFlags)
+-- | This is the value that 'unsafeGlobalDynFlags' takes before it is
+-- initialized.
+defaultGlobalDynFlags :: DynFlags
+defaultGlobalDynFlags =
+    (defaultDynFlags settings) { verbosity = 2 }
+  where
+    settings = panic "v_unsafeGlobalDynFlags: not initialised"
+
+GLOBAL_VAR(v_unsafeGlobalDynFlags, defaultGlobalDynFlags, DynFlags)
 
 unsafeGlobalDynFlags :: DynFlags
 unsafeGlobalDynFlags = unsafePerformIO $ readIORef v_unsafeGlobalDynFlags

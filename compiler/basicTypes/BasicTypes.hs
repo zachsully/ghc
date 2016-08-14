@@ -19,7 +19,7 @@ types that
 module BasicTypes(
         Version, bumpVersion, initialVersion,
 
-        ConTag, fIRST_TAG,
+        ConTag, ConTagZ, fIRST_TAG,
 
         Arity, RepArity,
 
@@ -42,12 +42,14 @@ module BasicTypes(
         TopLevelFlag(..), isTopLevel, isNotTopLevel,
 
         OverlapFlag(..), OverlapMode(..), setOverlapModeMaybe,
-        hasOverlappingFlag, hasOverlappableFlag,
+        hasOverlappingFlag, hasOverlappableFlag, hasIncoherentFlag,
 
         Boxity(..), isBoxed,
 
         TupleSort(..), tupleSortBoxity, boxityTupleSort,
         tupleParens,
+
+        sumParens, pprAlternative,
 
         -- ** The OneShotInfo type
         OneShotInfo(..),
@@ -110,6 +112,7 @@ import Data.Function (on)
 -- "real work". So:
 --  fib 100     has arity 0
 --  \x -> fib x has arity 1
+-- See also Note [Definition of arity] in CoreArity
 type Arity = Int
 
 -- | The number of represented arguments that can be applied to a value before it does
@@ -130,6 +133,9 @@ type RepArity = Int
 -- | Type of the tags associated with each constructor possibility
 --   or superclass selector
 type ConTag = Int
+
+-- | A *zero-indexed* constructor tag
+type ConTagZ = Int
 
 fIRST_TAG :: ConTag
 -- ^ Tags are allocated from here for real constructors
@@ -235,7 +241,7 @@ unSwap IsSwapped  f a b = f b a
 -}
 
 data FunctionOrData = IsFunction | IsData
-    deriving (Eq, Ord, Data, Typeable)
+    deriving (Eq, Ord, Data)
 
 instance Outputable FunctionOrData where
     ppr IsFunction = text "(function)"
@@ -271,7 +277,7 @@ data StringLiteral = StringLiteral
                        { sl_st :: SourceText, -- literal raw source.
                                               -- See not [Literal source text]
                          sl_fs :: FastString  -- literal string value
-                       } deriving (Data, Typeable)
+                       } deriving Data
 
 instance Eq StringLiteral where
   (StringLiteral _ a) == (StringLiteral _ b) = a == b
@@ -281,7 +287,7 @@ data WarningTxt = WarningTxt (Located SourceText)
                              [Located StringLiteral]
                 | DeprecatedTxt (Located SourceText)
                                 [Located StringLiteral]
-    deriving (Eq, Data, Typeable)
+    deriving (Eq, Data)
 
 instance Outputable WarningTxt where
     ppr (WarningTxt    _ ws)
@@ -314,7 +320,7 @@ pprRuleName rn = doubleQuotes (ftext rn)
 ------------------------
 data Fixity = Fixity SourceText Int FixityDirection
   -- Note [Pragma source text]
-  deriving (Data, Typeable)
+  deriving Data
 
 instance Outputable Fixity where
     ppr (Fixity _ prec dir) = hcat [ppr dir, space, int prec]
@@ -324,7 +330,7 @@ instance Eq Fixity where -- Used to determine if two fixities conflict
 
 ------------------------
 data FixityDirection = InfixL | InfixR | InfixN
-                     deriving (Eq, Data, Typeable)
+                     deriving (Eq, Data)
 
 instance Outputable FixityDirection where
     ppr InfixL = text "infixl"
@@ -405,7 +411,7 @@ instance Outputable TopLevelFlag where
 data Boxity
   = Boxed
   | Unboxed
-  deriving( Eq, Data, Typeable )
+  deriving( Eq, Data )
 
 isBoxed :: Boxity -> Bool
 isBoxed Boxed   = True
@@ -425,7 +431,7 @@ instance Outputable Boxity where
 
 data RecFlag = Recursive
              | NonRecursive
-             deriving( Eq, Data, Typeable )
+             deriving( Eq, Data )
 
 isRec :: RecFlag -> Bool
 isRec Recursive    = True
@@ -453,7 +459,7 @@ instance Outputable RecFlag where
 
 data Origin = FromSource
             | Generated
-            deriving( Eq, Data, Typeable )
+            deriving( Eq, Data )
 
 isGenerated :: Origin -> Bool
 isGenerated Generated = True
@@ -486,11 +492,17 @@ instance Outputable Origin where
 data OverlapFlag = OverlapFlag
   { overlapMode   :: OverlapMode
   , isSafeOverlap :: Bool
-  } deriving (Eq, Data, Typeable)
+  } deriving (Eq, Data)
 
 setOverlapModeMaybe :: OverlapFlag -> Maybe OverlapMode -> OverlapFlag
 setOverlapModeMaybe f Nothing  = f
 setOverlapModeMaybe f (Just m) = f { overlapMode = m }
+
+hasIncoherentFlag :: OverlapMode -> Bool
+hasIncoherentFlag mode =
+  case mode of
+    Incoherent   _ -> True
+    _              -> False
 
 hasOverlappableFlag :: OverlapMode -> Bool
 hasOverlappableFlag mode =
@@ -562,7 +574,7 @@ data OverlapMode  -- See Note [Rules for instance lookup] in InstEnv
     -- instantiating 'b' would change which instance
     -- was chosen. See also note [Incoherent instances] in InstEnv
 
-  deriving (Eq, Data, Typeable)
+  deriving (Eq, Data)
 
 
 instance Outputable OverlapFlag where
@@ -591,7 +603,7 @@ data TupleSort
   = BoxedTuple
   | UnboxedTuple
   | ConstraintTuple
-  deriving( Eq, Data, Typeable )
+  deriving( Eq, Data )
 
 tupleSortBoxity :: TupleSort -> Boxity
 tupleSortBoxity BoxedTuple      = Boxed
@@ -608,6 +620,27 @@ tupleParens UnboxedTuple    p = text "(#" <+> p <+> ptext (sLit "#)")
 tupleParens ConstraintTuple p   -- In debug-style write (% Eq a, Ord b %)
   | opt_PprStyle_Debug        = text "(%" <+> p <+> ptext (sLit "%)")
   | otherwise                 = parens p
+
+{-
+************************************************************************
+*                                                                      *
+                Sums
+*                                                                      *
+************************************************************************
+-}
+
+sumParens :: SDoc -> SDoc
+sumParens p = ptext (sLit "(#") <+> p <+> ptext (sLit "#)")
+
+-- | Pretty print an alternative in an unboxed sum e.g. "| a | |".
+pprAlternative :: (a -> SDoc) -- ^ The pretty printing function to use
+               -> a           -- ^ The things to be pretty printed
+               -> ConTag      -- ^ Alternative (one-based)
+               -> Arity       -- ^ Arity
+               -> SDoc        -- ^ 'SDoc' where the alternative havs been pretty
+                              -- printed and finally packed into a paragraph.
+pprAlternative pp x alt arity =
+    fsep (replicate (alt - 1) vbar ++ [pp x] ++ replicate (arity - alt - 1) vbar)
 
 {-
 ************************************************************************
@@ -897,12 +930,12 @@ data Activation = NeverActive
                   -- Active only *strictly before* this phase
                 | ActiveAfter SourceText PhaseNum
                   -- Active in this phase and later
-                deriving( Eq, Data, Typeable )
+                deriving( Eq, Data )
                   -- Eq used in comparing rules in HsDecls
 
 data RuleMatchInfo = ConLike                    -- See Note [CONLIKE pragma]
                    | FunLike
-                   deriving( Eq, Data, Typeable, Show )
+                   deriving( Eq, Data, Show )
         -- Show needed for Lexer.x
 
 data InlinePragma            -- Note [InlinePragma]
@@ -920,7 +953,7 @@ data InlinePragma            -- Note [InlinePragma]
       , inl_act    :: Activation     -- Says during which phases inlining is allowed
 
       , inl_rule   :: RuleMatchInfo  -- Should the function be treated like a constructor?
-    } deriving( Eq, Data, Typeable )
+    } deriving( Eq, Data )
 
 data InlineSpec   -- What the user's INLINE pragma looked like
   = Inline
@@ -928,7 +961,7 @@ data InlineSpec   -- What the user's INLINE pragma looked like
   | NoInline
   | EmptyInlineSpec  -- Used in a place-holder InlinePragma in SpecPrag or IdInfo,
                      -- where there isn't any real inline pragma at all
-  deriving( Eq, Data, Typeable, Show )
+  deriving( Eq, Data, Show )
         -- Show needed for Lexer.x
 
 {-
@@ -986,11 +1019,11 @@ The main effects of CONLIKE are:
 
 isConLike :: RuleMatchInfo -> Bool
 isConLike ConLike = True
-isConLike _            = False
+isConLike _       = False
 
 isFunLike :: RuleMatchInfo -> Bool
 isFunLike FunLike = True
-isFunLike _            = False
+isFunLike _       = False
 
 isEmptyInlineSpec :: InlineSpec -> Bool
 isEmptyInlineSpec EmptyInlineSpec = True
@@ -1145,7 +1178,7 @@ data FractionalLit
   = FL { fl_text :: String         -- How the value was written in the source
        , fl_value :: Rational      -- Numeric value of the literal
        }
-  deriving (Data, Typeable, Show)
+  deriving (Data, Show)
   -- The Show instance is required for the derived Lexer.x:Token instance when DEBUG is on
 
 negateFractionalLit :: FractionalLit -> FractionalLit

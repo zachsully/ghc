@@ -66,7 +66,8 @@ pprStats code statss
 
         spillTotals     = foldl' (zipWith (+))
                                 [0, 0, 0, 0, 0]
-                        $ eltsUFM spills
+                        $ nonDetEltsUFM spills
+                        -- See Note [Unique Determinism and code generation]
 
         -- count how many reg-reg-moves remain in the code
         moves           = sum $ map countRegRegMovesNat code
@@ -80,7 +81,6 @@ pprStats code statss
         $$ text ""
         $$ text "-- spills-added"
         $$ text "--    (reg_name, allocs, clobbers, loads, joinRR, joinRM)"
-        $$ (vcat $ map pprSpill
-                 $ ufmToList spills)
+        $$ (pprUFMWithKeys spills (vcat . map pprSpill))
         $$ text "")
 

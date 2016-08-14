@@ -106,6 +106,8 @@ import Maybes
 import Binary
 import Fingerprint
 import Exception
+import UniqFM
+import UniqDFM
 
 import Control.Monad
 import Data.Function
@@ -322,11 +324,11 @@ mkIface_ hsc_env maybe_old_fingerprint
                                , vectInfoParallelTyCons = vParallelTyCons
                                }) =
        IfaceVectInfo
-       { ifaceVectInfoVar            = [Var.varName v | (v, _  ) <- varEnvElts  vVar]
+       { ifaceVectInfoVar            = [Var.varName v | (v, _  ) <- dVarEnvElts vVar]
        , ifaceVectInfoTyCon          = [tyConName t   | (t, t_v) <- nameEnvElts vTyCon, t /= t_v]
        , ifaceVectInfoTyConReuse     = [tyConName t   | (t, t_v) <- nameEnvElts vTyCon, t == t_v]
-       , ifaceVectInfoParallelVars   = [Var.varName v | v <- varSetElems vParallelVars]
-       , ifaceVectInfoParallelTyCons = nameSetElems vParallelTyCons
+       , ifaceVectInfoParallelVars   = [Var.varName v | v <- dVarSetElems vParallelVars]
+       , ifaceVectInfoParallelTyCons = nameSetElemsStable vParallelTyCons
        }
 
 -----------------------------
@@ -396,7 +398,12 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
        name_module n = ASSERT2( isExternalName n, ppr n ) nameModule n
        localOccs = map (getUnique . getParent . getOccName)
                         . filter ((== this_mod) . name_module)
-                        . nameSetElems
+                        . nonDetEltsUFM
+                   -- It's OK to use nonDetEltsUFM as localOccs is only
+                   -- used to construct the edges and
+                   -- stronglyConnCompFromEdgedVertices is deterministic
+                   -- even with non-deterministic order of edges as
+                   -- explained in Note [Deterministic SCC] in Digraph.
           where getParent occ = lookupOccEnv parent_map occ `orElse` occ
 
         -- maps OccNames to their parents in the current module.
@@ -409,7 +416,7 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
                   where n = ifName d
 
         -- strongly-connected groups of declarations, in dependency order
-       groups = stronglyConnCompFromEdgedVertices edges
+       groups = stronglyConnCompFromEdgedVerticesUniq edges
 
        global_hash_fn = mkHashFun hsc_env eps
 
@@ -1049,14 +1056,14 @@ checkVersions hsc_env mod_summary iface
        -- We do this regardless of compilation mode, although in --make mode
        -- all the dependent modules should be in the HPT already, so it's
        -- quite redundant
-       ; updateEps_ $ \eps  -> eps { eps_is_boot = mod_deps }
+       ; updateEps_ $ \eps  -> eps { eps_is_boot = udfmToUfm mod_deps }
        ; recomp <- checkList [checkModUsage this_pkg u | u <- mi_usages iface]
        ; return (recomp, Just iface)
     }}}}
   where
     this_pkg = thisPackage (hsc_dflags hsc_env)
     -- This is a bit of a hack really
-    mod_deps :: ModuleNameEnv (ModuleName, IsBootInterface)
+    mod_deps :: DModuleNameEnv (ModuleName, IsBootInterface)
     mod_deps = mkModDeps (dep_mods (mi_deps iface))
 
 -- | Check the flags haven't changed
@@ -1304,8 +1311,8 @@ patSynToIfaceDecl ps
                 , ifPatMatcher    = to_if_pr (patSynMatcher ps)
                 , ifPatBuilder    = fmap to_if_pr (patSynBuilder ps)
                 , ifPatIsInfix    = patSynIsInfix ps
-                , ifPatUnivTvs    = toIfaceTvBndrs univ_tvs'
-                , ifPatExTvs      = toIfaceTvBndrs ex_tvs'
+                , ifPatUnivBndrs  = map toIfaceForAllBndr univ_bndrs'
+                , ifPatExBndrs    = map toIfaceForAllBndr ex_bndrs'
                 , ifPatProvCtxt   = tidyToIfaceContext env2 prov_theta
                 , ifPatReqCtxt    = tidyToIfaceContext env2 req_theta
                 , ifPatArgs       = map (tidyToIfaceType env2) args
@@ -1313,9 +1320,11 @@ patSynToIfaceDecl ps
                 , ifFieldLabels   = (patSynFieldLabels ps)
                 }
   where
-    (univ_tvs, req_theta, ex_tvs, prov_theta, args, rhs_ty) = patSynSig ps
-    (env1, univ_tvs') = tidyTyCoVarBndrs emptyTidyEnv univ_tvs
-    (env2, ex_tvs')   = tidyTyCoVarBndrs env1 ex_tvs
+    (_univ_tvs, req_theta, _ex_tvs, prov_theta, args, rhs_ty) = patSynSig ps
+    univ_bndrs = patSynUnivTyVarBinders ps
+    ex_bndrs   = patSynExTyVarBinders ps
+    (env1, univ_bndrs') = tidyTyVarBinders emptyTidyEnv univ_bndrs
+    (env2, ex_bndrs')   = tidyTyVarBinders env1 ex_bndrs
     to_if_pr (id, needs_dummy) = (idName id, needs_dummy)
 
 --------------------------
@@ -1352,15 +1361,14 @@ coAxBranchToIfaceBranch' :: TyCon -> CoAxBranch -> IfaceAxBranch
 coAxBranchToIfaceBranch' tc (CoAxBranch { cab_tvs = tvs, cab_cvs = cvs
                                         , cab_lhs = lhs
                                         , cab_roles = roles, cab_rhs = rhs })
-  = IfaceAxBranch { ifaxbTyVars  = toIfaceTvBndrs tv_bndrs
+  = IfaceAxBranch { ifaxbTyVars  = toIfaceTvBndrs tidy_tvs
                   , ifaxbCoVars  = map toIfaceIdBndr cvs
                   , ifaxbLHS     = tidyToIfaceTcArgs env1 tc lhs
                   , ifaxbRoles   = roles
                   , ifaxbRHS     = tidyToIfaceType env1 rhs
                   , ifaxbIncomps = [] }
   where
-
-    (env1, tv_bndrs) = tidyTyClTyCoVarBndrs emptyTidyEnv tvs
+    (env1, tidy_tvs) = tidyTyCoVarBndrs emptyTidyEnv tvs
     -- Don't re-bind in-scope tyvars
     -- See Note [CoAxBranch type variables] in CoAxiom
 
@@ -1401,39 +1409,33 @@ tyConToIfaceDecl env tycon
                   ifRoles   = tyConRoles tycon,
                   ifCtxt    = tidyToIfaceContext tc_env1 (tyConStupidTheta tycon),
                   ifCons    = ifaceConDecls (algTyConRhs tycon) (algTcFields tycon),
-                  ifRec     = boolToRecFlag (isRecursiveTyCon tycon),
                   ifGadtSyntax = isGadtSyntaxTyCon tycon,
                   ifParent  = parent })
 
   | otherwise  -- FunTyCon, PrimTyCon, promoted TyCon/DataCon
-  -- For pretty printing purposes only.
+  -- We only convert these TyCons to IfaceTyCons when we are
+  -- just about to pretty-print them, not because we are going
+  -- to put them into interface files
   = ( env
     , IfaceData { ifName       = getOccName tycon,
-                  ifBinders    = if_degenerate_binders,
-                  ifResKind    = if_degenerate_res_kind,
-                    -- These don't have `tyConTyVars`, hence "degenerate"
+                  ifBinders    = if_binders,
+                  ifResKind    = if_res_kind,
                   ifCType      = Nothing,
                   ifRoles      = tyConRoles tycon,
                   ifCtxt       = [],
                   ifCons       = IfDataTyCon [] False [],
-                  ifRec        = boolToRecFlag False,
                   ifGadtSyntax = False,
                   ifParent     = IfNoParent })
   where
     -- NOTE: Not all TyCons have `tyConTyVars` field. Forcing this when `tycon`
     -- is one of these TyCons (FunTyCon, PrimTyCon, PromotedDataCon) will cause
     -- an error.
-    (tc_env1, tc_tyvars) = tidyTyClTyCoVarBndrs env (tyConTyVars tycon)
-    if_binders  = zipIfaceBinders tc_tyvars (tyConBinders tycon)
-    if_res_kind = tidyToIfaceType tc_env1 (tyConResKind tycon)
+    (tc_env1, tc_binders) = tidyTyConBinders env (tyConBinders tycon)
+    tc_tyvars      = binderVars tc_binders
+    if_binders     = toIfaceTyVarBinders tc_binders
+    if_res_kind    = tidyToIfaceType tc_env1 (tyConResKind tycon)
     if_syn_type ty = tidyToIfaceType tc_env1 ty
-    if_res_var     = getFS `fmap` tyConFamilyResVar_maybe tycon
-
-      -- use these when you don't have tyConTyVars
-    (degenerate_binders, degenerate_res_kind)
-      = splitPiTys (tidyType env (tyConKind tycon))
-    if_degenerate_binders  = toDegenerateBinders degenerate_binders
-    if_degenerate_res_kind = toIfaceType degenerate_res_kind
+    if_res_var     = getOccFS `fmap` tyConFamilyResVar_maybe tycon
 
     parent = case tyConFamInstSig_maybe tycon of
                Just (tc, ty, ax) -> IfDataInstance (coAxiomName ax)
@@ -1458,6 +1460,7 @@ tyConToIfaceDecl env tycon
     ifaceConDecls (NewTyCon { data_con = con })    flds = IfNewTyCon  (ifaceConDecl con) (ifaceOverloaded flds) (ifaceFields flds)
     ifaceConDecls (DataTyCon { data_cons = cons }) flds = IfDataTyCon (map ifaceConDecl cons) (ifaceOverloaded flds) (ifaceFields flds)
     ifaceConDecls (TupleTyCon { data_con = con })  _    = IfDataTyCon [ifaceConDecl con] False []
+    ifaceConDecls (SumTyCon { data_cons = cons })  flds = IfDataTyCon (map ifaceConDecl cons) (ifaceOverloaded flds) (ifaceFields flds)
     ifaceConDecls (AbstractTyCon distinct)         _    = IfAbstractTyCon distinct
         -- The AbstractTyCon case happens when a TyCon has been trimmed
         -- during tidying.
@@ -1470,7 +1473,7 @@ tyConToIfaceDecl env tycon
         = IfCon   { ifConOcc     = getOccName (dataConName data_con),
                     ifConInfix   = dataConIsInfix data_con,
                     ifConWrapper = isJust (dataConWrapId_maybe data_con),
-                    ifConExTvs   = toIfaceTvBndrs ex_tvs',
+                    ifConExTvs   = map toIfaceForAllBndr ex_bndrs',
                     ifConEqSpec  = map (to_eq_spec . eqSpecPair) eq_spec,
                     ifConCtxt    = tidyToIfaceContext con_env2 theta,
                     ifConArgTys  = map (tidyToIfaceType con_env2) arg_tys,
@@ -1481,8 +1484,9 @@ tyConToIfaceDecl env tycon
                     ifConSrcStricts = map toIfaceSrcBang
                                           (dataConSrcBangs data_con)}
         where
-          (univ_tvs, ex_tvs, eq_spec, theta, arg_tys, _)
+          (univ_tvs, _ex_tvs, eq_spec, theta, arg_tys, _)
             = dataConFullSig data_con
+          ex_bndrs = dataConExTyVarBinders data_con
 
           -- Tidy the univ_tvs of the data constructor to be identical
           -- to the tyConTyVars of the type constructor.  This means
@@ -1494,20 +1498,13 @@ tyConToIfaceDecl env tycon
           con_env1 = (fst tc_env1, mkVarEnv (zipEqual "ifaceConDecl" univ_tvs tc_tyvars))
                      -- A bit grimy, perhaps, but it's simple!
 
-          (con_env2, ex_tvs') = tidyTyCoVarBndrs con_env1 ex_tvs
-          to_eq_spec (tv,ty)  = (toIfaceTyVar (tidyTyVar con_env2 tv), tidyToIfaceType con_env2 ty)
+          (con_env2, ex_bndrs') = tidyTyVarBinders con_env1 ex_bndrs
+          to_eq_spec (tv,ty) = (tidyTyVar con_env2 tv, tidyToIfaceType con_env2 ty)
 
-    ifaceOverloaded flds = case fsEnvElts flds of
+    ifaceOverloaded flds = case dFsEnvElts flds of
                              fl:_ -> flIsOverloaded fl
                              []   -> False
-    ifaceFields flds = sort $ map flLabel $ fsEnvElts flds
-                       -- We need to sort the labels because they come out
-                       -- of FastStringEnv in arbitrary order, because
-                       -- FastStringEnv is keyed on Uniques.
-                       -- Sorting FastString is ok here, because Uniques
-                       -- are only used for equality checks in the Ord
-                       -- instance for FastString.
-                       -- See Note [Unique Determinism] in Unique.
+    ifaceFields flds = map flLabel $ dFsEnvElts flds
 
 toIfaceBang :: TidyEnv -> HsImplBang -> IfaceBang
 toIfaceBang _    HsLazy              = IfNoBang
@@ -1524,19 +1521,17 @@ classToIfaceDecl env clas
     , IfaceClass { ifCtxt   = tidyToIfaceContext env1 sc_theta,
                    ifName   = getOccName tycon,
                    ifRoles  = tyConRoles (classTyCon clas),
-                   ifBinders = binders,
+                   ifBinders = toIfaceTyVarBinders tc_binders,
                    ifFDs    = map toIfaceFD clas_fds,
                    ifATs    = map toIfaceAT clas_ats,
                    ifSigs   = map toIfaceClassOp op_stuff,
-                   ifMinDef = fmap getFS (classMinimalDef clas),
-                   ifRec    = boolToRecFlag (isRecursiveTyCon tycon) })
+                   ifMinDef = fmap getOccFS (classMinimalDef clas) })
   where
-    (clas_tyvars, clas_fds, sc_theta, _, clas_ats, op_stuff)
+    (_, clas_fds, sc_theta, _, clas_ats, op_stuff)
       = classExtraBigSig clas
     tycon = classTyCon clas
 
-    (env1, clas_tyvars') = tidyTyCoVarBndrs env clas_tyvars
-    binders = zipIfaceBinders clas_tyvars' (tyConBinders tycon)
+    (env1, tc_binders) = tidyTyConBinders env (tyConBinders tycon)
 
     toIfaceAT :: ClassATItem -> IfaceAT
     toIfaceAT (ATI tc def)
@@ -1545,7 +1540,7 @@ classToIfaceDecl env clas
         (env2, if_decl) = tyConToIfaceDecl env1 tc
 
     toIfaceClassOp (sel_id, def_meth)
-        = ASSERT(sel_tyvars == clas_tyvars)
+        = ASSERT( sel_tyvars == binderVars tc_binders )
           IfaceClassOp (getOccName sel_id)
                        (tidyToIfaceType env1 op_ty)
                        (fmap toDmSpec def_meth)
@@ -1562,8 +1557,8 @@ classToIfaceDecl env clas
     toDmSpec (_, VanillaDM)       = VanillaDM
     toDmSpec (_, GenericDM dm_ty) = GenericDM (tidyToIfaceType env1 dm_ty)
 
-    toIfaceFD (tvs1, tvs2) = (map (getFS . tidyTyVar env1) tvs1,
-                              map (getFS . tidyTyVar env1) tvs2)
+    toIfaceFD (tvs1, tvs2) = (map (tidyTyVar env1) tvs1
+                             ,map (tidyTyVar env1) tvs2)
 
 --------------------------
 tidyToIfaceType :: TidyEnv -> Type -> IfaceType
@@ -1575,23 +1570,26 @@ tidyToIfaceTcArgs env tc tys = toIfaceTcArgs tc (tidyTypes env tys)
 tidyToIfaceContext :: TidyEnv -> ThetaType -> IfaceContext
 tidyToIfaceContext env theta = map (tidyToIfaceType env) theta
 
-tidyTyClTyCoVarBndrs :: TidyEnv -> [TyCoVar] -> (TidyEnv, [TyCoVar])
-tidyTyClTyCoVarBndrs env tvs = mapAccumL tidyTyClTyCoVarBndr env tvs
+toIfaceTyVarBinder :: TyVarBndr TyVar vis -> TyVarBndr IfaceTvBndr vis
+toIfaceTyVarBinder (TvBndr tv vis) = TvBndr (toIfaceTvBndr tv) vis
 
-tidyTyClTyCoVarBndr :: TidyEnv -> TyCoVar -> (TidyEnv, TyCoVar)
+toIfaceTyVarBinders :: [TyVarBndr TyVar vis] -> [TyVarBndr IfaceTvBndr vis]
+toIfaceTyVarBinders = map toIfaceTyVarBinder
+
+tidyTyConBinder :: TidyEnv -> TyConBinder -> (TidyEnv, TyConBinder)
 -- If the type variable "binder" is in scope, don't re-bind it
 -- In a class decl, for example, the ATD binders mention
 -- (amd must mention) the class tyvars
-tidyTyClTyCoVarBndr env@(_, subst) tv
- | Just tv' <- lookupVarEnv subst tv = (env, tv')
- | otherwise                         = tidyTyCoVarBndr env tv
+tidyTyConBinder env@(_, subst) tvb@(TvBndr tv vis)
+ = case lookupVarEnv subst tv of
+     Just tv' -> (env,  TvBndr tv' vis)
+     Nothing  -> tidyTyVarBinder env tvb
 
-tidyTyVar :: TidyEnv -> TyVar -> TyVar
-tidyTyVar (_, subst) tv = lookupVarEnv subst tv `orElse` tv
-   -- TcType.tidyTyVarOcc messes around with FlatSkols
+tidyTyConBinders :: TidyEnv -> [TyConBinder] -> (TidyEnv, [TyConBinder])
+tidyTyConBinders = mapAccumL tidyTyConBinder
 
-getFS :: NamedThing a => a -> FastString
-getFS x = occNameFS (getOccName x)
+tidyTyVar :: TidyEnv -> TyVar -> FastString
+tidyTyVar (_, subst) tv = toIfaceTyVar (lookupVarEnv subst tv `orElse` tv)
 
 --------------------------
 instanceToIfaceInst :: ClsInst -> IfaceClsInst
@@ -1635,7 +1633,7 @@ famInstToIfaceFamInst (FamInst { fi_axiom    = axiom,
     orph | is_local fam_decl
          = NotOrphan (nameOccName fam_decl)
          | otherwise
-         = chooseOrphanAnchor $ nameSetElems lhs_names
+         = chooseOrphanAnchor lhs_names
 
 --------------------------
 toIfaceLetBndr :: Id -> IfaceLetBndr
@@ -1685,7 +1683,7 @@ toIfaceIdInfo id_info
     ------------  Strictness  --------------
         -- No point in explicitly exporting TopSig
     sig_info = strictnessInfo id_info
-    strict_hsinfo | not (isNopSig sig_info) = Just (HsStrictness sig_info)
+    strict_hsinfo | not (isTopSig sig_info) = Just (HsStrictness sig_info)
                   | otherwise               = Nothing
 
     ------------  Unfolding  --------------
@@ -1773,7 +1771,7 @@ toIfaceExpr (Lam x b)       = IfaceLam (toIfaceBndr x, toIfaceOneShot x) (toIfac
 toIfaceExpr (App f a)       = toIfaceApp f [a]
 toIfaceExpr (Case s x ty as)
   | null as                 = IfaceECase (toIfaceExpr s) (toIfaceType ty)
-  | otherwise               = IfaceCase (toIfaceExpr s) (getFS x) (map toIfaceAlt as)
+  | otherwise               = IfaceCase (toIfaceExpr s) (getOccFS x) (map toIfaceAlt as)
 toIfaceExpr (Let b e)       = IfaceLet (toIfaceBind b) (toIfaceExpr e)
 toIfaceExpr (Cast e co)     = IfaceCast (toIfaceExpr e) (toIfaceCoercion co)
 toIfaceExpr (Tick t e)
@@ -1804,7 +1802,7 @@ toIfaceBind (Rec prs)    = IfaceRec [(toIfaceLetBndr b, toIfaceExpr r) | (b,r) <
 ---------------------
 toIfaceAlt :: (AltCon, [Var], CoreExpr)
            -> (IfaceConAlt, [FastString], IfaceExpr)
-toIfaceAlt (c,bs,r) = (toIfaceCon c, map getFS bs, toIfaceExpr r)
+toIfaceAlt (c,bs,r) = (toIfaceCon c, map getOccFS bs, toIfaceExpr r)
 
 ---------------------
 toIfaceCon :: AltCon -> IfaceConAlt
@@ -1840,5 +1838,5 @@ toIfaceVar v
     | Just fcall <- isFCallId_maybe v            = IfaceFCall fcall (toIfaceType (idType v))
        -- Foreign calls have special syntax
     | isExternalName name                        = IfaceExt name
-    | otherwise                                  = IfaceLcl (getFS name)
+    | otherwise                                  = IfaceLcl (getOccFS name)
   where name = idName v

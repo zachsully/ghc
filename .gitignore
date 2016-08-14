@@ -12,6 +12,9 @@ Thumbs.db
 *.orig
 *.prof
 *.rej
+*.patch
+*.stackdump
+foo*
 
 *.hi
 *.hi-boot
@@ -129,6 +132,10 @@ _darcs/
 /libraries/ghc-boot/GNUmakefile
 /libraries/ghc-boot/ghc-boot.cabal
 /libraries/ghc-boot/ghc.mk
+/libraries/ghc-boot-th/GNUmakefile
+/libraries/ghc-boot-th/ghc-boot-th.cabal
+/libraries/ghc-boot-th/ghc.mk
+/libraries/ghci/GNUmakefile
 /libraries/ghci/ghci.cabal
 /libraries/ghci/ghc.mk
 /libraries/haddock-util.js
@@ -156,8 +163,8 @@ _darcs/
 /rts/package.conf.install
 /rts/package.conf.install.raw
 /stage3.package.conf
-/testsuite_summary.txt
-/testlog
+/testsuite_summary*.txt
+/testlog*
 /utils/runghc/runghc.cabal
 
 /extra-gcc-opts
@@ -174,3 +181,6 @@ GIT_COMMIT_ID
 .ghc
 .bash_history
 .gitconfig
+
+# Should be equal to testdir_suffix from testsuite/driver/testlib.py.
+*.run

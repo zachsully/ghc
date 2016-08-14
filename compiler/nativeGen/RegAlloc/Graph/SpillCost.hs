@@ -108,7 +108,10 @@ slurpSpillCostInfo platform cmm
         countLIs rsLiveEntry (LiveInstr instr (Just live) : lis)
          = do
                 -- Increment the lifetime counts for regs live on entry to this instr.
-                mapM_ incLifetime $ uniqSetToList rsLiveEntry
+                mapM_ incLifetime $ nonDetEltsUFM rsLiveEntry
+                    -- This is non-deterministic but we do not
+                    -- currently support deterministic code-generation.
+                    -- See Note [Unique Determinism and code generation]
 
                 -- Increment counts for what regs were read/written from.
                 let (RU read written)   = regUsageOfInstr platform instr
@@ -136,12 +139,9 @@ slurpSpillCostInfo platform cmm
 
 -- | Take all the virtual registers from this set.
 takeVirtuals :: UniqSet Reg -> UniqSet VirtualReg
-takeVirtuals set
-        = mapUniqSet get_virtual
-        $ filterUniqSet isVirtualReg set
-        where
-                get_virtual (RegVirtual vr) = vr
-                get_virtual _ = panic "getVirt"
+takeVirtuals set = mkUniqSet
+  [ vr | RegVirtual vr <- nonDetEltsUFM set ]
+  -- See Note [Unique Determinism and code generation]
 
 
 -- | Choose a node to spill from this graph
@@ -153,7 +153,8 @@ chooseSpill
 chooseSpill info graph
  = let  cost    = spillCost_length info graph
         node    = minimumBy (\n1 n2 -> compare (cost $ nodeId n1) (cost $ nodeId n2))
-                $ eltsUFM $ graphMap graph
+                $ nonDetEltsUFM $ graphMap graph
+                -- See Note [Unique Determinism and code generation]
 
    in   nodeId node
 
@@ -241,7 +242,8 @@ lifeMapFromSpillCostInfo :: SpillCostInfo -> UniqFM (VirtualReg, Int)
 lifeMapFromSpillCostInfo info
         = listToUFM
         $ map (\(r, _, _, life) -> (r, (r, life)))
-        $ eltsUFM info
+        $ nonDetEltsUFM info
+        -- See Note [Unique Determinism and code generation]
 
 
 -- | Determine the degree (number of neighbors) of this node which
@@ -258,7 +260,8 @@ nodeDegree classOfVirtualReg graph reg
         , virtConflicts
            <- length
            $ filter (\r -> classOfVirtualReg r == classOfVirtualReg reg)
-           $ uniqSetToList
+           $ nonDetEltsUFM
+           -- See Note [Unique Determinism and code generation]
            $ nodeConflicts node
 
         = virtConflicts + sizeUniqSet (nodeExclusions node)

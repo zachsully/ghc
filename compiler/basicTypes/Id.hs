@@ -33,14 +33,14 @@ module Id (
         mkLocalId, mkLocalCoVar, mkLocalIdOrCoVar,
         mkLocalIdOrCoVarWithInfo,
         mkLocalIdWithInfo, mkExportedLocalId, mkExportedVanillaId,
+        mkNonExportedLocalId,
         mkSysLocal, mkSysLocalM, mkSysLocalOrCoVar, mkSysLocalOrCoVarM,
-        mkUserLocal, mkUserLocalCoVar, mkUserLocalOrCoVar,
-        mkDerivedLocalCoVarM,
+        mkUserLocal, mkUserLocalOrCoVar,
         mkTemplateLocals, mkTemplateLocalsNum, mkTemplateLocal,
         mkWorkerId,
 
         -- ** Taking an Id apart
-        idName, idType, idUnique, idInfo, idDetails, idRepArity,
+        idName, idType, idUnique, idInfo, idDetails,
         recordSelectorTyCon,
 
         -- ** Modifying an Id
@@ -48,8 +48,9 @@ module Id (
         setIdExported, setIdNotExported,
         globaliseId, localiseId,
         setIdInfo, lazySetIdInfo, modifyIdInfo, maybeModifyIdInfo,
-        zapLamIdInfo, zapIdDemandInfo, zapIdUsageInfo, zapFragileIdInfo,
-        zapIdStrictness,
+        zapLamIdInfo, zapIdDemandInfo, zapIdUsageInfo, zapIdUsageEnvInfo,
+        zapIdUsedOnceInfo,
+        zapFragileIdInfo, zapIdStrictness,
         transferPolyIdInfo,
 
         -- ** Predicates on Ids
@@ -77,7 +78,7 @@ module Id (
         idInlineActivation, setInlineActivation, idRuleMatchInfo,
 
         -- ** One-shot lambdas
-        isOneShotBndr, isOneShotLambda, isProbablyOneShotLambda,
+        isOneShotBndr, isProbablyOneShotLambda,
         setOneShotLambda, clearOneShotLambda,
         updOneShotInfo, setIdOneShotInfo,
         isStateHackType, stateHackOneShot, typeOneShot,
@@ -88,7 +89,7 @@ module Id (
         idUnfolding, realIdUnfolding,
         idSpecialisation, idCoreRules, idHasRules,
         idCafInfo,
-        idOneShotInfo,
+        idOneShotInfo, idStateHackOneShotInfo,
         idOccInfo,
 
         -- ** Writing 'IdInfo' fields
@@ -256,8 +257,7 @@ mkVanillaGlobalWithInfo = mkGlobalId VanillaId
 
 -- | For an explanation of global vs. local 'Id's, see "Var#globalvslocal"
 mkLocalId :: Name -> Type -> Id
-mkLocalId name ty = mkLocalIdWithInfo name ty
-                         (vanillaIdInfo `setOneShotInfo` typeOneShot ty)
+mkLocalId name ty = mkLocalIdWithInfo name ty vanillaIdInfo
  -- It's tempting to ASSERT( not (isCoercionType ty) ), but don't. Sometimes,
  -- the type is a panic. (Search invented_id)
 
@@ -265,7 +265,7 @@ mkLocalId name ty = mkLocalIdWithInfo name ty
 mkLocalCoVar :: Name -> Type -> CoVar
 mkLocalCoVar name ty
   = ASSERT( isCoercionType ty )
-    Var.mkLocalVar CoVarId name ty (vanillaIdInfo `setOneShotInfo` typeOneShot ty)
+    Var.mkLocalVar CoVarId name ty vanillaIdInfo
 
 -- | Like 'mkLocalId', but checks the type to see if it should make a covar
 mkLocalIdOrCoVar :: Name -> Type -> Id
@@ -294,6 +294,12 @@ mkExportedLocalId :: IdDetails -> Name -> Type -> Id
 mkExportedLocalId details name ty = Var.mkExportedLocalVar details name ty vanillaIdInfo
         -- Note [Free type variables]
 
+-- | Create a local 'Id' that is marked as not-exported.
+-- These may be removed as dead code.
+mkNonExportedLocalId :: IdDetails -> Name -> Type -> Id
+mkNonExportedLocalId details name ty =
+  Var.mkLocalVar details name ty vanillaIdInfo
+
 mkExportedVanillaId :: Name -> Type -> Id
 mkExportedVanillaId name ty = Var.mkExportedLocalVar VanillaId name ty vanillaIdInfo
         -- Note [Free type variables]
@@ -308,10 +314,7 @@ mkSysLocal fs uniq ty = ASSERT( not (isCoercionType ty) )
 -- | Like 'mkSysLocal', but checks to see if we have a covar type
 mkSysLocalOrCoVar :: FastString -> Unique -> Type -> Id
 mkSysLocalOrCoVar fs uniq ty
-  | isCoercionType ty = mkLocalCoVar name ty
-  | otherwise         = mkLocalId    name ty
-  where
-    name = mkSystemVarName uniq fs
+  = mkLocalIdOrCoVar (mkSystemVarName uniq fs) ty
 
 mkSysLocalM :: MonadUnique m => FastString -> Type -> m Id
 mkSysLocalM fs ty = getUniqueM >>= (\uniq -> return (mkSysLocal fs uniq ty))
@@ -325,22 +328,10 @@ mkUserLocal :: OccName -> Unique -> Type -> SrcSpan -> Id
 mkUserLocal occ uniq ty loc = ASSERT( not (isCoercionType ty) )
                               mkLocalId (mkInternalName uniq occ loc) ty
 
--- | Like 'mkUserLocal' for covars
-mkUserLocalCoVar :: OccName -> Unique -> Type -> SrcSpan -> Id
-mkUserLocalCoVar occ uniq ty loc
-  = mkLocalCoVar (mkInternalName uniq occ loc) ty
-
 -- | Like 'mkUserLocal', but checks if we have a coercion type
 mkUserLocalOrCoVar :: OccName -> Unique -> Type -> SrcSpan -> Id
 mkUserLocalOrCoVar occ uniq ty loc
   = mkLocalIdOrCoVar (mkInternalName uniq occ loc) ty
-
-mkDerivedLocalCoVarM :: MonadUnique m => (OccName -> OccName) -> Id -> Type -> m Id
-mkDerivedLocalCoVarM deriv_name id ty
-    = ASSERT( isCoercionType ty )
-      do { uniq <- getUniqueM
-         ; let name = mkDerivedInternalName deriv_name uniq (getName id)
-         ; return (mkLocalCoVar name ty) }
 
 {-
 Make some local @Ids@ for a template @CoreExpr@.  These have bogus
@@ -513,7 +504,7 @@ hasNoBinding :: Id -> Bool
 hasNoBinding id = case Var.idDetails id of
                         PrimOpId _       -> True        -- See Note [Primop wrappers]
                         FCallId _        -> True
-                        DataConWorkId dc -> isUnboxedTupleCon dc
+                        DataConWorkId dc -> isUnboxedTupleCon dc || isUnboxedSumCon dc
                         _                -> False
 
 isImplicitId :: Id -> Bool
@@ -618,9 +609,6 @@ idCallArity id = callArityInfo (idInfo id)
 
 setIdCallArity :: Id -> Arity -> Id
 setIdCallArity id arity = modifyIdInfo (`setCallArityInfo` arity) id
-
-idRepArity :: Id -> RepArity
-idRepArity x = typeRepArity (idArity x) (idType x)
 
 -- | Returns true if an application to n args would diverge
 isBottomingId :: Id -> Bool
@@ -746,14 +734,23 @@ isConLikeId id = isDataConWorkId id || isConLike (idRuleMatchInfo id)
 idOneShotInfo :: Id -> OneShotInfo
 idOneShotInfo id = oneShotInfo (idInfo id)
 
+-- | Like 'idOneShotInfo', but taking the Horrible State Hack in to account
+-- See Note [The state-transformer hack] in CoreArity
+idStateHackOneShotInfo :: Id -> OneShotInfo
+idStateHackOneShotInfo id
+    | isStateHackType (idType id) = stateHackOneShot
+    | otherwise                   = idOneShotInfo id
+
 -- | Returns whether the lambda associated with the 'Id' is certainly applied at most once
 -- This one is the "business end", called externally.
 -- It works on type variables as well as Ids, returning True
 -- Its main purpose is to encapsulate the Horrible State Hack
+-- See Note [The state-transformer hack] in CoreArity
 isOneShotBndr :: Var -> Bool
 isOneShotBndr var
-  | isTyVar var = True
-  | otherwise   = isOneShotLambda var
+  | isTyVar var                              = True
+  | OneShotLam <- idStateHackOneShotInfo var = True
+  | otherwise                                = False
 
 -- | Should we apply the state hack to values of this 'Type'?
 stateHackOneShot :: OneShotInfo
@@ -790,16 +787,8 @@ isStateHackType ty
         -- Another good example is in fill_in in PrelPack.hs.  We should be able to
         -- spot that fill_in has arity 2 (and when Keith is done, we will) but we can't yet.
 
-
--- | Returns whether the lambda associated with the 'Id' is certainly applied at most once.
--- You probably want to use 'isOneShotBndr' instead
-isOneShotLambda :: Id -> Bool
-isOneShotLambda id = case idOneShotInfo id of
-                       OneShotLam -> True
-                       _          -> False
-
 isProbablyOneShotLambda :: Id -> Bool
-isProbablyOneShotLambda id = case idOneShotInfo id of
+isProbablyOneShotLambda id = case idStateHackOneShotInfo id of
                                OneShotLam    -> True
                                ProbOneShot   -> True
                                NoOneShotInfo -> False
@@ -844,6 +833,12 @@ zapIdDemandInfo = zapInfo zapDemandInfo
 
 zapIdUsageInfo :: Id -> Id
 zapIdUsageInfo = zapInfo zapUsageInfo
+
+zapIdUsageEnvInfo :: Id -> Id
+zapIdUsageEnvInfo = zapInfo zapUsageEnvInfo
+
+zapIdUsedOnceInfo :: Id -> Id
+zapIdUsedOnceInfo = zapInfo zapUsedOnceInfo
 
 {-
 Note [transferPolyIdInfo]

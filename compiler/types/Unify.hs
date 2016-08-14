@@ -36,6 +36,7 @@ import TyCoRep hiding ( getTvSubstEnv, getCvSubstEnv )
 import Util
 import Pair
 import Outputable
+import UniqFM
 
 import Control.Monad
 #if __GLASGOW_HASKELL__ > 710
@@ -66,30 +67,6 @@ Unification is much tricker than you might think.
    where x is the template type variable.  Then we do not want to
    bind x to a/b!  This is a kind of occurs check.
    The necessary locals accumulate in the RnEnv2.
-
-Note [Kind coercions in Unify]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-We wish to match/unify while ignoring casts. But, we can't just ignore
-them completely, or we'll end up with ill-kinded substitutions. For example,
-say we're matching `a` with `ty |> co`. If we just drop the cast, we'll
-return [a |-> ty], but `a` and `ty` might have different kinds. We can't
-just match/unify their kinds, either, because this might gratuitously
-fail. After all, `co` is the witness that the kinds are the same -- they
-may look nothing alike.
-
-So, we pass a kind coercion to the match/unify worker. This coercion witnesses
-the equality between the substed kind of the left-hand type and the substed
-kind of the right-hand type. To get this coercion, we first have to match/unify
-the kinds before looking at the types. Happily, we need look only one level
-up, as all kinds are guaranteed to have kind *.
-
-We thought, at one point, that this was all unnecessary: why should casts
-be in types in the first place? But they do. In
-dependent/should_compile/KindEqualities2, we see, for example
-the constraint Num (Int |> (blah ; sym blah)).
-We naturally want to find a dictionary for that constraint, which
-requires dealing with coercions in this manner.
-
 -}
 
 -- | @tcMatchTy t1 t2@ produces a substitution (over fvs(t1))
@@ -478,10 +455,12 @@ niFixTCvSubst tenv = f tenv
         | not_fixpoint = f (mapVarEnv (substTy subst') tenv)
         | otherwise    = subst
         where
-          not_fixpoint  = foldVarSet ((||) . in_domain) False range_tvs
+          not_fixpoint  = varSetAny in_domain range_tvs
           in_domain tv  = tv `elemVarEnv` tenv
 
-          range_tvs     = foldVarEnv (unionVarSet . tyCoVarsOfType) emptyVarSet tenv
+          range_tvs     = nonDetFoldUFM (unionVarSet . tyCoVarsOfType) emptyVarSet tenv
+                          -- It's OK to use nonDetFoldUFM here because we
+                          -- forget the order immediately by creating a set
           subst         = mkTvSubst (mkInScopeSet range_tvs) tenv
 
              -- env' extends env by replacing any free type with
@@ -491,7 +470,10 @@ niFixTCvSubst tenv = f tenv
                                                  setTyVarKind rtv $
                                                  substTy subst $
                                                  tyVarKind rtv)
-                                         | rtv <- varSetElems range_tvs
+                                         | rtv <- nonDetEltsUFM range_tvs
+                                         -- It's OK to use nonDetEltsUFM here
+                                         -- because we forget the order
+                                         -- immediatedly by putting it in VarEnv
                                          , not (in_domain rtv) ]
           subst' = mkTvSubst (mkInScopeSet range_tvs) tenv'
 
@@ -500,7 +482,9 @@ niSubstTvSet :: TvSubstEnv -> TyCoVarSet -> TyCoVarSet
 -- remembering that the substitution isn't necessarily idempotent
 -- This is used in the occurs check, before extending the substitution
 niSubstTvSet tsubst tvs
-  = foldVarSet (unionVarSet . get) emptyVarSet tvs
+  = nonDetFoldUFM (unionVarSet . get) emptyVarSet tvs
+  -- It's OK to nonDetFoldUFM here because we immediately forget the
+  -- ordering by creating a set.
   where
     get tv
       | Just ty <- lookupVarEnv tsubst tv
@@ -512,12 +496,21 @@ niSubstTvSet tsubst tvs
 {-
 ************************************************************************
 *                                                                      *
-                The workhorse
+                unify_ty: the main workhorse
 *                                                                      *
 ************************************************************************
 
 Note [Specification of unification]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The pure unifier, unify_ty, defined in this module, tries to work out
+a substitution to make two types say True to eqType. NB: eqType is
+itself not purely syntactic; it accounts for CastTys;
+see Note [Non-trivial definitional equality] in TyCoRep
+
+Unlike the "impure unifers" in the typechecker (the eager unifier in
+TcUnify, and the constraint solver itself in TcCanonical), the pure
+unifier It does /not/ work up to ~.
+
 The algorithm implemented here is rather delicate, and we depend on it
 to uphold certain properties. This is a summary of these required
 properties. Any reference to "flattening" refers to the flattening
@@ -533,26 +526,27 @@ Notation:
  ≡    eqType
 
 (U1) Soundness.
-If (unify τ₁ τ₂) = Unifiable θ, then θ(τ₁) ≡ θ(τ₂). θ is a most general
-unifier for τ₁ and τ₂.
+     If (unify τ₁ τ₂) = Unifiable θ, then θ(τ₁) ≡ θ(τ₂).
+     θ is a most general unifier for τ₁ and τ₂.
 
 (U2) Completeness.
-If (unify ξ₁ ξ₂) = SurelyApart,
-then there exists no substitution θ such that θ(ξ₁) ≡ θ(ξ₂).
+     If (unify ξ₁ ξ₂) = SurelyApart,
+     then there exists no substitution θ such that θ(ξ₁) ≡ θ(ξ₂).
 
 These two properties are stated as Property 11 in the "Closed Type Families"
 paper (POPL'14). Below, this paper is called [CTF].
 
 (U3) Apartness under substitution.
-If (unify ξ τ♭) = SurelyApart, then (unify ξ θ(τ)♭) = SurelyApart, for
-any θ. (Property 12 from [CTF])
+     If (unify ξ τ♭) = SurelyApart, then (unify ξ θ(τ)♭) = SurelyApart,
+     for any θ. (Property 12 from [CTF])
 
 (U4) Apart types do not unify.
-If (unify ξ τ♭) = SurelyApart, then there exists no θ such that
-θ(ξ) = θ(τ). (Property 13 from [CTF])
+     If (unify ξ τ♭) = SurelyApart, then there exists no θ
+     such that θ(ξ) = θ(τ). (Property 13 from [CTF])
 
 THEOREM. Completeness w.r.t ~
-If (unify τ₁♭ τ₂♭) = SurelyApart, then there exists no proof that (τ₁ ~ τ₂).
+    If (unify τ₁♭ τ₂♭) = SurelyApart,
+    then there exists no proof that (τ₁ ~ τ₂).
 
 PROOF. See appendix of [CTF].
 
@@ -562,25 +556,26 @@ in the "Injective Type Families" paper (Haskell'15), called [ITF]. When run
 in this mode, it has the following properties.
 
 (I1) If (unify σ τ) = SurelyApart, then σ and τ are not unifiable, even
-after arbitrary type family reductions. Note that σ and τ are not flattened
-here.
+     after arbitrary type family reductions. Note that σ and τ are
+     not flattened here.
 
 (I2) If (unify σ τ) = MaybeApart θ, and if some
-φ exists such that φ(σ) ~ φ(τ), then φ extends θ.
+     φ exists such that φ(σ) ~ φ(τ), then φ extends θ.
 
 
 Furthermore, the RULES matching algorithm requires this property,
 but only when using this algorithm for matching:
 
-(M1) If (match σ τ) succeeds with θ, then all matchable tyvars in σ
-are bound in θ.
+(M1) If (match σ τ) succeeds with θ, then all matchable tyvars
+     in σ are bound in θ.
 
-Property M1 means that we must extend the substitution with, say
-(a ↦ a) when appropriate during matching.
-See also Note [Self-substitution when matching].
+     Property M1 means that we must extend the substitution with,
+     say (a ↦ a) when appropriate during matching.
+     See also Note [Self-substitution when matching].
 
 (M2) Completeness of matching.
-If θ(σ) = τ, then (match σ τ) = Unifiable φ, where θ is an extension of φ.
+     If θ(σ) = τ, then (match σ τ) = Unifiable φ,
+     where θ is an extension of φ.
 
 Sadly, property M2 and I2 conflict. Consider
 
@@ -600,7 +595,8 @@ this, but we musn't map a to anything else!)
 
 We thus must parameterize the algorithm over whether it's being used
 for an injectivity check (refrain from looking at non-injective arguments
-to type families) or not (do indeed look at those arguments).
+to type families) or not (do indeed look at those arguments).  This is
+implemented  by the uf_int_tf field of UmEnv.
 
 (It's all a question of whether or not to include equation (7) from Fig. 2
 of [ITF].)
@@ -651,13 +647,58 @@ value for the coercion. (See the desugared version:
 ) We never want this action to happen during *unification* though, when
 all bets are off.
 
+Note [Kind coercions in Unify]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We wish to match/unify while ignoring casts. But, we can't just ignore
+them completely, or we'll end up with ill-kinded substitutions. For example,
+say we're matching `a` with `ty |> co`. If we just drop the cast, we'll
+return [a |-> ty], but `a` and `ty` might have different kinds. We can't
+just match/unify their kinds, either, because this might gratuitously
+fail. After all, `co` is the witness that the kinds are the same -- they
+may look nothing alike.
+
+So, we pass a kind coercion to the match/unify worker. This coercion witnesses
+the equality between the substed kind of the left-hand type and the substed
+kind of the right-hand type. Note that we do not unify kinds at the leaves
+(as we did previously). We thus have
+
+INVARIANT: In the call
+    unify_ty ty1 ty2 kco
+it must be that subst(kco) :: subst(kind(ty1)) ~N subst(kind(ty2)), where
+`subst` is the ambient substitution in the UM monad.
+
+To get this coercion, we first have to match/unify
+the kinds before looking at the types. Happily, we need look only one level
+up, as all kinds are guaranteed to have kind *.
+
+When we're working with type applications (either TyConApp or AppTy) we
+need to worry about establishing INVARIANT, as the kinds of the function
+& arguments aren't (necessarily) included in the kind of the result.
+When unifying two TyConApps, this is easy, because the two TyCons are
+the same. Their kinds are thus the same. As long as we unify left-to-right,
+we'll be sure to unify types' kinds before the types themselves. (For example,
+think about Proxy :: forall k. k -> *. Unifying the first args matches up
+the kinds of the second args.)
+
+For AppTy, we must unify the kinds of the functions, but once these are
+unified, we can continue unifying arguments without worrying further about
+kinds.
+
+We thought, at one point, that this was all unnecessary: why should
+casts be in types in the first place? But they do. In
+dependent/should_compile/KindEqualities2, we see, for example the
+constraint Num (Int |> (blah ; sym blah)).  We naturally want to find
+a dictionary for that constraint, which requires dealing with
+coercions in this manner.
 -}
 
--- See Note [Specification of unification]
-unify_ty :: Type -> Type -> Coercion   -- Types to be unified and a co
-                                       -- between their kinds
-                                       -- See Note [Kind coercions in Unify]
+-------------- unify_ty: the main workhorse -----------
+
+unify_ty :: Type -> Type  -- Types to be unified and a co
+         -> Coercion      -- A coercion between their kinds
+                          -- See Note [Kind coercions in Unify]
          -> UM ()
+-- See Note [Specification of unification]
 -- Respects newtypes, PredTypes
 
 unify_ty ty1 ty2 kco
@@ -704,15 +745,15 @@ unify_ty ty1 ty2 _kco
         -- so if one type is an App the other one jolly well better be too
 unify_ty (AppTy ty1a ty1b) ty2 _kco
   | Just (ty2a, ty2b) <- tcRepSplitAppTy_maybe ty2
-  = unify_ty_app ty1a ty1b ty2a ty2b
+  = unify_ty_app ty1a [ty1b] ty2a [ty2b]
 
 unify_ty ty1 (AppTy ty2a ty2b) _kco
   | Just (ty1a, ty1b) <- tcRepSplitAppTy_maybe ty1
-  = unify_ty_app ty1a ty1b ty2a ty2b
+  = unify_ty_app ty1a [ty1b] ty2a [ty2b]
 
 unify_ty (LitTy x) (LitTy y) _kco | x == y = return ()
 
-unify_ty (ForAllTy (Named tv1 _) ty1) (ForAllTy (Named tv2 _) ty2) kco
+unify_ty (ForAllTy (TvBndr tv1 _) ty1) (ForAllTy (TvBndr tv2 _) ty2) kco
   = do { unify_ty (tyVarKind tv1) (tyVarKind tv2) (mkNomReflCo liftedTypeKind)
        ; umRnBndr2 tv1 tv2 $ unify_ty ty1 ty2 kco }
 
@@ -751,15 +792,19 @@ unify_ty _ ty2 _
 
 unify_ty _ _ _ = surelyApart
 
-unify_ty_app :: Type -> Type -> Type -> Type -> UM ()
-unify_ty_app ty1a ty1b ty2a ty2b
-  = do { -- TODO (RAE): Remove this exponential behavior.
-         let ki1a = typeKind ty1a
-             ki2a = typeKind ty2a
-       ; unify_ty ki1a ki2a (mkNomReflCo liftedTypeKind)
-       ; let kind_co = mkNomReflCo ki1a
-       ; unify_ty ty1a ty2a kind_co
-       ; unify_ty ty1b ty2b (mkNthCo 0 kind_co) }
+unify_ty_app :: Type -> [Type] -> Type -> [Type] -> UM ()
+unify_ty_app ty1 ty1args ty2 ty2args
+  | Just (ty1', ty1a) <- repSplitAppTy_maybe ty1
+  , Just (ty2', ty2a) <- repSplitAppTy_maybe ty2
+  = unify_ty_app ty1' (ty1a : ty1args) ty2' (ty2a : ty2args)
+
+  | otherwise
+  = do { let ki1 = typeKind ty1
+             ki2 = typeKind ty2
+           -- See Note [Kind coercions in Unify]
+       ; unify_ty ki1 ki2 (mkNomReflCo liftedTypeKind)
+       ; unify_ty ty1 ty2 (mkNomReflCo ki1)
+       ; unify_tys ty1args ty2args }
 
 unify_tys :: [Type] -> [Type] -> UM ()
 unify_tys orig_xs orig_ys
@@ -767,6 +812,7 @@ unify_tys orig_xs orig_ys
   where
     go []     []     = return ()
     go (x:xs) (y:ys)
+      -- See Note [Kind coercions in Unify]
       = do { unify_ty x y (mkNomReflCo $ typeKind x)
            ; go xs ys }
     go _ _ = maybeApart  -- See Note [Lists of different lengths are MaybeApart]
@@ -974,11 +1020,15 @@ umRnBndr2 v1 v2 thing = UM $ \env state ->
   let rn_env' = rnBndr2 (um_rn_env env) v1 v2 in
   unUM thing (env { um_rn_env = rn_env' }) state
 
-checkRnEnv :: (RnEnv2 -> Var -> Bool) -> VarSet -> UM ()
-checkRnEnv inRnEnv varset = UM $ \env state ->
-  if any (inRnEnv (um_rn_env env)) (varSetElems varset)
-  then MaybeApart (state, ())
-  else Unifiable (state, ())
+checkRnEnv :: (RnEnv2 -> VarSet) -> VarSet -> UM ()
+checkRnEnv get_set varset = UM $ \env state ->
+  let env_vars = get_set (um_rn_env env) in
+  if isEmptyVarSet env_vars || varset `disjointVarSet` env_vars
+     -- NB: That isEmptyVarSet is a critical optimization; it
+     -- means we don't have to calculate the free vars of
+     -- the type, often saving quite a bit of allocation.
+  then Unifiable (state, ())
+  else MaybeApart (state, ())
 
 -- | Converts any SurelyApart to a MaybeApart
 don'tBeSoSure :: UM () -> UM ()
@@ -988,13 +1038,13 @@ don'tBeSoSure um = UM $ \env state ->
     other       -> other
 
 checkRnEnvR :: Type -> UM ()
-checkRnEnvR ty = checkRnEnv inRnEnvR (tyCoVarsOfType ty)
+checkRnEnvR ty = checkRnEnv rnEnvR (tyCoVarsOfType ty)
 
 checkRnEnvL :: Type -> UM ()
-checkRnEnvL ty = checkRnEnv inRnEnvL (tyCoVarsOfType ty)
+checkRnEnvL ty = checkRnEnv rnEnvL (tyCoVarsOfType ty)
 
 checkRnEnvRCo :: Coercion -> UM ()
-checkRnEnvRCo co = checkRnEnv inRnEnvR (tyCoVarsOfCo co)
+checkRnEnvRCo co = checkRnEnv rnEnvR (tyCoVarsOfCo co)
 
 umRnOccL :: TyVar -> UM TyVar
 umRnOccL v = UM $ \env state ->
@@ -1098,7 +1148,7 @@ ty_co_match menv subst ty co lkco rkco
       = noneSet (\v -> elemVarEnv v env) set
 
     noneSet :: (Var -> Bool) -> VarSet -> Bool
-    noneSet f = foldVarSet (\v rest -> rest && (not $ f v)) True
+    noneSet f = varSetAll (not . f)
 
 ty_co_match menv subst ty co lkco rkco
   | CastTy ty' co' <- ty
@@ -1136,18 +1186,18 @@ ty_co_match menv subst ty (SubCo co) lkco rkco
 
 ty_co_match menv subst (AppTy ty1a ty1b) co _lkco _rkco
   | Just (co2, arg2) <- splitAppCo_maybe co     -- c.f. Unify.match on AppTy
-  = ty_co_match_app menv subst ty1a ty1b co2 arg2
+  = ty_co_match_app menv subst ty1a [ty1b] co2 [arg2]
 ty_co_match menv subst ty1 (AppCo co2 arg2) _lkco _rkco
   | Just (ty1a, ty1b) <- repSplitAppTy_maybe ty1
        -- yes, the one from Type, not TcType; this is for coercion optimization
-  = ty_co_match_app menv subst ty1a ty1b co2 arg2
+  = ty_co_match_app menv subst ty1a [ty1b] co2 [arg2]
 
 ty_co_match menv subst (TyConApp tc1 tys) (TyConAppCo _ tc2 cos) _lkco _rkco
   = ty_co_match_tc menv subst tc1 tys tc2 cos
-ty_co_match menv subst (ForAllTy (Anon ty1) ty2) (TyConAppCo _ tc cos) _lkco _rkco
+ty_co_match menv subst (FunTy ty1 ty2) (TyConAppCo _ tc cos) _lkco _rkco
   = ty_co_match_tc menv subst funTyCon [ty1, ty2] tc cos
 
-ty_co_match menv subst (ForAllTy (Named tv1 _) ty1)
+ty_co_match menv subst (ForAllTy (TvBndr tv1 _) ty1)
                        (ForAllCo tv2 kind_co2 co2)
                        lkco rkco
   = do { subst1 <- ty_co_match menv subst (tyVarKind tv1) kind_co2
@@ -1178,17 +1228,22 @@ ty_co_match_tc menv subst tc1 tys1 tc2 cos2
       = traverse (fmap mkNomReflCo . coercionKind) cos2
 
 ty_co_match_app :: MatchEnv -> LiftCoEnv
-                -> Type -> Type -> Coercion -> Coercion
+                -> Type -> [Type] -> Coercion -> [Coercion]
                 -> Maybe LiftCoEnv
-ty_co_match_app menv subst ty1a ty1b co2a co2b
-  = do { -- TODO (RAE): Remove this exponential behavior.
-         subst1 <- ty_co_match menv subst  ki1a ki2a ki_ki_co ki_ki_co
-       ; let Pair lkco rkco = mkNomReflCo <$> coercionKind ki2a
-       ; subst2 <- ty_co_match menv subst1 ty1a co2a lkco rkco
-       ; ty_co_match menv subst2 ty1b co2b (mkNthCo 0 lkco) (mkNthCo 0 rkco) }
+ty_co_match_app menv subst ty1 ty1args co2 co2args
+  | Just (ty1', ty1a) <- repSplitAppTy_maybe ty1
+  , Just (co2', co2a) <- splitAppCo_maybe co2
+  = ty_co_match_app menv subst ty1' (ty1a : ty1args) co2' (co2a : co2args)
+
+  | otherwise
+  = do { subst1 <- ty_co_match menv subst ki1 ki2 ki_ki_co ki_ki_co
+       ; let Pair lkco rkco = mkNomReflCo <$> coercionKind ki2
+       ; subst2 <- ty_co_match menv subst1 ty1 co2 lkco rkco
+       ; let Pair lkcos rkcos = traverse (fmap mkNomReflCo . coercionKind) co2args
+       ; ty_co_match_args menv subst2 ty1args co2args lkcos rkcos }
   where
-    ki1a = typeKind ty1a
-    ki2a = promoteCoercion co2a
+    ki1 = typeKind ty1
+    ki2 = promoteCoercion co2
     ki_ki_co = mkNomReflCo liftedTypeKind
 
 ty_co_match_args :: MatchEnv -> LiftCoEnv -> [Type]
@@ -1203,11 +1258,11 @@ ty_co_match_args _    _     _        _          _ _ = Nothing
 pushRefl :: Coercion -> Maybe Coercion
 pushRefl (Refl Nominal (AppTy ty1 ty2))
   = Just (AppCo (Refl Nominal ty1) (mkNomReflCo ty2))
-pushRefl (Refl r (ForAllTy (Anon ty1) ty2))
+pushRefl (Refl r (FunTy ty1 ty2))
   = Just (TyConAppCo r funTyCon [mkReflCo r ty1, mkReflCo r ty2])
 pushRefl (Refl r (TyConApp tc tys))
   = Just (TyConAppCo r tc (zipWith mkReflCo (tyConRolesX r tc) tys))
-pushRefl (Refl r (ForAllTy (Named tv _) ty))
+pushRefl (Refl r (ForAllTy (TvBndr tv _) ty))
   = Just (mkHomoForAllCos_NoRefl [tv] (Refl r ty))
     -- NB: NoRefl variant. Otherwise, we get a loop!
 pushRefl (Refl r (CastTy ty co))  = Just (castCoercionKind (Refl r ty) co co)

@@ -143,11 +143,6 @@ $(includes_H_PLATFORM) : includes/Makefile | $$(dir $$@)/.
 	@echo "#define $(TargetOS_CPP)_HOST_OS  1" >> $@
 	@echo "#define BUILD_OS  \"$(HostOS_CPP)\"" >> $@
 	@echo "#define HOST_OS  \"$(TargetOS_CPP)\"" >> $@
-ifeq "$(HostOS_CPP)" "irix"
-	@echo "#ifndef $(IRIX_MAJOR)_HOST_OS" >> $@  
-	@echo "#define $(IRIX_MAJOR)_HOST_OS  1" >> $@  
-	@echo "#endif" >> $@  
-endif
 	@echo >> $@
 	@echo "#define $(HostVendor_CPP)_BUILD_VENDOR  1" >> $@
 	@echo "#define $(TargetVendor_CPP)_HOST_VENDOR  1" >> $@
@@ -182,7 +177,7 @@ includes_GHCCONSTANTS_HASKELL_EXPORTS = includes/dist-derivedconstants/header/GH
 
 INSTALL_LIBS += $(includes_GHCCONSTANTS_HASKELL_VALUE)
 
-DERIVE_CONSTANTS_FLAGS += --gcc-program "$(WhatGccIsCalled)"
+DERIVE_CONSTANTS_FLAGS += --gcc-program "$(CC)"
 DERIVE_CONSTANTS_FLAGS += $(addprefix --gcc-flag$(space),$(includes_CC_OPTS) -fcommon)
 DERIVE_CONSTANTS_FLAGS += --nm-program "$(NM)"
 ifneq "$(OBJDUMP)" ""

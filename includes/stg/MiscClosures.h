@@ -105,6 +105,7 @@ RTS_ENTRY(stg_TVAR_CLEAN);
 RTS_ENTRY(stg_TVAR_DIRTY);
 RTS_ENTRY(stg_TSO);
 RTS_ENTRY(stg_STACK);
+RTS_ENTRY(stg_RUBBISH_ENTRY);
 RTS_ENTRY(stg_ARR_WORDS);
 RTS_ENTRY(stg_MUT_ARR_WORDS);
 RTS_ENTRY(stg_MUT_ARR_PTRS_CLEAN);
@@ -144,6 +145,7 @@ RTS_ENTRY(stg_END_STM_WATCH_QUEUE);
 RTS_ENTRY(stg_END_INVARIANT_CHECK_QUEUE);
 RTS_ENTRY(stg_END_STM_CHUNK_LIST);
 RTS_ENTRY(stg_NO_TREC);
+RTS_ENTRY(stg_COMPACT_NFDATA);
 
 /* closures */
 
@@ -347,6 +349,8 @@ RTS_FUN_DECL(stg_casArrayzh);
 RTS_FUN_DECL(stg_newByteArrayzh);
 RTS_FUN_DECL(stg_newPinnedByteArrayzh);
 RTS_FUN_DECL(stg_newAlignedPinnedByteArrayzh);
+RTS_FUN_DECL(stg_isByteArrayPinnedzh);
+RTS_FUN_DECL(stg_isMutableByteArrayPinnedzh);
 RTS_FUN_DECL(stg_shrinkMutableByteArrayzh);
 RTS_FUN_DECL(stg_resizzeMutableByteArrayzh);
 RTS_FUN_DECL(stg_casIntArrayzh);
@@ -400,6 +404,17 @@ RTS_FUN_DECL(stg_raiseIOzh);
 RTS_FUN_DECL(stg_makeStableNamezh);
 RTS_FUN_DECL(stg_makeStablePtrzh);
 RTS_FUN_DECL(stg_deRefStablePtrzh);
+
+RTS_FUN_DECL(stg_compactNewzh);
+RTS_FUN_DECL(stg_compactAppendzh);
+RTS_FUN_DECL(stg_compactResizzezh);
+RTS_FUN_DECL(stg_compactGetRootzh);
+RTS_FUN_DECL(stg_compactContainszh);
+RTS_FUN_DECL(stg_compactContainsAnyzh);
+RTS_FUN_DECL(stg_compactGetFirstBlockzh);
+RTS_FUN_DECL(stg_compactGetNextBlockzh);
+RTS_FUN_DECL(stg_compactAllocateBlockzh);
+RTS_FUN_DECL(stg_compactFixupPointerszh);
 
 RTS_FUN_DECL(stg_forkzh);
 RTS_FUN_DECL(stg_forkOnzh);
@@ -490,8 +505,19 @@ extern StgWord      RTS_VAR(CCS_LIST);         /* registered CCS list */
 extern StgWord      CCS_SYSTEM[];
 extern unsigned int RTS_VAR(CC_ID);            /* global ids */
 extern unsigned int RTS_VAR(CCS_ID);
-RTS_FUN_DECL(enterFunCCS);
-RTS_FUN_DECL(pushCostCentre);
+
+// Calls to these rts functions are generated directly
+// by codegen (see compiler/codeGen/StgCmmProf.hs)
+// and don't require (don't emit) forward declarations.
+//
+// In unregisterised mode (when building via .hc files)
+// the calls are ordinary C calls. Functions must be in
+// scope and must match prototype assumed by
+//    'compiler/codeGen/StgCmmProf.hs'
+// as opposed to real prototype declared in
+//    'includes/rts/prof/CCS.h'
+void enterFunCCS (void *reg, void *ccsfn);
+void * pushCostCentre (void *ccs, void *cc);
 
 // Capability.c
 extern unsigned int n_capabilities;

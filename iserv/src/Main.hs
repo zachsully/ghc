@@ -1,4 +1,11 @@
 {-# LANGUAGE RecordWildCards, GADTs, ScopedTypeVariables, RankNTypes #-}
+
+-- |
+-- The Remote GHCi server.
+--
+-- For details on Remote GHCi, see Note [Remote GHCi] in
+-- compiler/ghci/GHCi.hs.
+--
 module Main (main) where
 
 import GHCi.Run
@@ -46,7 +53,7 @@ serv verbose pipe@Pipe{..} restore = loop
     case msg of
       Shutdown -> return ()
       RunTH st q ty loc -> wrapRunTH $ runTH pipe st q ty loc
-      FinishTH st -> wrapRunTH $ finishTH pipe st
+      RunModFinalizers st qrefs -> wrapRunTH $ runModFinalizerRefs pipe st qrefs
       _other -> run msg >>= reply
 
   reply :: forall a. (Binary a, Show a) => a -> IO ()
@@ -55,24 +62,24 @@ serv verbose pipe@Pipe{..} restore = loop
     writePipe pipe (put r)
     loop
 
+  -- Run some TH code, which may interact with GHC by sending
+  -- THMessage requests, and then finally send RunTHDone followed by a
+  -- QResult.  For an overview of how TH works with Remote GHCi, see
+  -- Note [Remote Template Haskell] in libraries/ghci/GHCi/TH.hs.
   wrapRunTH :: forall a. (Binary a, Show a) => IO a -> IO ()
   wrapRunTH io = do
     r <- try io
+    writePipe pipe (putTHMessage RunTHDone)
     case r of
       Left e
         | Just (GHCiQException _ err) <- fromException e  -> do
-           when verbose $ putStrLn "iserv: QFail"
-           writePipe pipe (putMessage (QFail err))
-           loop
+           reply (QFail err :: QResult a)
         | otherwise -> do
-           when verbose $ putStrLn "iserv: QException"
            str <- showException e
-           writePipe pipe (putMessage (QException str))
-           loop
+           reply (QException str :: QResult a)
       Right a -> do
         when verbose $ putStrLn "iserv: QDone"
-        writePipe pipe (putMessage QDone)
-        reply a
+        reply (QDone a)
 
   -- carefully when showing an exception, there might be other exceptions
   -- lurking inside it.  If so, we return the inner exception instead.

@@ -1,9 +1,9 @@
-if default_testopts.cleanup != '':
+if config.cleanup:
    cleanup = 'CLEANUP=1'
 else:
-   cleanup = ''
+   cleanup = 'CLEANUP=0'
 
 test('cabal09',
-     ignore_output,
+     normal,
      run_command,
      ['$MAKE -s --no-print-directory cabal09 ' + cleanup])

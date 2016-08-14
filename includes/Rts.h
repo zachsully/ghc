@@ -41,15 +41,6 @@ extern "C" {
 #include "rts/Types.h"
 
 #if __GNUC__ >= 3
-/* Assume that a flexible array member at the end of a struct
- * can be defined thus: T arr[]; */
-#define FLEXIBLE_ARRAY
-#else
-/* Assume that it must be defined thus: T arr[0]; */
-#define FLEXIBLE_ARRAY 0
-#endif
-
-#if __GNUC__ >= 3
 #define ATTRIBUTE_ALIGNED(n) __attribute__((aligned(n)))
 #else
 #define ATTRIBUTE_ALIGNED(n) /*nothing*/
@@ -212,7 +203,6 @@ INLINE_HEADER Time fsecondsToTime (double t)
 #include "rts/storage/ClosureTypes.h"
 #include "rts/storage/TSO.h"
 #include "stg/MiscClosures.h" /* InfoTables, closures etc. defined in the RTS */
-#include "rts/storage/SMPClosureOps.h"
 #include "rts/storage/Block.h"
 #include "rts/storage/ClosureMacros.h"
 #include "rts/storage/MBlock.h"

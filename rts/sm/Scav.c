@@ -28,6 +28,8 @@
 #include "Capability.h"
 #include "LdvProfile.h"
 
+#include "sm/MarkWeak.h"
+
 static void scavenge_stack (StgPtr p, StgPtr stack_end);
 
 static void scavenge_large_bitmap (StgPtr p,
@@ -193,7 +195,7 @@ scavenge_small_bitmap (StgPtr p, StgWord size, StgWord bitmap)
    -------------------------------------------------------------------------- */
 
 STATIC_INLINE StgPtr
-scavenge_arg_block (StgFunInfoTable *fun_info, StgClosure **args)
+scavenge_arg_block (const StgFunInfoTable *fun_info, StgClosure **args)
 {
     StgPtr p;
     StgWord bitmap;
@@ -225,9 +227,9 @@ scavenge_PAP_payload (StgClosure *fun, StgClosure **payload, StgWord size)
 {
     StgPtr p;
     StgWord bitmap;
-    StgFunInfoTable *fun_info;
+    const StgFunInfoTable *fun_info;
 
-    fun_info = get_fun_itbl(UNTAG_CLOSURE(fun));
+    fun_info = get_fun_itbl(UNTAG_CONST_CLOSURE(fun));
     ASSERT(fun_info->i.type != PAP);
     p = (StgPtr)payload;
 
@@ -276,11 +278,11 @@ scavenge_AP (StgAP *ap)
 static void
 scavenge_large_srt_bitmap( StgLargeSRT *large_srt )
 {
-    nat i, j, size;
+    uint32_t i, j, size;
     StgWord bitmap;
     StgClosure **p;
 
-    size   = (nat)large_srt->l.size;
+    size   = (uint32_t)large_srt->l.size;
     p      = (StgClosure **)large_srt->srt;
 
     for (i = 0; i < size / BITS_IN(W_); i++) {
@@ -316,9 +318,9 @@ scavenge_large_srt_bitmap( StgLargeSRT *large_srt )
  * never dereference it.
  */
 STATIC_INLINE GNUC_ATTR_HOT void
-scavenge_srt (StgClosure **srt, nat srt_bitmap)
+scavenge_srt (StgClosure **srt, uint32_t srt_bitmap)
 {
-  nat bitmap;
+  uint32_t bitmap;
   StgClosure **p;
 
   bitmap = srt_bitmap;
@@ -359,7 +361,7 @@ STATIC_INLINE GNUC_ATTR_HOT void
 scavenge_thunk_srt(const StgInfoTable *info)
 {
     StgThunkInfoTable *thunk_info;
-    nat bitmap;
+    uint32_t bitmap;
 
     if (!major_gc) return;
 
@@ -376,7 +378,7 @@ STATIC_INLINE GNUC_ATTR_HOT void
 scavenge_fun_srt(const StgInfoTable *info)
 {
     StgFunInfoTable *fun_info;
-    nat bitmap;
+    uint32_t bitmap;
 
     if (!major_gc) return;
 
@@ -405,7 +407,7 @@ static GNUC_ATTR_HOT void
 scavenge_block (bdescr *bd)
 {
   StgPtr p, q;
-  StgInfoTable *info;
+  const StgInfoTable *info;
   rtsBool saved_eager_promotion;
   gen_workspace *ws;
 
@@ -793,6 +795,13 @@ scavenge_block (bdescr *bd)
         break;
       }
 
+    case COMPACT_NFDATA:
+        // CompactNFData blocks live in compact lists, which we don't
+        // scavenge, because there nothing to scavenge in them
+        // so we should never ever see them
+        barf("scavenge: found unexpected Compact structure");
+        break;
+
     default:
         barf("scavenge: unimplemented/strange closure type %d @ %p",
              info->type, p);
@@ -845,7 +854,7 @@ static void
 scavenge_mark_stack(void)
 {
     StgPtr p, q;
-    StgInfoTable *info;
+    const StgInfoTable *info;
     rtsBool saved_eager_promotion;
 
     gct->evac_gen_no = oldest_gen->no;
@@ -1286,7 +1295,6 @@ scavenge_one(StgPtr p)
     case CONSTR_1_1:
     case CONSTR_0_2:
     case CONSTR_2_0:
-    case WEAK:
     case PRIM:
     {
         StgPtr q, end;
@@ -1297,6 +1305,14 @@ scavenge_one(StgPtr p)
         }
         break;
     }
+
+    case WEAK:
+        // This WEAK object will not be considered by tidyWeakList during this
+        // collection because it is in a generation >= N, but it is on the
+        // mutable list so we must evacuate all of its pointers because some
+        // of them may point into a younger generation.
+        scavengeLiveWeak((StgWeak *)p);
+        break;
 
     case MUT_VAR_CLEAN:
     case MUT_VAR_DIRTY: {
@@ -1533,7 +1549,7 @@ scavenge_one(StgPtr p)
         } else {
           size = gen->scan - start;
         }
-        debugBelch("evac IND_OLDGEN: %ld bytes", size * sizeof(W_));
+        debugBelch("evac IND: %ld bytes", size * sizeof(W_));
       }
 #endif
       break;
@@ -1559,7 +1575,7 @@ static void
 scavenge_mutable_list(bdescr *bd, generation *gen)
 {
     StgPtr p, q;
-    nat gen_no;
+    uint32_t gen_no;
 
     gen_no = gen->no;
     gct->evac_gen_no = gen_no;
@@ -1650,7 +1666,7 @@ scavenge_mutable_list(bdescr *bd, generation *gen)
 void
 scavenge_capability_mut_lists (Capability *cap)
 {
-    nat g;
+    uint32_t g;
 
     /* Mutable lists from each generation > N
      * we want to *scavenge* these roots, not evacuate them: they're not
@@ -1702,10 +1718,6 @@ scavenge_static(void)
 
     ASSERT(LOOKS_LIKE_CLOSURE_PTR(p));
     info = get_itbl(p);
-    /*
-        if (info->type==RBH)
-        info = REVERT_INFOPTR(info); // if it's an RBH, look at the orig closure
-    */
     // make sure the info pointer is into text space
 
     /* Take this object *off* the static_objects list,
@@ -1769,7 +1781,7 @@ scavenge_static(void)
 static void
 scavenge_large_bitmap( StgPtr p, StgLargeBitmap *large_bitmap, StgWord size )
 {
-    nat i, j, b;
+    uint32_t i, j, b;
     StgWord bitmap;
 
     b = 0;
@@ -1911,7 +1923,7 @@ scavenge_stack(StgPtr p, StgPtr stack_end)
     case RET_FUN:
     {
         StgRetFun *ret_fun = (StgRetFun *)p;
-        StgFunInfoTable *fun_info;
+        const StgFunInfoTable *fun_info;
 
         evacuate(&ret_fun->fun);
         fun_info = get_fun_itbl(UNTAG_CLOSURE(ret_fun->fun));
@@ -1948,7 +1960,7 @@ scavenge_large (gen_workspace *ws)
 
         // take this object *off* the large objects list and put it on
         // the scavenged large objects list.  This is so that we can
-        // treat new_large_objects as a stack and push new objects on
+        // treat todo_large_objects as a stack and push new objects on
         // the front when evacuating.
         ws->todo_large_objects = bd->link;
 

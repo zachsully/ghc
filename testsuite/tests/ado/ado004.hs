@@ -9,11 +9,32 @@ test1 f = do
   y <- f 4
   return (x + y)
 
+-- The same using $
+test1a :: Applicative f => (Int -> f Int) -> f Int
+test1a f = do
+  x <- f 3
+  y <- f 4
+  return $ x + y
+
 -- Test we can also infer the Applicative version of the type
 test2 f = do
   x <- f 3
   y <- f 4
   return (x + y)
+
+-- Test we can also infer the Functor version of the type
+test2a f = do
+  x <- f 3
+  return (x + 1)
+
+-- The same using $
+test2c f = do
+  x <- f 3
+  return $ x + 1
+
+-- Test for just one statement
+test2b f = do
+  return (f 3)
 
 -- This one will use join
 test3 f g = do

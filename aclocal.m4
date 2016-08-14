@@ -25,7 +25,7 @@ AC_DEFUN([GHC_SELECT_FILE_EXTENSIONS],
     x86_64-apple-darwin)
         $3='.dylib'
         ;;
-    arm-apple-darwin10|i386-apple-darwin11|aarch64-apple-darwin14)
+    arm-apple-darwin10|i386-apple-darwin11|aarch64-apple-darwin14|x86_64-apple-darwin14)
         $2='.a'
         $3='.dylib'
         ;;
@@ -271,13 +271,10 @@ AC_DEFUN([FPTOOLS_SET_HASKELL_PLATFORM_VARS],
         haiku)
             test -z "[$]2" || eval "[$]2=OSHaiku"
             ;;
-        osf3)
-            test -z "[$]2" || eval "[$]2=OSOsf3"
-            ;;
         nto-qnx)
             test -z "[$]2" || eval "[$]2=OSQNXNTO"
             ;;
-        dragonfly|osf1|hpux|linuxaout|freebsd2|gnu|nextstep2|nextstep3|sunos4|ultrix|irix)
+        dragonfly|hpux|linuxaout|freebsd2|gnu|nextstep2|nextstep3|sunos4|ultrix)
             test -z "[$]2" || eval "[$]2=OSUnknown"
             ;;
         aix)
@@ -461,42 +458,55 @@ AC_DEFUN([GET_ARM_ISA],
 # Set the variables used in the settings file
 AC_DEFUN([FP_SETTINGS],
 [
-    if test "$windows" = YES
+    SettingsCCompilerCommand="$CC"
+    SettingsHaskellCPPCommand="$HaskellCPPCmd"
+    SettingsHaskellCPPFlags="$HaskellCPPArgs"
+    SettingsLdCommand="$LdCmd"
+    SettingsArCommand="$ArCmd"
+    SettingsPerlCommand="$PerlCmd"
+
+    if test -z "$DllWrap"
     then
-        mingw_bin_prefix=mingw/bin/
-        SettingsCCompilerCommand="\$topdir/../${mingw_bin_prefix}gcc.exe"
-        SettingsHaskellCPPCommand="\$topdir/../${mingw_bin_prefix}gcc.exe"
-        SettingsHaskellCPPFlags="$HaskellCPPArgs"
-        SettingsLdCommand="\$topdir/../${mingw_bin_prefix}ld.exe"
-        SettingsArCommand="\$topdir/../${mingw_bin_prefix}ar.exe"
-        SettingsPerlCommand='$topdir/../perl/perl.exe'
-        SettingsDllWrapCommand="\$topdir/../${mingw_bin_prefix}dllwrap.exe"
-        SettingsWindresCommand="\$topdir/../${mingw_bin_prefix}windres.exe"
-        SettingsTouchCommand='$topdir/bin/touchy.exe'
-    else
-        SettingsCCompilerCommand="$WhatGccIsCalled"
-        SettingsHaskellCPPCommand="$HaskellCPPCmd"
-        SettingsHaskellCPPFlags="$HaskellCPPArgs"
-        SettingsLdCommand="$LdCmd"
-        SettingsArCommand="$ArCmd"
-        SettingsPerlCommand="$PerlCmd"
         SettingsDllWrapCommand="/bin/false"
-        SettingsWindresCommand="/bin/false"
-        SettingsLibtoolCommand="libtool"
-        SettingsTouchCommand='touch'
+    else
+        SettingsDllWrapCommand="$DllWrap"
     fi
+
+    if test -z "$Windres"
+    then
+        SettingsWindresCommand="/bin/false"
+    else
+        SettingsWindresCommand="$Windres"
+    fi
+
+    if test -z "$Libtool"
+    then
+        SettingsLibtoolCommand="libtool"
+    else
+        SettingsLibtoolCommand="$Libtool"
+    fi
+
+    if test -z "$Touch"
+    then
+        SettingsTouchCommand='touch'
+    else
+        SettingsTouchCommand='$Touch'
+    fi
+
     if test -z "$LlcCmd"
     then
       SettingsLlcCommand="llc"
     else
       SettingsLlcCommand="$LlcCmd"
     fi
+
     if test -z "$OptCmd"
     then
       SettingsOptCommand="opt"
     else
       SettingsOptCommand="$OptCmd"
     fi
+
     SettingsCCompilerFlags="$CONF_CC_OPTS_STAGE2"
     SettingsCCompilerLinkFlags="$CONF_GCC_LINKER_OPTS_STAGE2"
     SettingsLdFlags="$CONF_LD_LINKER_OPTS_STAGE2"
@@ -517,6 +527,48 @@ AC_DEFUN([FP_SETTINGS],
     AC_SUBST(SettingsOptCommand)
 ])
 
+# Helper for cloning a shell variable's state
+AC_DEFUN([FP_COPY_SHELLVAR],
+[if test -n "${$1+set}"; then $2="$$1"; else unset $2; fi ])
+
+# FP_SET_CFLAGS_C99
+# ----------------------------------
+# figure out which CFLAGS are needed to place the compiler into C99 mode
+# $1 is name of CC variable (unmodified)
+# $2 is name of CC flags variable (augmented if needed)
+# $3 is name of CPP flags variable (augmented if needed)
+AC_DEFUN([FP_SET_CFLAGS_C99],
+[
+    dnl save current state of AC_PROG_CC_C99
+    FP_COPY_SHELLVAR([CC],[fp_save_CC])
+    FP_COPY_SHELLVAR([CFLAGS],[fp_save_CFLAGS])
+    FP_COPY_SHELLVAR([CPPFLAGS],[fp_save_CPPFLAGS])
+    FP_COPY_SHELLVAR([ac_cv_prog_cc_c99],[fp_save_cc_c99])
+    dnl set local state
+    CC="$$1"
+    CFLAGS="$$2"
+    CPPFLAGS="$$3"
+    unset ac_cv_prog_cc_c99
+    dnl perform detection
+    _AC_PROG_CC_C99
+    fp_cc_c99="$ac_cv_prog_cc_c99"
+    case "x$ac_cv_prog_cc_c99" in
+      x)   ;; # noop
+      xno) AC_MSG_ERROR([C99-compatible compiler needed]) ;;
+      *)   $2="$$2 $ac_cv_prog_cc_c99"
+           $3="$$3 $ac_cv_prog_cc_c99"
+           ;;
+    esac
+    dnl restore saved state
+    FP_COPY_SHELLVAR([fp_save_CC],[CC])
+    FP_COPY_SHELLVAR([fp_save_CFLAGS],[CFLAGS])
+    FP_COPY_SHELLVAR([fp_save_CPPFLAGS],[CPPFLAGS])
+    FP_COPY_SHELLVAR([fp_save_cc_c99],[ac_cv_prog_cc_c99])
+    dnl cleanup
+    unset fp_save_CC
+    unset fp_save_CFLAGS
+    unset fp_save_cc_c99
+])
 
 # FPTOOLS_SET_C_LD_FLAGS
 # ----------------------------------
@@ -594,15 +646,10 @@ AC_DEFUN([FPTOOLS_SET_C_LD_FLAGS],
         ;;
 
     powerpc-ibm-aix*)
-        # On IBM AIX, we need to workaround XCOFF's limitations. Specifically,
-        # there's a TOC which only supports at most 16k entries (see
-        # http://www.ibm.com/developerworks/rational/library/overview-toc-aix/
-        # for more details), and by using `-mminimal-toc` we use up only one TOC
-        # entry per translation unit, at the cost of an additional pointer
-        # indirection. However, see note in `compiler/ghc.mk` about `Parser.hs`.
-        # Finally, we need `-D_THREAD_SAFE` to unlock a thread-local `errno`.
-        $2="$$2 -mminimal-toc -D_THREAD_SAFE"
-        $3="$$3 -mminimal-toc -D_THREAD_SAFE"
+        # We need `-D_THREAD_SAFE` to unlock the thread-local `errno`.
+        $2="$$2 -D_THREAD_SAFE"
+        $3="$$3 -D_THREAD_SAFE -Wl,-bnotextro"
+        $4="$$4 -bnotextro"
         $5="$$5 -D_THREAD_SAFE"
         ;;
 
@@ -797,6 +844,16 @@ m4_popdef([fp_Cache])[]dnl
 ])# FP_CHECK_ALIGNMENT
 
 
+
+# FP_CHECK_SIZEOF_AND_ALIGNMENT(TYPE)
+# ------------------------------------------------------------------
+# Combines AC_CHECK_SIZEOF and FP_CHECK_ALIGNMENT.
+AC_DEFUN([FP_CHECK_SIZEOF_AND_ALIGNMENT],
+[AC_CHECK_SIZEOF([$1])
+FP_CHECK_ALIGNMENT([$1])
+])# FP_CHECK_SIZEOF_AND_ALIGNMENT
+
+
 # FP_LEADING_UNDERSCORE
 # ---------------------
 # Test for determining whether symbol names have a leading underscore. We assume
@@ -819,7 +876,6 @@ case $HostPlatform in
     i386-*2\.@<:@0-9@:>@ | i386-*3\.@<:@0-3@:>@ ) fptools_cv_leading_underscore=yes ;;
     *) fptools_cv_leading_underscore=no ;;
   esac ;;
-alpha-dec-osf*) fptools_cv_leading_underscore=no;;
 i386-unknown-mingw32) fptools_cv_leading_underscore=yes;;
 x86_64-unknown-mingw32) fptools_cv_leading_underscore=no;;
 
@@ -1209,6 +1265,7 @@ then
   AC_MSG_ERROR([gcc is required])
 fi
 GccLT34=NO
+GccLT44=NO
 GccLT46=NO
 AC_CACHE_CHECK([version of gcc], [fp_cv_gcc_version],
 [
@@ -1219,10 +1276,12 @@ AC_CACHE_CHECK([version of gcc], [fp_cv_gcc_version],
     # isn't a very good reason for that, but for now just make configure
     # fail.
     FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-lt], [3.4], GccLT34=YES)
+    FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-lt], [4.4], GccLT44=YES)
     FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-lt], [4.6], GccLT46=YES)
 ])
 AC_SUBST([GccVersion], [$fp_cv_gcc_version])
 AC_SUBST(GccLT34)
+AC_SUBST(GccLT44)
 AC_SUBST(GccLT46)
 ])# FP_GCC_VERSION
 
@@ -1877,7 +1936,7 @@ AC_DEFUN([GHC_CONVERT_VENDOR],[
 # converts os from gnu to ghc naming, and assigns the result to $target_var
 AC_DEFUN([GHC_CONVERT_OS],[
 case "$1-$2" in
-  darwin10-arm|darwin11-i386|darwin14-aarch64)
+  darwin10-arm|darwin11-i386|darwin14-aarch64|darwin14-x86_64)
     $3="ios"
     ;;
   *)
@@ -1889,7 +1948,7 @@ case "$1-$2" in
         $3="linux"
         ;;
       # As far as I'm aware, none of these have relevant variants
-      freebsd|netbsd|openbsd|dragonfly|osf1|osf3|hpux|linuxaout|kfreebsdgnu|freebsd2|solaris2|mingw32|darwin|gnu|nextstep2|nextstep3|sunos4|ultrix|irix|haiku)
+      freebsd|netbsd|openbsd|dragonfly|hpux|linuxaout|kfreebsdgnu|freebsd2|solaris2|mingw32|darwin|gnu|nextstep2|nextstep3|sunos4|ultrix|haiku)
         $3="$1"
         ;;
       aix*) # e.g. powerpc-ibm-aix7.1.3.0
@@ -2034,41 +2093,6 @@ AC_DEFUN([FIND_GHC_BOOTSTRAP_PROG],[
 ])
 
 
-# FIND_GCC()
-# --------------------------------
-# Finds where gcc is
-#
-# $1 = the variable to set
-# $2 = the with option name
-# $3 = the command to look for
-AC_DEFUN([FIND_GCC],[
-    if test "$TargetOS_CPP" = "darwin" &&
-       test "$XCodeVersion1" -eq 4 &&
-       test "$XCodeVersion2" -lt 2
-    then
-        # In Xcode 4.1, 'gcc-4.2' is the gcc legacy backend (rather
-        # than the LLVM backend). We prefer the legacy gcc, but in
-        # Xcode 4.2 'gcc-4.2' was removed.
-        FP_ARG_WITH_PATH_GNU_PROG([$1], [gcc-4.2], [gcc-4.2])
-    elif test "$windows" = YES
-    then
-        $1="$CC"
-    else
-        FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL([$1], [$2], [$3])
-        # From Xcode 5 on/, OS X command line tools do not include gcc
-        # anymore. Use clang.
-        if test -z "$$1"
-        then
-            FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL([$1], [clang], [clang])
-        fi
-        if test -z "$$1"
-        then
-            AC_MSG_ERROR([cannot find $3 nor clang in your PATH])
-        fi
-    fi
-    AC_SUBST($1)
-])
-
 AC_DEFUN([MAYBE_OVERRIDE_STAGE0],[
   if test ! -z "$With_$1" -a "$CrossCompiling" != "YES"; then
       AC_MSG_NOTICE([Not cross-compiling, so --with-$1 also sets $2])
@@ -2102,13 +2126,13 @@ AC_ARG_WITH(hs-cpp,
 
     # We can't use $CPP here, since HS_CPP_CMD is expected to be a single
     # command (no flags), and AC_PROG_CPP defines CPP as "/usr/bin/gcc -E".
-    HS_CPP_CMD=$WhatGccIsCalled
+    HS_CPP_CMD=$CC
 
     SOLARIS_GCC_CPP_BROKEN=NO
     SOLARIS_FOUND_GOOD_CPP=NO
     case $host in
         i386-*-solaris2)
-        GCC_MAJOR_MINOR=`$WhatGccIsCalled --version|grep "gcc (GCC)"|cut -d ' ' -f 3-3|cut -d '.' -f 1-2`
+        GCC_MAJOR_MINOR=`$CC --version|grep "gcc (GCC)"|cut -d ' ' -f 3-3|cut -d '.' -f 1-2`
         if test "$GCC_MAJOR_MINOR" != "3.4"; then
           # this is not 3.4.x release so with broken CPP
           SOLARIS_GCC_CPP_BROKEN=YES

@@ -85,6 +85,14 @@ import qualified System.Posix.Internals
 #else /* Must be Win32 */
 import Foreign
 import Foreign.C.String
+import qualified System.Win32.Info as Info
+import Control.Exception (finally)
+import Foreign.Ptr (FunPtr, castPtrToFunPtr)
+import System.Win32.Types (DWORD, LPTSTR, HANDLE)
+import System.Win32.Types (failIfNull, failIf, iNVALID_HANDLE_VALUE)
+import System.Win32.File (createFile,closeHandle, gENERIC_READ, fILE_SHARE_READ, oPEN_EXISTING, fILE_ATTRIBUTE_NORMAL, fILE_FLAG_BACKUP_SEMANTICS )
+import System.Win32.DLL (loadLibrary, getProcAddress)
+import Data.Bits((.|.))
 #endif
 
 import System.Process
@@ -501,51 +509,25 @@ readCreateProcessWithExitCode' proc = do
 
     return (ex, output)
 
+replaceVar :: (String, String) -> [(String, String)] -> [(String, String)]
+replaceVar (var, value) env =
+    (var, value) : filter (\(var',_) -> var /= var') env
+
+-- | Version of @System.Process.readProcessWithExitCode@ that takes a
+-- key-value tuple to insert into the environment.
 readProcessEnvWithExitCode
     :: String -- ^ program path
     -> [String] -- ^ program args
-    -> [(String, String)] -- ^ environment to override
+    -> (String, String) -- ^ addition to the environment
     -> IO (ExitCode, String, String) -- ^ (exit_code, stdout, stderr)
 readProcessEnvWithExitCode prog args env_update = do
     current_env <- getEnvironment
-    let new_env = env_update ++ [ (k, v)
-                                | let overriden_keys = map fst env_update
-                                , (k, v) <- current_env
-                                , k `notElem` overriden_keys
-                                ]
-        p       = proc prog args
-
-    (_stdin, Just stdoh, Just stdeh, pid) <-
-        createProcess p{ std_out = CreatePipe
-                       , std_err = CreatePipe
-                       , env     = Just new_env
-                       }
-
-    outMVar <- newEmptyMVar
-    errMVar <- newEmptyMVar
-
-    _ <- forkIO $ do
-        stdo <- hGetContents stdoh
-        _ <- evaluate (length stdo)
-        putMVar outMVar stdo
-
-    _ <- forkIO $ do
-        stde <- hGetContents stdeh
-        _ <- evaluate (length stde)
-        putMVar errMVar stde
-
-    out <- takeMVar outMVar
-    hClose stdoh
-    err <- takeMVar errMVar
-    hClose stdeh
-
-    ex <- waitForProcess pid
-
-    return (ex, out, err)
+    readCreateProcessWithExitCode (proc prog args) {
+        env = Just (replaceVar env_update current_env) } ""
 
 -- Don't let gcc localize version info string, #8825
-en_locale_env :: [(String, String)]
-en_locale_env = [("LANGUAGE", "en")]
+c_locale_env :: (String, String)
+c_locale_env = ("LANGUAGE", "C")
 
 -- If the -B<dir> option is set, add <dir> to PATH.  This works around
 -- a bug in gcc on Windows Vista where it can't find its auxiliary
@@ -856,7 +838,7 @@ getLinkerInfo' dflags = do
                  -- -Wl,--version to get linker version info.
                  (exitc, stdo, stde) <- readProcessEnvWithExitCode pgm
                                         (["-Wl,--version"] ++ args3)
-                                        en_locale_env
+                                        c_locale_env
                  -- Split the output by lines to make certain kinds
                  -- of processing easier. In particular, 'clang' and 'gcc'
                  -- have slightly different outputs for '-Wl,--version', but
@@ -912,7 +894,7 @@ getCompilerInfo' dflags = do
   -- Process the executable call
   info <- catchIO (do
                 (exitc, stdo, stde) <-
-                    readProcessEnvWithExitCode pgm ["-v"] en_locale_env
+                    readProcessEnvWithExitCode pgm ["-v"] c_locale_env
                 -- Split the output by lines to make certain kinds
                 -- of processing easier.
                 parseCompilerInfo (lines stdo) (lines stde) exitc
@@ -934,9 +916,26 @@ runLink dflags args = do
   let (p,args0) = pgm_l dflags
       args1     = map Option (getOpts dflags opt_l)
       args2     = args0 ++ linkargs ++ args1 ++ args
-  mb_env <- getGccEnv args2
-  runSomethingResponseFile dflags ld_filter "Linker" p args2 mb_env
+      args3     = argFixup args2 []
+  mb_env <- getGccEnv args3
+  runSomethingResponseFile dflags ld_filter "Linker" p args3 mb_env
   where
+    testLib lib = "-l" `isPrefixOf` lib || ".a" `isSuffixOf` lib
+    {- GHC is just blindly appending linker arguments from libraries and
+       the commandline together. This results in very problematic link orders
+       which will cause incorrect linking. Since we're changing the link
+       arguments anyway, let's just make sure libraries are last.
+       This functions moves libraries on the link all the way back
+       but keeps the order amongst them the same. -}
+    argFixup []                        r = [] ++ r
+    -- retain any lib in "-o" position.
+    argFixup (o@(Option "-o"):o'@(FileOption _ _):xs) r = o:o':argFixup xs r
+    argFixup (o@(Option       opt):xs) r = if testLib opt
+                                              then argFixup xs (r ++ [o])
+                                              else o:argFixup xs r
+    argFixup (o@(FileOption _ opt):xs) r = if testLib opt
+                                              then argFixup xs (r ++ [o])
+                                              else o:argFixup xs r
     ld_filter = case (platformOS (targetPlatform dflags)) of
                   OSSolaris2 -> sunos_ld_filter
                   _ -> id
@@ -1480,8 +1479,18 @@ getBaseDir = try_size 2048 -- plenty, PATH_MAX is 512 under Win32.
         ret <- c_GetModuleFileName nullPtr buf size
         case ret of
           0 -> return Nothing
-          _ | ret < size -> fmap (Just . rootDir) $ peekCWString buf
+          _ | ret < size -> do path <- peekCWString buf
+                               real <- getFinalPath path -- try to resolve symlinks paths
+                               return $ (Just . rootDir . sanitize . maybe path id) real
             | otherwise  -> try_size (size * 2)
+
+    -- getFinalPath returns paths in full raw form.
+    -- Unfortunately GHC isn't set up to handle these
+    -- So if the call succeeded, we need to drop the
+    -- \\?\ prefix.
+    sanitize s = if "\\\\?\\" `isPrefixOf` s
+                    then drop 4 s
+                    else s
 
     rootDir s = case splitFileName $ normalise s of
                 (d, ghc_exe)
@@ -1499,6 +1508,38 @@ getBaseDir = try_size 2048 -- plenty, PATH_MAX is 512 under Win32.
 
 foreign import WINDOWS_CCONV unsafe "windows.h GetModuleFileNameW"
   c_GetModuleFileName :: Ptr () -> CWString -> Word32 -> IO Word32
+
+-- Attempt to resolve symlinks in order to find the actual location GHC
+-- is located at. See Trac #11759.
+getFinalPath :: FilePath -> IO (Maybe FilePath)
+getFinalPath name = do
+    dllHwnd <- failIfNull "LoadLibray"     $ loadLibrary "kernel32.dll"
+    -- Note: The API GetFinalPathNameByHandleW is only available starting from Windows Vista.
+    -- This means that we can't bind directly to it since it may be missing.
+    -- Instead try to find it's address at runtime and if we don't succeed consider the
+    -- function failed.
+    addr_m  <- (fmap Just $ failIfNull "getProcAddress" $ getProcAddress dllHwnd "GetFinalPathNameByHandleW")
+                  `catch` (\(_ :: SomeException) -> return Nothing)
+    case addr_m of
+      Nothing   -> return Nothing
+      Just addr -> do handle  <- failIf (==iNVALID_HANDLE_VALUE) "CreateFile"
+                                        $ createFile name
+                                                     gENERIC_READ
+                                                     fILE_SHARE_READ
+                                                     Nothing
+                                                     oPEN_EXISTING
+                                                     (fILE_ATTRIBUTE_NORMAL .|. fILE_FLAG_BACKUP_SEMANTICS)
+                                                     Nothing
+                      let fnPtr = makeGetFinalPathNameByHandle $ castPtrToFunPtr addr
+                      path    <- Info.try "GetFinalPathName"
+                                    (\buf len -> fnPtr handle buf len 0) 512
+                                    `finally` closeHandle handle
+                      return $ Just path
+
+type GetFinalPath = HANDLE -> LPTSTR -> DWORD -> DWORD -> IO DWORD
+
+foreign import WINDOWS_CCONV unsafe "dynamic"
+  makeGetFinalPathNameByHandle :: FunPtr GetFinalPath -> GetFinalPath
 #else
 getBaseDir = return Nothing
 #endif

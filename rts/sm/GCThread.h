@@ -87,20 +87,22 @@ typedef struct gen_workspace_ {
 
     WSDeque *    todo_q;
     bdescr *     todo_overflow;
-    nat          n_todo_overflow;
+    uint32_t     n_todo_overflow;
 
     // where large objects to be scavenged go
     bdescr *     todo_large_objects;
 
     // Objects that have already been scavenged.
     bdescr *     scavd_list;
-    nat          n_scavd_blocks;     // count of blocks in this list
+    StgWord      n_scavd_blocks;     // count of blocks in this list
+    StgWord      n_scavd_words;
 
     // Partially-full, scavenged, blocks
     bdescr *     part_list;
-    unsigned int n_part_blocks;      // count of above
+    StgWord      n_part_blocks;      // count of above
+    StgWord      n_part_words;
 
-    StgWord pad[3];
+    StgWord pad[1];
 
 } gen_workspace ATTRIBUTE_ALIGNED(64);
 // align so that computing gct->gens[n] is a shift, not a multiply
@@ -124,7 +126,7 @@ typedef struct gc_thread_ {
     SpinLock   mut_spin;
     volatile StgWord wakeup;       // NB not StgWord8; only StgWord is guaranteed atomic
 #endif
-    nat thread_index;              // a zero based index identifying the thread
+    uint32_t thread_index;         // a zero based index identifying the thread
     rtsBool idle;                  // sitting out of this GC cycle
 
     bdescr * free_blocks;          // a buffer of free blocks for this thread
@@ -153,7 +155,7 @@ typedef struct gc_thread_ {
     // --------------------
     // evacuate flags
 
-    nat evac_gen_no;               // Youngest generation that objects
+    uint32_t evac_gen_no;               // Youngest generation that objects
                                    // should be evacuated to in
                                    // evacuate().  (Logically an
                                    // argument to evacuate, but it's
@@ -198,7 +200,7 @@ typedef struct gc_thread_ {
 } gc_thread;
 
 
-extern nat n_gc_threads;
+extern uint32_t n_gc_threads;
 
 extern gc_thread **gc_threads;
 

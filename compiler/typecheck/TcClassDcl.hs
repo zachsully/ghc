@@ -20,13 +20,13 @@ module TcClassDcl ( tcClassSigs, tcClassDecl2,
 
 import HsSyn
 import TcEnv
-import TcPat( addInlinePrags, lookupPragEnv, emptyPragEnv )
-import TcEvidence( idHsWrapper )
+import TcSigs
+import TcEvidence ( idHsWrapper )
 import TcBinds
 import TcUnify
 import TcHsType
 import TcMType
-import Type     ( getClassPredTys_maybe, varSetElemsWellScoped, piResultTys )
+import Type     ( getClassPredTys_maybe, piResultTys )
 import TcType
 import TcRnMonad
 import BuildTyCl( TcMethInfo )
@@ -41,7 +41,6 @@ import NameEnv
 import NameSet
 import Var
 import VarEnv
-import VarSet
 import Outputable
 import SrcLoc
 import TyCon
@@ -53,7 +52,7 @@ import BooleanFormula
 import Util
 
 import Control.Monad
-import Data.List ( mapAccumL )
+import Data.List ( mapAccumL, partition )
 
 {-
 Dictionary handling
@@ -104,7 +103,7 @@ tcClassSigs clas sigs def_methods
   = do { traceTc "tcClassSigs 1" (ppr clas)
 
        ; gen_dm_prs <- concat <$> mapM (addLocM tc_gen_sig) gen_sigs
-       ; let gen_dm_env :: NameEnv Type
+       ; let gen_dm_env :: NameEnv (SrcSpan, Type)
              gen_dm_env = mkNameEnv gen_dm_prs
 
        ; op_info <- concat <$> mapM (addLocM (tc_sig gen_dm_env)) vanilla_sigs
@@ -126,7 +125,7 @@ tcClassSigs clas sigs def_methods
     dm_bind_names :: [Name]     -- These ones have a value binding in the class decl
     dm_bind_names = [op | L _ (FunBind {fun_id = L _ op}) <- bagToList def_methods]
 
-    tc_sig :: NameEnv Type -> ([Located Name], LHsSigType Name)
+    tc_sig :: NameEnv (SrcSpan, Type) -> ([Located Name], LHsSigType Name)
            -> TcM [TcMethInfo]
     tc_sig gen_dm_env (op_names, op_hs_ty)
       = do { traceTc "ClsSig 1" (ppr op_names)
@@ -134,13 +133,13 @@ tcClassSigs clas sigs def_methods
            ; traceTc "ClsSig 2" (ppr op_names)
            ; return [ (op_name, op_ty, f op_name) | L _ op_name <- op_names ] }
            where
-             f nm | Just ty <- lookupNameEnv gen_dm_env nm = Just (GenericDM ty)
+             f nm | Just lty <- lookupNameEnv gen_dm_env nm = Just (GenericDM lty)
                   | nm `elem` dm_bind_names                = Just VanillaDM
                   | otherwise                              = Nothing
 
     tc_gen_sig (op_names, gen_hs_ty)
       = do { gen_op_ty <- tcClassSigType op_names gen_hs_ty
-           ; return [ (op_name, gen_op_ty) | L _ op_name <- op_names ] }
+           ; return [ (op_name, (loc, gen_op_ty)) | L loc op_name <- op_names ] }
 
 {-
 ************************************************************************
@@ -153,10 +152,10 @@ tcClassSigs clas sigs def_methods
 tcClassDecl2 :: LTyClDecl Name          -- The class declaration
              -> TcM (LHsBinds Id)
 
-tcClassDecl2 (L loc (ClassDecl {tcdLName = class_name, tcdSigs = sigs,
+tcClassDecl2 (L _ (ClassDecl {tcdLName = class_name, tcdSigs = sigs,
                                 tcdMeths = default_binds}))
   = recoverM (return emptyLHsBinds)     $
-    setSrcSpan loc                      $
+    setSrcSpan (getLoc class_name)      $
     do  { clas <- tcLookupLocatedClass class_name
 
         -- We make a separate binding for each default method.
@@ -200,11 +199,11 @@ tcDefMeth _ _ _ _ _ prag_fn (sel_id, Nothing)
 
 tcDefMeth clas tyvars this_dict binds_in hs_sig_fn prag_fn
           (sel_id, Just (dm_name, dm_spec))
-  | Just (L bind_loc dm_bind, bndr_loc) <- findMethodBind sel_name binds_in
+  | Just (L bind_loc dm_bind, bndr_loc, prags) <- findMethodBind sel_name binds_in prag_fn
   = do { -- First look up the default method -- It should be there!
          global_dm_id  <- tcLookupId dm_name
        ; global_dm_id  <- addInlinePrags global_dm_id prags
-       ; local_dm_name <- setSrcSpan bndr_loc (newLocalName sel_name)
+       ; local_dm_name <- newNameAt (getOccName sel_name) bndr_loc
             -- Base the local_dm_name on the selector name, because
             -- type errors from tcInstanceMethodBody come from here
 
@@ -242,31 +241,31 @@ tcDefMeth clas tyvars this_dict binds_in hs_sig_fn prag_fn
 
              ctxt = FunSigCtxt sel_name warn_redundant
 
-       ; local_dm_sig <- instTcTySig ctxt hs_ty local_dm_ty local_dm_name
-        ; (ev_binds, (tc_bind, _))
+       ; let local_dm_id = mkLocalId local_dm_name local_dm_ty
+             local_dm_sig = CompleteSig { sig_bndr = local_dm_id
+                                        , sig_ctxt  = ctxt
+                                        , sig_loc   = getLoc (hsSigType hs_ty) }
+
+       ; (ev_binds, (tc_bind, _))
                <- checkConstraints (ClsSkol clas) tyvars [this_dict] $
-                  tcPolyCheck NonRecursive no_prag_fn local_dm_sig
+                  tcPolyCheck no_prag_fn local_dm_sig
                               (L bind_loc lm_bind)
 
-        ; let export = ABE { abe_poly      = global_dm_id
-                           -- We have created a complete type signature in
-                           -- instTcTySig, hence it is safe to call
-                           -- completeSigPolyId
-                           , abe_mono      = completeIdSigPolyId local_dm_sig
-                           , abe_wrap      = idHsWrapper
-                           , abe_prags     = IsDefaultMethod }
-              full_bind = AbsBinds { abs_tvs      = tyvars
-                                   , abs_ev_vars  = [this_dict]
-                                   , abs_exports  = [export]
-                                   , abs_ev_binds = [ev_binds]
-                                   , abs_binds    = tc_bind }
+       ; let export = ABE { abe_poly   = global_dm_id
+                           , abe_mono  = local_dm_id
+                           , abe_wrap  = idHsWrapper
+                           , abe_prags = IsDefaultMethod }
+             full_bind = AbsBinds { abs_tvs      = tyvars
+                                  , abs_ev_vars  = [this_dict]
+                                  , abs_exports  = [export]
+                                  , abs_ev_binds = [ev_binds]
+                                  , abs_binds    = tc_bind }
 
-        ; return (unitBag (L bind_loc full_bind)) }
+       ; return (unitBag (L bind_loc full_bind)) }
 
   | otherwise = pprPanic "tcDefMeth" (ppr sel_id)
   where
     sel_name = idName sel_id
-    prags    = lookupPragEnv prag_fn sel_name
     no_prag_fn = emptyPragEnv   -- No pragmas for local_meth_id;
                                 -- they are all for meth_id
 
@@ -326,17 +325,21 @@ lookupHsSig :: HsSigFun -> Name -> Maybe (LHsSigType Name)
 lookupHsSig = lookupNameEnv
 
 ---------------------------
-findMethodBind  :: Name                 -- Selector name
+findMethodBind  :: Name                 -- Selector
                 -> LHsBinds Name        -- A group of bindings
-                -> Maybe (LHsBind Name, SrcSpan)
-                -- Returns the binding, and the binding
-                -- site of the method binder
-findMethodBind sel_name binds
+                -> TcPragEnv
+                -> Maybe (LHsBind Name, SrcSpan, [LSig Name])
+                -- Returns the binding, the binding
+                -- site of the method binder, and any inline or
+                -- specialisation pragmas
+findMethodBind sel_name binds prag_fn
   = foldlBag mplus Nothing (mapBag f binds)
   where
+    prags    = lookupPragEnv prag_fn sel_name
+
     f bind@(L _ (FunBind { fun_id = L bndr_loc op_name }))
       | op_name == sel_name
-             = Just (bind, bndr_loc)
+             = Just (bind, bndr_loc, prags)
     f _other = Nothing
 
 ---------------------------
@@ -454,10 +457,10 @@ tcATDefault emit_warn loc inst_subst defined_ats (ATI fam_tc defs)
   = do { let (subst', pat_tys') = mapAccumL subst_tv inst_subst
                                             (tyConTyVars fam_tc)
              rhs'     = substTyUnchecked subst' rhs_ty
-             tcv_set' = tyCoVarsOfTypes pat_tys'
-             (tv_set', cv_set') = partitionVarSet isTyVar tcv_set'
-             tvs'     = varSetElemsWellScoped tv_set'
-             cvs'     = varSetElemsWellScoped cv_set'
+             tcv' = tyCoVarsOfTypesList pat_tys'
+             (tv', cv') = partition isTyVar tcv'
+             tvs'     = toposortTyVars tv'
+             cvs'     = toposortTyVars cv'
        ; rep_tc_name <- newFamInstTyConName (L loc (tyConName fam_tc)) pat_tys'
        ; let axiom = mkSingleCoAxiom Nominal rep_tc_name tvs' cvs'
                                      fam_tc pat_tys' rhs'

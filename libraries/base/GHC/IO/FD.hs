@@ -88,15 +88,18 @@ fdIsSocket :: FD -> Bool
 fdIsSocket fd = fdIsSocket_ fd /= 0
 #endif
 
+-- | @since 4.1.0.0
 instance Show FD where
   show fd = show (fdFD fd)
 
+-- | @since 4.1.0.0
 instance GHC.IO.Device.RawIO FD where
   read             = fdRead
   readNonBlocking  = fdReadNonBlocking
   write            = fdWrite
   writeNonBlocking = fdWriteNonBlocking
 
+-- | @since 4.1.0.0
 instance GHC.IO.Device.IODevice FD where
   ready         = ready
   close         = close
@@ -120,6 +123,7 @@ instance GHC.IO.Device.IODevice FD where
 dEFAULT_FD_BUFFER_SIZE :: Int
 dEFAULT_FD_BUFFER_SIZE = 8096
 
+-- | @since 4.1.0.0
 instance BufferedIO FD where
   newBuffer _dev state = newByteBuffer dEFAULT_FD_BUFFER_SIZE state
   fillReadBuffer    fd buf = readBuf' fd buf
@@ -606,18 +610,18 @@ asyncWriteRawBufferPtr loc !fd buf off len = do
 
 blockingReadRawBufferPtr :: String -> FD -> Ptr Word8 -> Int -> CSize -> IO CInt
 blockingReadRawBufferPtr loc fd buf off len
-  = fmap fromIntegral $ throwErrnoIfMinus1Retry loc $
+  = throwErrnoIfMinus1Retry loc $
         if fdIsSocket fd
-           then c_safe_recv (fdFD fd) (buf `plusPtr` off) len 0
-           else c_safe_read (fdFD fd) (buf `plusPtr` off) len
+           then c_safe_recv (fdFD fd) (buf `plusPtr` off) (fromIntegral len) 0
+           else c_safe_read (fdFD fd) (buf `plusPtr` off) (fromIntegral len)
 
 blockingWriteRawBufferPtr :: String -> FD -> Ptr Word8-> Int -> CSize -> IO CInt
 blockingWriteRawBufferPtr loc fd buf off len
-  = fmap fromIntegral $ throwErrnoIfMinus1Retry loc $
+  = throwErrnoIfMinus1Retry loc $
         if fdIsSocket fd
-           then c_safe_send  (fdFD fd) (buf `plusPtr` off) len 0
+           then c_safe_send  (fdFD fd) (buf `plusPtr` off) (fromIntegral len) 0
            else do
-             r <- c_safe_write (fdFD fd) (buf `plusPtr` off) len
+             r <- c_safe_write (fdFD fd) (buf `plusPtr` off) (fromIntegral len)
              when (r == -1) c_maperrno
              return r
       -- we don't trust write() to give us the correct errno, and
@@ -631,10 +635,10 @@ blockingWriteRawBufferPtr loc fd buf off len
 -- These calls may block, but that's ok.
 
 foreign import WINDOWS_CCONV safe "recv"
-   c_safe_recv :: CInt -> Ptr Word8 -> CSize -> CInt{-flags-} -> IO CSsize
+   c_safe_recv :: CInt -> Ptr Word8 -> CInt -> CInt{-flags-} -> IO CInt
 
 foreign import WINDOWS_CCONV safe "send"
-   c_safe_send :: CInt -> Ptr Word8 -> CSize -> CInt{-flags-} -> IO CSsize
+   c_safe_send :: CInt -> Ptr Word8 -> CInt -> CInt{-flags-} -> IO CInt
 
 #endif
 

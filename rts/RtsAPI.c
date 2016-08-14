@@ -22,7 +22,7 @@
    Building Haskell objects from C datatypes.
 
    TODO: Currently this code does not tag created pointers,
-         however it is not unsafe (the contructor code will do it)
+         however it is not unsafe (the constructor code will do it)
          just inefficient.
    ------------------------------------------------------------------------- */
 HaskellObj
@@ -363,9 +363,9 @@ rts_getFunPtr (HaskellObj p)
 HsBool
 rts_getBool (HaskellObj p)
 {
-    StgInfoTable *info;
+    const StgInfoTable *info;
 
-    info = get_itbl((StgClosure *)UNTAG_CLOSURE(p));
+    info = get_itbl((const StgClosure *)UNTAG_CONST_CLOSURE(p));
     if (info->srt_bitmap == 0) { // srt_bitmap is the constructor tag
         return 0;
     } else {

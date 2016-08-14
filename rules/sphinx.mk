@@ -31,7 +31,7 @@ $(call all-target,$1,)
 ifeq "$$(phase)" "final"
 ifeq "$$(BUILD_SPHINX_HTML)" "YES"
 $(call all-target,$1,html_$1)
-INSTALL_HTML_DOC_DIRS += $1/build-html/$2 $1/build-html/$2/_static $1/build-html/$2/_sources
+INSTALL_HTML_DOC_DIRS += $1/build-html/$2
 endif
 endif
 
@@ -56,10 +56,14 @@ pdf_$1 : $1/$2.pdf
 pdf : pdf_$1
 
 ifneq "$$(BINDIST)" "YES"
-$1/$2.pdf: $$($1_RST_SOURCES)
+$1/$2.pdf: $1/conf.py $$($1_RST_SOURCES)
 	$(SPHINXBUILD) -b latex -d $1/.doctrees-pdf $(SPHINXOPTS) $1 $1/build-pdf/$2
-	cd $1/build-pdf/$2 ; xelatex $2.tex
-	cd $1/build-pdf/$2 ; xelatex $2.tex
+	cd $1/build-pdf/$2 ; xelatex -halt-on-error $2.tex
+	cd $1/build-pdf/$2 ; xelatex -halt-on-error $2.tex
+	cd $1/build-pdf/$2 ; xelatex -halt-on-error $2.tex
+	cd $1/build-pdf/$2 ; makeindex $2.idx
+	cd $1/build-pdf/$2 ; xelatex -halt-on-error $2.tex
+	cd $1/build-pdf/$2 ; xelatex -halt-on-error $2.tex
 	cp $1/build-pdf/$2/$2.pdf $1/$2.pdf
 endif
 

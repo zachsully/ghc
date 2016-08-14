@@ -37,7 +37,7 @@ $(eval $(call all-target,rts,$(ALL_RTS_LIBS)))
 # -----------------------------------------------------------------------------
 # Defining the sources
 
-ALL_DIRS = hooks sm eventlog
+ALL_DIRS = hooks sm eventlog linker
 
 ifeq "$(HostOS_CPP)" "mingw32"
 ALL_DIRS += win32
@@ -53,6 +53,7 @@ ifneq "$(PORTING_HOST)" "YES"
 ifneq "$(findstring $(TargetArch_CPP), i386 powerpc powerpc64)" ""
 rts_S_SRCS += rts/AdjustorAsm.S
 endif
+# this matches substrings of powerpc64le, including "powerpc" and "powerpc64"
 ifneq "$(findstring $(TargetArch_CPP), powerpc64le)" ""
 rts_S_SRCS += rts/StgCRunAsm.S
 endif
@@ -479,14 +480,6 @@ rts_PACKAGE_CPP_OPTS += '-DFFI_LIB="C$(LIBFFI_NAME)"'
 
 endif
 
-#-----------------------------------------------------------------------------
-# Add support for reading DWARF debugging information, if available
-
-ifeq "$(GhcRtsWithLibdw)" "YES"
-rts_CC_OPTS          += -DUSE_LIBDW
-rts_PACKAGE_CPP_OPTS += -DUSE_LIBDW
-endif
-
 # -----------------------------------------------------------------------------
 # dependencies
 
@@ -537,7 +530,7 @@ ifeq "$(TargetOS_CPP)" "darwin"
 # Darwin has a flag to tell dtrace which cpp to use.
 # Unfortunately, this isn't supported on Solaris (See Solaris Dynamic Tracing
 # Guide, Chapter 16, for the configuration variables available on Solaris)
-DTRACE_FLAGS = -x cpppath=$(WhatGccIsCalled)
+DTRACE_FLAGS = -x cpppath=$(CC)
 endif
 
 DTRACEPROBES_SRC = rts/RtsProbes.d

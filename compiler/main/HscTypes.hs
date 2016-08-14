@@ -4,7 +4,7 @@
 \section[HscTypes]{Types for the per-module compiler}
 -}
 
-{-# LANGUAGE CPP, DeriveDataTypeable, ScopedTypeVariables #-}
+{-# LANGUAGE CPP, ScopedTypeVariables #-}
 
 -- | Types for the per-module compiler
 module HscTypes (
@@ -37,6 +37,8 @@ module HscTypes (
 
         -- * State relating to modules in this package
         HomePackageTable, HomeModInfo(..), emptyHomePackageTable,
+        lookupHpt, eltsHpt, filterHpt, allHpt, mapHpt, delFromHpt,
+        addToHpt, addListToHpt, lookupHptDirectly, listToHpt,
         hptInstances, hptRules, hptVectInfo, pprHPT,
         hptObjs,
 
@@ -85,7 +87,7 @@ module HscTypes (
         TypeEnv, lookupType, lookupTypeHscEnv, mkTypeEnv, emptyTypeEnv,
         typeEnvFromEntities, mkTypeEnvWithImplicits,
         extendTypeEnv, extendTypeEnvList,
-        extendTypeEnvWithIds,
+        extendTypeEnvWithIds, plusTypeEnv,
         lookupTypeEnv,
         typeEnvElts, typeEnvTyCons, typeEnvIds, typeEnvPatSyns,
         typeEnvDataCons, typeEnvCoAxioms, typeEnvClasses,
@@ -137,6 +139,7 @@ import ByteCodeTypes
 import InteractiveEvalTypes ( Resume )
 import GHCi.Message         ( Pipe )
 import GHCi.RemoteTypes
+import UniqFM
 #endif
 
 import HsSyn
@@ -176,8 +179,8 @@ import CoreSyn          ( CoreRule, CoreVect )
 import Maybes
 import Outputable
 import SrcLoc
--- import Unique
-import UniqFM
+import Unique
+import UniqDFM
 import UniqSupply
 import FastString
 import StringBuffer     ( StringBuffer )
@@ -194,7 +197,6 @@ import Foreign
 import Control.Monad    ( guard, liftM, when, ap )
 import Data.IORef
 import Data.Time
-import Data.Typeable    ( Typeable )
 import Exception
 import System.FilePath
 #ifdef GHCI
@@ -286,7 +288,6 @@ throwOneError err = liftIO $ throwIO $ mkSrcErr $ unitBag err
 -- See 'printExceptionAndWarnings' for more information on what to take care
 -- of when writing a custom error handler.
 newtype SourceError = SourceError ErrorMessages
-  deriving Typeable
 
 instance Show SourceError where
   show (SourceError msgs) = unlines . map show . bagToList $ msgs
@@ -304,7 +305,6 @@ handleSourceError handler act =
 
 -- | An error thrown if the GHC API is used in an incorrect fashion.
 newtype GhcApiError = GhcApiError String
-  deriving Typeable
 
 instance Show GhcApiError where
   show (GhcApiError msg) = msg
@@ -468,7 +468,7 @@ instance Outputable TargetId where
 -}
 
 -- | Helps us find information about modules in the home package
-type HomePackageTable  = ModuleNameEnv HomeModInfo
+type HomePackageTable  = DModuleNameEnv HomeModInfo
         -- Domain = modules in the home package that have been fully compiled
         -- "home" unit id cached here for convenience
 
@@ -478,7 +478,7 @@ type PackageIfaceTable = ModuleEnv ModIface
 
 -- | Constructs an empty HomePackageTable
 emptyHomePackageTable :: HomePackageTable
-emptyHomePackageTable  = emptyUFM
+emptyHomePackageTable  = emptyUDFM
 
 -- | Constructs an empty PackageIfaceTable
 emptyPackageIfaceTable :: PackageIfaceTable
@@ -486,16 +486,47 @@ emptyPackageIfaceTable = emptyModuleEnv
 
 pprHPT :: HomePackageTable -> SDoc
 -- A bit aribitrary for now
-pprHPT hpt
-  = vcat [ hang (ppr (mi_module (hm_iface hm)))
+pprHPT hpt = pprUDFM hpt $ \hms ->
+    vcat [ hang (ppr (mi_module (hm_iface hm)))
               2 (ppr (md_types (hm_details hm)))
-         | hm <- eltsUFM hpt ]
+         | hm <- hms ]
+
+lookupHpt :: HomePackageTable -> ModuleName -> Maybe HomeModInfo
+lookupHpt = lookupUDFM
+
+lookupHptDirectly :: HomePackageTable -> Unique -> Maybe HomeModInfo
+lookupHptDirectly = lookupUDFM_Directly
+
+eltsHpt :: HomePackageTable -> [HomeModInfo]
+eltsHpt = eltsUDFM
+
+filterHpt :: (HomeModInfo -> Bool) -> HomePackageTable -> HomePackageTable
+filterHpt = filterUDFM
+
+allHpt :: (HomeModInfo -> Bool) -> HomePackageTable -> Bool
+allHpt = allUDFM
+
+mapHpt :: (HomeModInfo -> HomeModInfo) -> HomePackageTable -> HomePackageTable
+mapHpt = mapUDFM
+
+delFromHpt :: HomePackageTable -> ModuleName -> HomePackageTable
+delFromHpt = delFromUDFM
+
+addToHpt :: HomePackageTable -> ModuleName -> HomeModInfo -> HomePackageTable
+addToHpt = addToUDFM
+
+addListToHpt
+  :: HomePackageTable -> [(ModuleName, HomeModInfo)] -> HomePackageTable
+addListToHpt = addListToUDFM
+
+listToHpt :: [(ModuleName, HomeModInfo)] -> HomePackageTable
+listToHpt = listToUDFM
 
 lookupHptByModule :: HomePackageTable -> Module -> Maybe HomeModInfo
 -- The HPT is indexed by ModuleName, not Module,
 -- we must check for a hit on the right Module
 lookupHptByModule hpt mod
-  = case lookupUFM hpt (moduleName mod) of
+  = case lookupHpt hpt (moduleName mod) of
       Just hm | mi_module (hm_iface hm) == mod -> Just hm
       _otherwise                               -> Nothing
 
@@ -578,7 +609,7 @@ hptAnns hsc_env (Just deps) = hptSomeThingsBelowUs (md_anns . hm_details) False 
 hptAnns hsc_env Nothing = hptAllThings (md_anns . hm_details) hsc_env
 
 hptAllThings :: (HomeModInfo -> [a]) -> HscEnv -> [a]
-hptAllThings extract hsc_env = concatMap extract (eltsUFM (hsc_HPT hsc_env))
+hptAllThings extract hsc_env = concatMap extract (eltsHpt (hsc_HPT hsc_env))
 
 -- | Get things from modules "below" this one (in the dependency sense)
 -- C.f Inst.hptInstances
@@ -601,7 +632,7 @@ hptSomeThingsBelowUs extract include_hi_boot hsc_env deps
     , mod /= moduleName gHC_PRIM
 
         -- Look it up in the HPT
-    , let things = case lookupUFM hpt mod of
+    , let things = case lookupHpt hpt mod of
                     Just info -> extract info
                     Nothing -> pprTrace "WARNING in hptSomeThingsBelowUs" msg []
           msg = vcat [text "missing module" <+> ppr mod,
@@ -612,7 +643,7 @@ hptSomeThingsBelowUs extract include_hi_boot hsc_env deps
     , thing <- things ]
 
 hptObjs :: HomePackageTable -> [FilePath]
-hptObjs hpt = concat (map (maybe [] linkableObjs . hm_linkable) (eltsUFM hpt))
+hptObjs hpt = concat (map (maybe [] linkableObjs . hm_linkable) (eltsHpt hpt))
 
 {-
 ************************************************************************
@@ -1504,9 +1535,9 @@ icExtendGblRdrEnv env tythings
        | is_sub_bndr thing
        = env
        | otherwise
-       = foldl extendGlobalRdrEnv env1 (localGREsFromAvail avail)
+       = foldl extendGlobalRdrEnv env1 (concatMap localGREsFromAvail avail)
        where
-          env1  = shadowNames env (availNames avail)
+          env1  = shadowNames env (concatMap availNames avail)
           avail = tyThingAvailInfo thing
 
     -- Ugh! The new_tythings may include record selectors, since they
@@ -1619,7 +1650,8 @@ mkPrintUnqualified dflags env = QueryQualify qual_name
                             -- Eg  f = True; g = 0; f = False
       where
         is_name :: Name -> Bool
-        is_name name = nameModule name == mod && nameOccName name == occ
+        is_name name = ASSERT2( isExternalName name, ppr name )
+                       nameModule name == mod && nameOccName name == occ
 
         forceUnqualNames :: [Name]
         forceUnqualNames =
@@ -1762,7 +1794,7 @@ implicitTyConThings tc
     implicitCoTyCon tc ++
 
       -- for each data constructor in order,
-      --   the contructor, worker, and (possibly) wrapper
+      --   the constructor, worker, and (possibly) wrapper
     [ thing | dc    <- tyConDataCons tc
             , thing <- AConLike (RealDataCon dc) : dataConImplicitTyThings dc ]
       -- NB. record selectors are *not* implicit, they have fully-fledged
@@ -1829,19 +1861,21 @@ tyThingsTyCoVars tts =
 
 -- | The Names that a TyThing should bring into scope.  Used to build
 -- the GlobalRdrEnv for the InteractiveContext.
-tyThingAvailInfo :: TyThing -> AvailInfo
+tyThingAvailInfo :: TyThing -> [AvailInfo]
 tyThingAvailInfo (ATyCon t)
    = case tyConClass_maybe t of
-        Just c  -> AvailTC n (n : map getName (classMethods c)
+        Just c  -> [AvailTC n (n : map getName (classMethods c)
                                  ++ map getName (classATs c))
-                             []
+                             [] ]
              where n = getName c
-        Nothing -> AvailTC n (n : map getName dcs) flds
+        Nothing -> [AvailTC n (n : map getName dcs) flds]
              where n    = getName t
                    dcs  = tyConDataCons t
                    flds = tyConFieldLabels t
+tyThingAvailInfo (AConLike (PatSynCon p))
+  = map patSynAvail ((getName p) : map flSelector (patSynFieldLabels p))
 tyThingAvailInfo t
-   = avail (getName t)
+   = [avail (getName t)]
 
 {-
 ************************************************************************
@@ -1907,6 +1941,9 @@ extendTypeEnvWithIds :: TypeEnv -> [Id] -> TypeEnv
 extendTypeEnvWithIds env ids
   = extendNameEnvList env [(getName id, AnId id) | id <- ids]
 
+plusTypeEnv :: TypeEnv -> TypeEnv -> TypeEnv
+plusTypeEnv env1 env2 = plusNameEnv env1 env2
+
 -- | Find the 'TyThing' for the given 'Name' by using all the resources
 -- at our disposal: the compiled modules in the 'HomePackageTable' and the
 -- compiled modules in other packages that live in 'PackageTypeEnv'. Note
@@ -1941,23 +1978,23 @@ lookupTypeHscEnv hsc_env name = do
 -- | Get the 'TyCon' from a 'TyThing' if it is a type constructor thing. Panics otherwise
 tyThingTyCon :: TyThing -> TyCon
 tyThingTyCon (ATyCon tc) = tc
-tyThingTyCon other       = pprPanic "tyThingTyCon" (pprTyThing other)
+tyThingTyCon other       = pprPanic "tyThingTyCon" (ppr other)
 
 -- | Get the 'CoAxiom' from a 'TyThing' if it is a coercion axiom thing. Panics otherwise
 tyThingCoAxiom :: TyThing -> CoAxiom Branched
 tyThingCoAxiom (ACoAxiom ax) = ax
-tyThingCoAxiom other         = pprPanic "tyThingCoAxiom" (pprTyThing other)
+tyThingCoAxiom other         = pprPanic "tyThingCoAxiom" (ppr other)
 
 -- | Get the 'DataCon' from a 'TyThing' if it is a data constructor thing. Panics otherwise
 tyThingDataCon :: TyThing -> DataCon
 tyThingDataCon (AConLike (RealDataCon dc)) = dc
-tyThingDataCon other                       = pprPanic "tyThingDataCon" (pprTyThing other)
+tyThingDataCon other                       = pprPanic "tyThingDataCon" (ppr other)
 
 -- | Get the 'Id' from a 'TyThing' if it is a id *or* data constructor thing. Panics otherwise
 tyThingId :: TyThing -> Id
 tyThingId (AnId id)                   = id
 tyThingId (AConLike (RealDataCon dc)) = dataConWrapId dc
-tyThingId other                       = pprPanic "tyThingId" (pprTyThing other)
+tyThingId other                       = pprPanic "tyThingId" (ppr other)
 
 {-
 ************************************************************************
@@ -2606,10 +2643,10 @@ on just the OccName easily in a Core pass.
 --
 data VectInfo
   = VectInfo
-    { vectInfoVar            :: VarEnv  (Var    , Var  )    -- ^ @(f, f_v)@ keyed on @f@
+    { vectInfoVar            :: DVarEnv (Var    , Var  )    -- ^ @(f, f_v)@ keyed on @f@
     , vectInfoTyCon          :: NameEnv (TyCon  , TyCon)    -- ^ @(T, T_v)@ keyed on @T@
     , vectInfoDataCon        :: NameEnv (DataCon, DataCon)  -- ^ @(C, C_v)@ keyed on @C@
-    , vectInfoParallelVars   :: VarSet                      -- ^ set of parallel variables
+    , vectInfoParallelVars   :: DVarSet                     -- ^ set of parallel variables
     , vectInfoParallelTyCons :: NameSet                     -- ^ set of parallel type constructors
     }
 
@@ -2640,14 +2677,14 @@ data IfaceVectInfo
 
 noVectInfo :: VectInfo
 noVectInfo
-  = VectInfo emptyVarEnv emptyNameEnv emptyNameEnv emptyVarSet emptyNameSet
+  = VectInfo emptyDVarEnv emptyNameEnv emptyNameEnv emptyDVarSet emptyNameSet
 
 plusVectInfo :: VectInfo -> VectInfo -> VectInfo
 plusVectInfo vi1 vi2 =
-  VectInfo (vectInfoVar            vi1 `plusVarEnv`    vectInfoVar            vi2)
+  VectInfo (vectInfoVar            vi1 `plusDVarEnv`   vectInfoVar            vi2)
            (vectInfoTyCon          vi1 `plusNameEnv`   vectInfoTyCon          vi2)
            (vectInfoDataCon        vi1 `plusNameEnv`   vectInfoDataCon        vi2)
-           (vectInfoParallelVars   vi1 `unionVarSet`   vectInfoParallelVars   vi2)
+           (vectInfoParallelVars   vi1 `unionDVarSet`  vectInfoParallelVars   vi2)
            (vectInfoParallelTyCons vi1 `unionNameSet` vectInfoParallelTyCons vi2)
 
 concatVectInfo :: [VectInfo] -> VectInfo

@@ -285,6 +285,34 @@ performance.
     allocation area will be resized according to the amount of data in the heap
     (see :rts-flag:`-F`, below).
 
+.. rts-flag:: -AL ⟨size⟩
+
+    :default: ``-A`` value
+    :since: 8.2.1
+
+    .. index::
+       single: allocation area for large objects, size
+
+    Sets the limit on the total size of "large objects" (objects
+    larger than about 3KB) that can be allocated before a GC is
+    triggered.  By default this limit is the same as the ``-A`` value.
+
+    Large objects are not allocated from the normal allocation area
+    set by the ``-A`` flag, which is why there is a separate limit for
+    these.  Large objects tend to be much rarer than small objects, so
+    most programs hit the ``-A`` limit before the ``-AL`` limit.  However,
+    the ``-A`` limit is per-capability, whereas the ``-AL`` limit is global,
+    so as ``-N`` gets larger it becomes more likely that we hit the
+    ``-AL`` limit first.  To counteract this, it might be necessary to
+    use a larger ``-AL`` limit when using a large ``-N``.
+
+    To see whether you're making good use of all the memory reseverd
+    for the allocation area (``-A`` times ``-N``), look at the output of
+    ``+RTS -S`` and check whether the amount of memory allocated between
+    GCs is equal to ``-A`` times ``-N``. If not, there are two possible
+    remedies: use ``-n`` to set a nursery chunk size, or use ``-AL`` to
+    increase the limit for large objects.
+
 .. rts-flag:: -O ⟨size⟩
 
     :default: 1m
@@ -436,6 +464,30 @@ performance.
     load-balancing only in the old-generation. In fact, for a parallel
     program it is sometimes beneficial to disable load-balancing
     entirely with ``-qb``.
+
+.. rts-flag:: -qn <x>
+
+    :default: the value of ``-N``
+    :since: 8.2.1
+
+    .. index::
+       single: GC threads, setting the number of
+
+    By default, all of the capabilities participate in parallel
+    garbage collection.  If we want to use a very large ``-N`` value,
+    however, this can reduce the performance of the GC.  For this
+    reason, the ``-qn`` flag can be used to specify a lower number for
+    the threads that should participate in GC.  During GC, if there
+    are more than this number of workers active, some of them will
+    sleep for the duration of the GC.
+
+    The ``-qn`` flag may be useful when running with a large ``-A`` value
+    (so that GC is infrequent), and a large ``-N`` value (so as to make
+    use of hyperthreaded cores, for example).  For example, on a
+    24-core machine with 2 hyperthreads per core, we might use
+    ``-N48 -qn24 -A128m`` to specify that the mutator should use
+    hyperthreads but the GC should only use real cores.  Note that
+    this configuration would use 6GB for the allocation area.
 
 .. rts-flag:: -H [⟨size⟩]
 
@@ -590,6 +642,56 @@ performance.
     will be automatically enabled for the oldest generation, and the
     ``-F`` parameter will be reduced in order to avoid exceeding the
     maximum heap size.
+
+.. rts-flag:: --numa
+              --numa=<mask>
+
+    .. index::
+       single: NUMA, enabling in the runtime
+
+    Enable NUMA-aware memory allocation in the runtime (only available
+    with ``-threaded``, and only on Linux currently).
+
+    Background: some systems have a Non-Uniform Memory Architecture,
+    whereby main memory is split into banks which are "local" to
+    specific CPU cores.  Accessing local memory is faster than
+    accessing remote memory.  The OS provides APIs for allocating
+    local memory and binding threads to particular CPU cores, so that
+    we can ensure certain memory accesses are using local memory.
+
+    The ``--numa`` option tells the RTS to tune its memory usage to
+    maximize local memory accesses.  In particular, the RTS will:
+
+       - Determine the number of NUMA nodes (N) by querying the OS.
+       - Manage separate memory pools for each node.
+       - Map capabilities to NUMA nodes.  Capability C is mapped to
+         NUMA node C mod N.
+       - Bind worker threads on a capability to the appropriate node.
+       - Allocate the nursery from node-local memory.
+       - Perform other memory allocation, including in the GC, from
+         node-local memory.
+       - When load-balancing, we prefer to migrate threads to another
+         Capability on the same node.
+
+    The ``--numa`` flag is typically beneficial when a program is
+    using all cores of a large multi-core NUMA system, with a large
+    allocation area (``-A``).  All memory accesses to the allocation
+    area will go to local memory, which can save a significant amount
+    of remote memory access.  A runtime speedup on the order of 10%
+    is typical, but can vary a lot depending on the hardware and the
+    memory behaviour of the program.
+
+    Note that the RTS will not set CPU affinity for bound threads and
+    threads entering Haskell from C/C++, so if your program uses bound
+    threads you should ensure that each bound thread calls the RTS API
+    `rts_setInCallCapability(c,1)` from C/C++ before calling into
+    Haskell.  Otherwise there could be a mismatch between the CPU that
+    the thread is running on and the memory it is using while running
+    Haskell code, which will negate any benefits of ``--numa``.
+
+    If given an explicit <mask>, the <mask> is interpreted as a bitmap
+    that indicates the NUMA nodes on which to run the program.  For
+    example, ``--numa=3`` would run the program on NUMA nodes 0 and 1.
 
 .. _rts-options-statistics:
 

@@ -72,7 +72,12 @@ import CorePrep
 import CoreSyn
 import CoreUnfold       ( mkInlinableUnfolding )
 import CoreMonad        ( FloatOutSwitches(..), FinalPassSwitches(..) )
-import CoreUtils        ( exprType, exprOkForSpeculation, exprIsHNF, exprIsBottom )
+import CoreUtils        ( exprType
+                        , exprOkForSpeculation
+                        , exprIsHNF
+                        , exprIsBottom
+                        , collectStaticPtrSatArgs
+                        )
 import CoreArity        ( exprBotStrictness_maybe )
 import CoreFVs          -- all of it
 import Coercion         ( tyCoVarsOfCoDSet )
@@ -96,8 +101,9 @@ import Literal          ( litIsTrivial )
 import Demand           ( StrictSig )
 import Name             ( getOccName, mkSystemVarName )
 import OccName          ( occNameString )
-import Type             ( isUnliftedType, Type, mkPiTypes
-                        , tyCoVarsOfTypeDSet, typePrimRep )
+import Type             ( isUnliftedType, Type, mkLamTypes
+                        , tyCoVarsOfTypeDSet )
+import RepType          ( typePrimRep )
 import BasicTypes       ( Arity, RecFlag(..), isNonRec )
 import UniqSupply
 import Util
@@ -418,6 +424,7 @@ lvlCase env scrut_fvs scrut' case_bndr ty alts
   | [(con@(DataAlt {}), bs, body)] <- alts
   , exprOkForSpeculation scrut'   -- See Note [Check the output scrutinee for okForSpec]
   , not (isTopLvl dest_lvl)       -- Can't have top-level cases
+  , not (floatTopLvlOnly env)     -- Can float anywhere
   =     -- See Note [Floating cases]
         -- Always float the case if possible
         -- Unlike lets we don't insist that it escapes a value lambda
@@ -516,8 +523,10 @@ lvlMFE True env e@(_, AnnCase {})
   = lvlExpr env e     -- Don't share cases
 
 lvlMFE strict_ctxt env ann_expr
-  |    isFinalPass env -- see Note [Late Lambda Floating]
-    || isUnliftedType (exprType (deTagExpr expr))
+  |  isFinalPass env
+  || floatTopLvlOnly env && not (isTopLvl dest_lvl)
+         -- Only floating to the top level is allowed.
+  || isUnliftedType (exprType (deTagExpr expr))
          -- Can't let-bind it; see Note [Unlifted MFEs]
          -- This includes coercions, which we don't want to float anyway
          -- NB: no need to substitute cos isUnliftedType doesn't change
@@ -857,7 +866,6 @@ decideBindFloat init_env is_bot binding =
   maybe conventionalFloatOut lateLambdaLift (finalPass env)
   where
     env = lneLvlEnv init_env ids
-
     conventionalFloatOut | is_forbidden_float  = Nothing
                          | is_profitable_float = Just (dest_lvl, abs_vars)
                          | otherwise         = Nothing
@@ -871,6 +879,7 @@ decideBindFloat init_env is_bot binding =
                -- We can't float an unlifted binding to top level, so we don't
                -- float it at all.  It's a bit brutal, but unlifted bindings
                -- aren't expensive either
+          || floatTopLvlOnly env && not (isTopLvl dest_lvl)
           || (not (isTopLvl dest_lvl) && careful_with_joins &&
                 has_unfloatable_join_binding)
 
@@ -1272,6 +1281,9 @@ floatConsts le = floatOutConstants (le_switches le)
 floatOverSat :: LevelEnv -> Bool
 floatOverSat le = floatOutOverSatApps (le_switches le)
 
+floatTopLvlOnly :: LevelEnv -> Bool
+floatTopLvlOnly le = floatToTopLevelOnly (le_switches le)
+
 lneLvlEnv :: LevelEnv -> [InId] -> LevelEnv
 lneLvlEnv env bndrs = env { le_joins = extendVarSetList (le_joins env) joins }
   where
@@ -1357,7 +1369,7 @@ abstractVars dest_lvl (LE { le_subst = subst, le_lvl_env = lvl_env }) in_fvs
                              -- Result includes the input variable itself
     close v = foldDVarSet (unionDVarSet . close)
                           (unitDVarSet v)
-                          (runFVDSet $ varTypeTyCoVarsAcc v)
+                          (fvDVarSet $ varTypeTyCoFVs v)
 
 type PinnedLBFs = VarEnv (Id, VarSet) -- (g, fs, hs) <=> pinned by fs, captured by hs
 
@@ -1402,7 +1414,7 @@ newPolyBndrs dest_lvl
                            where
                              str     = (if isFinalPass env then "llf_" else "poly_")
                                                           ++ occNameString (getOccName bndr)
-                             poly_ty = mkPiTypes abs_vars (substTy subst (idType bndr))
+                             poly_ty = mkLamTypes abs_vars (substTy subst (idType bndr))
 
 newLvlVar :: LevelledExpr        -- The RHS of the new binding
           -> Bool                -- Whether it is bottom
@@ -1410,7 +1422,8 @@ newLvlVar :: LevelledExpr        -- The RHS of the new binding
           -> LvlM Id
 newLvlVar lvld_rhs is_bot join_arity_maybe
   = do { uniq <- getUniqueM
-       ; return (add_bot_info (add_join_info (mkLocalIdOrCoVar (mk_name uniq) rhs_ty))) }
+       ; return (add_bot_info (add_join_info (mk_id uniq)))
+       }
   where
     add_bot_info var  -- We could call annotateBotStr always, but the is_bot
                       -- flag just tells us when we don't need to do so
@@ -1419,7 +1432,13 @@ newLvlVar lvld_rhs is_bot join_arity_maybe
     add_join_info var = var `asJoinId_maybe` join_arity_maybe
     de_tagged_rhs = deTagExpr lvld_rhs
     rhs_ty = exprType de_tagged_rhs
-    mk_name uniq = mkSystemVarName uniq (mkFastString "lvl")
+    mk_id uniq
+      -- See Note [Grand plan for static forms] in SimplCore.
+      | isJust (collectStaticPtrSatArgs lvld_rhs)
+      = mkExportedVanillaId (mkSystemVarName uniq (mkFastString "static_ptr"))
+                            rhs_ty
+      | otherwise
+      = mkLocalIdOrCoVar (mkSystemVarName uniq (mkFastString "lvl")) rhs_ty
 
 cloneCaseBndrs :: LevelEnv -> Level -> [InVar] -> LvlM (LevelEnv, [Var])
 cloneCaseBndrs env@(LE { le_subst = subst, le_lvl_env = lvl_env, le_env = id_env })
@@ -1499,7 +1518,7 @@ abs_vars.
 Note [Zapping the demand info]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 VERY IMPORTANT: we must zap the demand info if the thing is going to
-float out, becuause it may be less demanded than at its original
+float out, because it may be less demanded than at its original
 binding site.  Eg
    f :: Int -> Int
    f x = let v = 3*4 in v+x
@@ -1603,8 +1622,9 @@ delBindersFVs bs fvs = foldr delBinderFVs fvs bs
 
 delBinderFVs :: CoreBndr -> DVarSet -> DVarSet
 -- see comment on CoreFVs.delBinderFV
-delBinderFVs bndr fvs = fvs `delDVarSet` bndr `extendDVarSetList`
-                          (runFVList $ varTypeTyCoVarsAcc bndr)
+delBinderFVs bndr fvs
+  = fvs `delDVarSet` bndr
+        `unionDVarSet` (fvDVarSet $ varTypeTyCoFVs bndr)
 
 {-
 
@@ -2082,11 +2102,14 @@ analyzeFVsM env (Let (NonRec binder rhs) body) = do
   let binding_up = floatFVUp env (Just binder) use_case rhs $
                    perhapsWrapFloatsFVUp NonRecursive use_case rhs rhs_up
 
+  let rule_and_unfolding_vars | isId binder = idRuleAndUnfoldingVarsDSet binder
+                              | otherwise   = emptyDVarSet
+
   -- lastly: merge the Ups
   let up = FVUp {
         fvu_fvs = fvu_fvs binding_up
                     `unionDVarSet` (fvu_fvs body_up `delDVarSet` binder)
-                    `unionDVarSet` (runFVDSet $ bndrRuleAndUnfoldingVarsAcc binder),
+                    `unionDVarSet` rule_and_unfolding_vars,
 
         fvu_floats = fvu_floats binding_up `appendFloats` fvu_floats body_up,
         fvu_silt = delBindersSilt [binder] $ fvu_silt body_up,

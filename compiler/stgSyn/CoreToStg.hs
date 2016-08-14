@@ -21,6 +21,7 @@ import CoreArity        ( manifestArity )
 import StgSyn
 
 import Type
+import RepType
 import TyCon
 import MkId             ( coercionTokenId )
 import Id
@@ -43,8 +44,9 @@ import DynFlags
 import ForeignCall
 import Demand           ( isUsedOnce )
 import PrimOp           ( PrimCall(..) )
+import UniqFM
 
-import Data.Maybe    (isJust)
+import Data.Maybe    (isJust, fromMaybe)
 import Control.Monad (liftM, ap)
 
 -- Note [Live vs free]
@@ -450,8 +452,7 @@ mkStgAltType bndr alts = case repType (idType bndr) of
                 | otherwise          -> ASSERT2( _is_poly_alt_tycon tc, ppr tc )
                                         PolyAlt
         Nothing                      -> PolyAlt
-    UbxTupleRep rep_tys -> UbxTupAlt (length rep_tys)
-    -- NB Nullary unboxed tuples have UnaryRep, and generate a PrimAlt
+    MultiRep slots -> MultiValAlt (length slots)
   where
    _is_poly_alt_tycon tc
         =  isFunTyCon tc
@@ -536,7 +537,9 @@ coreToStgApp _ f args ticks = do
 
         res_ty = exprType (mkApps (Var f) args)
         app = case idDetails f of
-                DataConWorkId dc | saturated -> StgConApp dc args'
+                DataConWorkId dc
+                  | saturated    -> StgConApp dc args'
+                                      (dropRuntimeRepArgs (fromMaybe [] (tyConAppArgs_maybe res_ty)))
 
                 -- Some primitive operator that might be implemented as a library call.
                 PrimOpId op      -> ASSERT( saturated )
@@ -601,10 +604,10 @@ coreToStgArgs (arg : args) = do         -- Non-type argument
 
         (aticks, arg'') = stripStgTicksTop tickishFloatable arg'
         stg_arg = case arg'' of
-                       StgApp v []      -> StgVarArg v
-                       StgConApp con [] -> StgVarArg (dataConWorkId con)
-                       StgLit lit       -> StgLitArg lit
-                       _                -> pprPanic "coreToStgArgs" (ppr arg)
+                       StgApp v []        -> StgVarArg v
+                       StgConApp con [] _ -> StgVarArg (dataConWorkId con)
+                       StgLit lit         -> StgLitArg lit
+                       _                  -> pprPanic "coreToStgArgs" (ppr arg)
 
         -- WARNING: what if we have an argument like (v `cast` co)
         --          where 'co' changes the representation type?
@@ -619,8 +622,8 @@ coreToStgArgs (arg : args) = do         -- Non-type argument
         arg_ty = exprType arg
         stg_arg_ty = stgArgType stg_arg
         bad_args = (isUnliftedType arg_ty && not (isUnliftedType stg_arg_ty))
-                || (map typePrimRep (flattenRepType (repType arg_ty))
-                        /= map typePrimRep (flattenRepType (repType stg_arg_ty)))
+                || (map typePrimRep (repTypeArgs arg_ty)
+                        /= map typePrimRep (repTypeArgs stg_arg_ty))
         -- In GHCi we coerce an argument of type BCO# (unlifted) to HValue (lifted),
         -- and pass it to a function expecting an HValue (arg_ty).  This is ok because
         -- we can treat an unlifted value as lifted.  But the other way round
@@ -773,9 +776,11 @@ mkStgRhs' con_updateable rhs_fvs bndr binder_info rhs
                    (getFVs rhs_fvs)
                    ReEntrant
                    bndrs body
-  | StgConApp con args <- unticked_rhs
+  | StgConApp con args _ <- unticked_rhs
   , not (con_updateable con args)
-  = StgRhsCon noCCS con args
+  = -- CorePrep does this right, but just to make sure
+    ASSERT(not (isUnboxedTupleCon con || isUnboxedSumCon con))
+    StgRhsCon noCCS con args
   | otherwise
   = StgRhsClosure noCCS binder_info
                    (getFVs rhs_fvs)
@@ -862,10 +867,12 @@ data HowBound
         Arity           -- Its arity (local Ids don't have arity info at this point)
 
   | LambdaBound         -- Used for both lambda and case
+  deriving (Eq)
 
 data LetInfo
   = TopLet              -- top level things
   | NestedLet
+  deriving (Eq)
 
 isLetBound :: HowBound -> Bool
 isLetBound (LetBound _ _) = True
@@ -1007,7 +1014,10 @@ lookupFVInfo fvs id
 
 -- Non-top-level things only, both type variables and ids
 getFVs :: FreeVarsInfo -> [Var]
-getFVs fvs = [id | (id, how_bound, _) <- varEnvElts fvs,
+getFVs fvs = [id | (id, how_bound, _) <- nonDetEltsUFM fvs,
+  -- It's OK to use nonDetEltsUFM here because we're not aiming for
+  -- bit-for-bit determinism.
+  -- See Note [Unique Determinism and code generation]
                     not (topLevelBound how_bound) ]
 
 getFVSet :: FreeVarsInfo -> VarSet
@@ -1017,20 +1027,8 @@ plusFVInfo :: (Var, HowBound, StgBinderInfo)
            -> (Var, HowBound, StgBinderInfo)
            -> (Var, HowBound, StgBinderInfo)
 plusFVInfo (id1,hb1,info1) (id2,hb2,info2)
-  = ASSERT(id1 == id2 && hb1 `check_eq_how_bound` hb2)
+  = ASSERT(id1 == id2 && hb1 == hb2)
     (id1, hb1, combineStgBinderInfo info1 info2)
-
--- The HowBound info for a variable in the FVInfo should be consistent
-check_eq_how_bound :: HowBound -> HowBound -> Bool
-check_eq_how_bound ImportBound        ImportBound        = True
-check_eq_how_bound LambdaBound        LambdaBound        = True
-check_eq_how_bound (LetBound li1 ar1) (LetBound li2 ar2) = ar1 == ar2 && check_eq_li li1 li2
-check_eq_how_bound _                  _                  = False
-
-check_eq_li :: LetInfo -> LetInfo -> Bool
-check_eq_li NestedLet NestedLet = True
-check_eq_li TopLet    TopLet    = True
-check_eq_li _         _         = False
 
 -- Misc.
 

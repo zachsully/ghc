@@ -1,5 +1,6 @@
 {-# LANGUAGE MagicHash, NoImplicitPrelude, TypeFamilies, UnboxedTuples,
-             MultiParamTypeClasses, RoleAnnotations, CPP, TypeOperators #-}
+             MultiParamTypeClasses, RoleAnnotations, CPP, TypeOperators,
+             PolyKinds #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.Types
@@ -29,6 +30,7 @@ module GHC.Types (
         isTrue#,
         SPEC(..),
         Nat, Symbol,
+        Any,
         type (~~), Coercible,
         TYPE, RuntimeRep(..), Type, type (*), type (★), Constraint,
           -- The historical type * should ideally be written as
@@ -78,6 +80,23 @@ data Nat
 -- | (Kind) This is the kind of type-level symbols.
 -- Declared here because class IP needs it
 data Symbol
+
+{- *********************************************************************
+*                                                                      *
+                  Any
+*                                                                      *
+********************************************************************* -}
+
+-- | The type constructor 'Any' is type to which you can unsafely coerce any
+-- lifted type, and back. More concretely, for a lifted type @t@ and
+-- value @x :: t@, -- @unsafeCoerce (unsafeCoerce x :: Any) :: t@ is equivalent
+-- to @x@.
+--
+type family Any :: k where { }
+-- See Note [Any types] in TysWiredIn. Also, for a bit of history on Any see
+-- #10886. Note that this must be a *closed* type family: we need to ensure
+-- that this can't reduce to a `data` type for the results discussed in
+-- Note [Any types].
 
 {- *********************************************************************
 *                                                                      *
@@ -193,7 +212,11 @@ inside GHC, to change the kind and type.
 
 -- | Lifted, heterogeneous equality. By lifted, we mean that it
 -- can be bogus (deferred type error). By heterogeneous, the two
--- types @a@ and @b@ might have different kinds.
+-- types @a@ and @b@ might have different kinds. Because @~~@ can
+-- appear unexpectedly in error messages to users who do not care
+-- about the difference between heterogeneous equality @~~@ and
+-- homogeneous equality @~@, this is printed as @~@ unless
+-- @-fprint-equality-relations@ is set.
 class a ~~ b
   -- See also Note [The equality types story] in TysPrim
 
@@ -362,6 +385,7 @@ data RuntimeRep = VecRep VecCount VecElem   -- ^ a SIMD vector type
                 | FloatRep        -- ^ a 32-bit floating point number
                 | DoubleRep       -- ^ a 64-bit floating point number
                 | UnboxedTupleRep -- ^ An unboxed tuple; this doesn't specify a concrete rep
+                | UnboxedSumRep   -- ^ An unboxed sum; this doesn't specify a concrete rep
 
 -- See also Note [Wiring in RuntimeRep] in TysWiredIn
 

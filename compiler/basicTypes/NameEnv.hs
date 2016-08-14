@@ -13,14 +13,20 @@ module NameEnv (
         -- ** Manipulating these environments
         mkNameEnv,
         emptyNameEnv, isEmptyNameEnv,
-        unitNameEnv, nameEnvElts, nameEnvUniqueElts,
+        unitNameEnv, nameEnvElts,
         extendNameEnv_C, extendNameEnv_Acc, extendNameEnv,
         extendNameEnvList, extendNameEnvList_C,
-        foldNameEnv, filterNameEnv, anyNameEnv,
+        filterNameEnv, anyNameEnv,
         plusNameEnv, plusNameEnv_C, alterNameEnv,
         lookupNameEnv, lookupNameEnv_NF, delFromNameEnv, delListFromNameEnv,
         elemNameEnv, mapNameEnv, disjointNameEnv,
 
+        DNameEnv,
+
+        emptyDNameEnv,
+        lookupDNameEnv,
+        mapDNameEnv,
+        alterDNameEnv,
         -- ** Dependency analysis
         depAnal
     ) where
@@ -29,8 +35,8 @@ module NameEnv (
 
 import Digraph
 import Name
-import Unique
 import UniqFM
+import UniqDFM
 import Maybes
 
 {-
@@ -39,6 +45,16 @@ import Maybes
 \subsection{Name environment}
 *                                                                      *
 ************************************************************************
+-}
+
+{-
+Note [depAnal determinism]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+depAnal is deterministic provided it gets the nodes in a deterministic order.
+The order of lists that get_defs and get_uses return doesn't matter, as these
+are only used to construct the edges, and stronglyConnCompFromEdgedVertices is
+deterministic even when the edges are not in deterministic order as explained
+in Note [Deterministic SCC] in Digraph.
 -}
 
 depAnal :: (node -> [Name])      -- Defs
@@ -50,7 +66,7 @@ depAnal :: (node -> [Name])      -- Defs
 --
 -- The get_defs and get_uses functions are called only once per node
 depAnal get_defs get_uses nodes
-  = stronglyConnCompFromEdgedVertices (map mk_node keyed_nodes)
+  = stronglyConnCompFromEdgedVerticesUniq (map mk_node keyed_nodes)
   where
     keyed_nodes = nodes `zip` [(1::Int)..]
     mk_node (node, key) = (node, key, mapMaybe (lookupNameEnv key_map) (get_uses node))
@@ -72,7 +88,6 @@ emptyNameEnv       :: NameEnv a
 isEmptyNameEnv     :: NameEnv a -> Bool
 mkNameEnv          :: [(Name,a)] -> NameEnv a
 nameEnvElts        :: NameEnv a -> [a]
-nameEnvUniqueElts  :: NameEnv a -> [(Unique, a)]
 alterNameEnv       :: (Maybe a-> Maybe a) -> NameEnv a -> Name -> NameEnv a
 extendNameEnv_C    :: (a->a->a) -> NameEnv a -> Name -> a -> NameEnv a
 extendNameEnv_Acc  :: (a->b->b) -> (a->b) -> NameEnv b -> Name -> a -> NameEnv b
@@ -87,7 +102,6 @@ elemNameEnv        :: Name -> NameEnv a -> Bool
 unitNameEnv        :: Name -> a -> NameEnv a
 lookupNameEnv      :: NameEnv a -> Name -> Maybe a
 lookupNameEnv_NF   :: NameEnv a -> Name -> a
-foldNameEnv        :: (a -> b -> b) -> b -> NameEnv a -> b
 filterNameEnv      :: (elt -> Bool) -> NameEnv elt -> NameEnv elt
 anyNameEnv         :: (elt -> Bool) -> NameEnv elt -> Bool
 mapNameEnv         :: (elt1 -> elt2) -> NameEnv elt1 -> NameEnv elt2
@@ -103,12 +117,10 @@ lookupNameEnv x y     = lookupUFM x y
 alterNameEnv          = alterUFM
 mkNameEnv     l       = listToUFM l
 elemNameEnv x y          = elemUFM x y
-foldNameEnv a b c        = foldUFM a b c
 plusNameEnv x y          = plusUFM x y
 plusNameEnv_C f x y      = plusUFM_C f x y
 extendNameEnv_C f x y z  = addToUFM_C f x y z
 mapNameEnv f x           = mapUFM f x
-nameEnvUniqueElts x      = ufmToList x
 extendNameEnv_Acc x y z a b  = addToUFM_Acc x y z a b
 extendNameEnvList_C x y z = addListToUFM_C x y z
 delFromNameEnv x y      = delFromUFM x y
@@ -118,3 +130,20 @@ anyNameEnv f x          = foldUFM ((||) . f) False x
 disjointNameEnv x y     = isNullUFM (intersectUFM x y)
 
 lookupNameEnv_NF env n = expectJust "lookupNameEnv_NF" (lookupNameEnv env n)
+
+-- Deterministic NameEnv
+-- See Note [Deterministic UniqFM] in UniqDFM for explanation why we need
+-- DNameEnv.
+type DNameEnv a = UniqDFM a
+
+emptyDNameEnv :: DNameEnv a
+emptyDNameEnv = emptyUDFM
+
+lookupDNameEnv :: DNameEnv a -> Name -> Maybe a
+lookupDNameEnv = lookupUDFM
+
+mapDNameEnv :: (a -> b) -> DNameEnv a -> DNameEnv b
+mapDNameEnv = mapUDFM
+
+alterDNameEnv :: (Maybe a -> Maybe a) -> DNameEnv a -> Name -> DNameEnv a
+alterDNameEnv = alterUDFM

@@ -5,7 +5,7 @@
 \section[PatSyn]{@PatSyn@: Pattern synonyms}
 -}
 
-{-# LANGUAGE CPP, DeriveDataTypeable #-}
+{-# LANGUAGE CPP #-}
 
 module PatSyn (
         -- * Main data types
@@ -13,19 +13,18 @@ module PatSyn (
 
         -- ** Type deconstruction
         patSynName, patSynArity, patSynIsInfix,
-        patSynArgs, patSynType,
+        patSynArgs,
         patSynMatcher, patSynBuilder,
-        patSynExTyVars, patSynSig,
+        patSynUnivTyVarBinders, patSynExTyVars, patSynExTyVarBinders, patSynSig,
         patSynInstArgTys, patSynInstResTy, patSynFieldLabels,
         patSynFieldType,
 
-        tidyPatSynIds
+        tidyPatSynIds, pprPatSynType
     ) where
 
 #include "HsVersions.h"
 
 import Type
-import TcType( mkSpecSigmaTy )
 import Name
 import Outputable
 import Unique
@@ -35,7 +34,6 @@ import Var
 import FieldLabel
 
 import qualified Data.Data as Data
-import qualified Data.Typeable
 import Data.Function
 import Data.List
 
@@ -64,14 +62,19 @@ data PatSyn
                                        -- record pat syn or same length as
                                        -- psArgs
 
-        psUnivTyVars  :: [TyVar],      -- Universially-quantified type variables
-        psReqTheta    :: ThetaType,    -- Required dictionaries
-                                       -- these constraints are very much like
-                                       -- stupid thetas (which is a useful
-                                       -- guideline when implementing)
-                                       -- but are actually needed.
-        psExTyVars    :: [TyVar],      -- Existentially-quantified type vars
-        psProvTheta   :: ThetaType,    -- Provided dictionaries
+        -- Universially-quantified type variables
+        psUnivTyVars  :: [TyVarBinder],
+
+        -- Required dictionaries (may mention psUnivTyVars)
+        psReqTheta    :: ThetaType,
+
+        -- Existentially-quantified type vars
+        psExTyVars    :: [TyVarBinder],
+
+        -- Provided dictionaries (may mention psUnivTyVars or psExTyVars)
+        psProvTheta   :: ThetaType,
+
+        -- Result type
         psOrigResTy   :: Type,         -- Mentions only psUnivTyVars
 
         -- See Note [Matchers and builders for pattern synonyms]
@@ -102,7 +105,6 @@ data PatSyn
              --                       =>  arg_tys -> res_ty
              -- See Note [Builder for pattern synonyms with unboxed type]
   }
-  deriving Data.Typeable.Typeable
 
 {- Note [Pattern synonym signatures]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -239,6 +241,21 @@ This means that when typechecking an occurrence of P in an expression,
 we must remember that the builder has this void argument. This is
 done by TcPatSyn.patSynBuilderOcc.
 
+Note [Pattern synonyms and the data type Type]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The type of a pattern synonym is of the form (See Note
+[Pattern synonym signatures]):
+
+    forall univ_tvs. req => forall ex_tvs. prov => ...
+
+We cannot in general represent this by a value of type Type:
+
+ - if ex_tvs is empty, then req and prov cannot be distinguished from
+   each other
+ - if req is empty, then univ_tvs and ex_tvs cannot be distinguished
+   from each other, and moreover, prov is seen as the "required" context
+   (as it is the only context)
+
 
 ************************************************************************
 *                                                                      *
@@ -250,13 +267,6 @@ done by TcPatSyn.patSynBuilderOcc.
 instance Eq PatSyn where
     (==) = (==) `on` getUnique
     (/=) = (/=) `on` getUnique
-
-instance Ord PatSyn where
-    (<=) = (<=) `on` getUnique
-    (<) = (<) `on` getUnique
-    (>=) = (>=) `on` getUnique
-    (>) = (>) `on` getUnique
-    compare = compare `on` getUnique
 
 instance Uniquable PatSyn where
     getUnique = psUnique
@@ -288,9 +298,9 @@ instance Data.Data PatSyn where
 -- | Build a new pattern synonym
 mkPatSyn :: Name
          -> Bool                 -- ^ Is the pattern synonym declared infix?
-         -> ([TyVar], ThetaType) -- ^ Universially-quantified type variables
+         -> ([TyVarBinder], ThetaType) -- ^ Universially-quantified type variables
                                  --   and required dicts
-         -> ([TyVar], ThetaType) -- ^ Existentially-quantified type variables
+         -> ([TyVarBinder], ThetaType) -- ^ Existentially-quantified type variables
                                  --   and provided dicts
          -> [Type]               -- ^ Original arguments
          -> Type                 -- ^ Original result type
@@ -299,6 +309,8 @@ mkPatSyn :: Name
          -> [FieldLabel]         -- ^ Names of fields for
                                  --   a record pattern synonym
          -> PatSyn
+ -- NB: The univ and ex vars are both in TyBinder form and TyVar form for
+ -- convenience. All the TyBinders should be Named!
 mkPatSyn name declared_infix
          (univ_tvs, req_theta)
          (ex_tvs, prov_theta)
@@ -306,7 +318,8 @@ mkPatSyn name declared_infix
          orig_res_ty
          matcher builder field_labels
     = MkPatSyn {psName = name, psUnique = getUnique name,
-                psUnivTyVars = univ_tvs, psExTyVars = ex_tvs,
+                psUnivTyVars = univ_tvs,
+                psExTyVars = ex_tvs,
                 psProvTheta = prov_theta, psReqTheta = req_theta,
                 psInfix = declared_infix,
                 psArgs = orig_args,
@@ -320,16 +333,6 @@ mkPatSyn name declared_infix
 -- | The 'Name' of the 'PatSyn', giving it a unique, rooted identification
 patSynName :: PatSyn -> Name
 patSynName = psName
-
-patSynType :: PatSyn -> Type
--- The full pattern type, used only in error messages
--- See Note [Pattern synonym signatures]
-patSynType (MkPatSyn { psUnivTyVars = univ_tvs, psReqTheta = req_theta
-                     , psExTyVars   = ex_tvs,   psProvTheta = prov_theta
-                     , psArgs = orig_args, psOrigResTy = orig_res_ty })
-  = mkSpecSigmaTy univ_tvs req_theta $  -- use mkSpecSigmaTy because it
-    mkSpecSigmaTy ex_tvs prov_theta $   -- prints better
-    mkFunTys orig_args orig_res_ty
 
 -- | Should the 'PatSyn' be presented infix?
 patSynIsInfix :: PatSyn -> Bool
@@ -352,14 +355,20 @@ patSynFieldType ps label
       Just (_, ty) -> ty
       Nothing -> pprPanic "dataConFieldType" (ppr ps <+> ppr label)
 
+patSynUnivTyVarBinders :: PatSyn -> [TyVarBinder]
+patSynUnivTyVarBinders = psUnivTyVars
+
 patSynExTyVars :: PatSyn -> [TyVar]
-patSynExTyVars = psExTyVars
+patSynExTyVars ps = binderVars (psExTyVars ps)
+
+patSynExTyVarBinders :: PatSyn -> [TyVarBinder]
+patSynExTyVarBinders = psExTyVars
 
 patSynSig :: PatSyn -> ([TyVar], ThetaType, [TyVar], ThetaType, [Type], Type)
 patSynSig (MkPatSyn { psUnivTyVars = univ_tvs, psExTyVars = ex_tvs
                     , psProvTheta = prov, psReqTheta = req
                     , psArgs = arg_tys, psOrigResTy = res_ty })
-  = (univ_tvs, req, ex_tvs, prov, arg_tys, res_ty)
+  = (binderVars univ_tvs, req, binderVars ex_tvs, prov, arg_tys, res_ty)
 
 patSynMatcher :: PatSyn -> (Id,Bool)
 patSynMatcher = psMatcher
@@ -388,7 +397,7 @@ patSynInstArgTys (MkPatSyn { psName = name, psUnivTyVars = univ_tvs
           , text "patSynInstArgTys" <+> ppr name $$ ppr tyvars $$ ppr inst_tys )
     map (substTyWith tyvars inst_tys) arg_tys
   where
-    tyvars = univ_tvs ++ ex_tvs
+    tyvars = binderVars (univ_tvs ++ ex_tvs)
 
 patSynInstResTy :: PatSyn -> [Type] -> Type
 -- Return the type of whole pattern
@@ -401,4 +410,19 @@ patSynInstResTy (MkPatSyn { psName = name, psUnivTyVars = univ_tvs
                 inst_tys
   = ASSERT2( length univ_tvs == length inst_tys
            , text "patSynInstResTy" <+> ppr name $$ ppr univ_tvs $$ ppr inst_tys )
-    substTyWith univ_tvs inst_tys res_ty
+    substTyWith (binderVars univ_tvs) inst_tys res_ty
+
+-- | Print the type of a pattern synonym. The foralls are printed explicitly
+pprPatSynType :: PatSyn -> SDoc
+pprPatSynType (MkPatSyn { psUnivTyVars = univ_tvs,  psReqTheta  = req_theta
+                        , psExTyVars   = ex_tvs,    psProvTheta = prov_theta
+                        , psArgs       = orig_args, psOrigResTy = orig_res_ty })
+  = sep [ pprForAll univ_tvs
+        , pprThetaArrowTy req_theta
+        , ppWhen insert_empty_ctxt $ parens empty <+> darrow
+        , pprType sigma_ty ]
+  where
+    sigma_ty = mkForAllTys ex_tvs  $
+               mkFunTys prov_theta $
+               mkFunTys orig_args orig_res_ty
+    insert_empty_ctxt = null req_theta && not (null prov_theta && null ex_tvs)

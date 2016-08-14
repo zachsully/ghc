@@ -12,15 +12,17 @@ module VarSet (
         -- ** Manipulating these sets
         emptyVarSet, unitVarSet, mkVarSet,
         extendVarSet, extendVarSetList, extendVarSet_C,
-        elemVarSet, varSetElems, subVarSet,
+        elemVarSet, subVarSet,
         unionVarSet, unionVarSets, mapUnionVarSet,
         intersectVarSet, intersectsVarSet, disjointVarSet,
         isEmptyVarSet, delVarSet, delVarSetList, delVarSetByKey,
-        minusVarSet, foldVarSet, filterVarSet,
+        minusVarSet, filterVarSet,
+        varSetAny, varSetAll,
         transCloVarSet, fixVarSet,
         lookupVarSet, lookupVarSetByName,
-        mapVarSet, sizeVarSet, seqVarSet,
+        sizeVarSet, seqVarSet,
         elemVarSetByKey, partitionVarSet,
+        pluralVarSet, pprVarSet,
 
         -- * Deterministic Var set types
         DVarSet, DIdSet, DTyVarSet, DTyCoVarSet,
@@ -33,9 +35,11 @@ module VarSet (
         intersectDVarSet, intersectsDVarSet, disjointDVarSet,
         isEmptyDVarSet, delDVarSet, delDVarSetList,
         minusDVarSet, foldDVarSet, filterDVarSet,
+        dVarSetMinusVarSet,
         transCloDVarSet,
         sizeDVarSet, seqDVarSet,
         partitionDVarSet,
+        dVarSetToVarSet,
     ) where
 
 #include "HsVersions.h"
@@ -45,8 +49,9 @@ import Unique
 import Name     ( Name )
 import UniqSet
 import UniqDSet
-import UniqFM( disjointUFM )
-import UniqDFM( disjointUDFM )
+import UniqFM( disjointUFM, pluralUFM, pprUFM )
+import UniqDFM( disjointUDFM, udfmToUfm )
+import Outputable (SDoc)
 
 -- | A non-deterministic set of variables.
 -- See Note [Deterministic UniqFM] in UniqDFM for explanation why it's not
@@ -67,7 +72,6 @@ unionVarSets    :: [VarSet] -> VarSet
 mapUnionVarSet  :: (a -> VarSet) -> [a] -> VarSet
 -- ^ map the function over the list, and union the results
 
-varSetElems     :: VarSet -> [Var]
 unitVarSet      :: Var -> VarSet
 extendVarSet    :: VarSet -> Var -> VarSet
 extendVarSetList:: VarSet -> [Var] -> VarSet
@@ -77,12 +81,10 @@ delVarSetList   :: VarSet -> [Var] -> VarSet
 minusVarSet     :: VarSet -> VarSet -> VarSet
 isEmptyVarSet   :: VarSet -> Bool
 mkVarSet        :: [Var] -> VarSet
-foldVarSet      :: (Var -> a -> a) -> a -> VarSet -> a
 lookupVarSet    :: VarSet -> Var -> Maybe Var
                         -- Returns the set element, which may be
                         -- (==) to the argument, but not the same as
 lookupVarSetByName :: VarSet -> Name -> Maybe Var
-mapVarSet       :: (Var -> Var) -> VarSet -> VarSet
 sizeVarSet      :: VarSet -> Int
 filterVarSet    :: (Var -> Bool) -> VarSet -> VarSet
 extendVarSet_C  :: (Var->Var->Var) -> VarSet -> Var -> VarSet
@@ -105,17 +107,14 @@ subVarSet       :: VarSet -> VarSet -> Bool     -- True if first arg is subset o
 
 unionVarSet     = unionUniqSets
 unionVarSets    = unionManyUniqSets
-varSetElems     = uniqSetToList
 elemVarSet      = elementOfUniqSet
 minusVarSet     = minusUniqSet
 delVarSet       = delOneFromUniqSet
 delVarSetList   = delListFromUniqSet
 isEmptyVarSet   = isEmptyUniqSet
 mkVarSet        = mkUniqSet
-foldVarSet      = foldUniqSet
 lookupVarSet    = lookupUniqSet
 lookupVarSetByName = lookupUniqSet
-mapVarSet       = mapUniqSet
 sizeVarSet      = sizeUniqSet
 filterVarSet    = filterUniqSet
 extendVarSet_C  = addOneToUniqSet_C
@@ -129,6 +128,15 @@ mapUnionVarSet get_set xs = foldr (unionVarSet . get_set) emptyVarSet xs
 intersectsVarSet s1 s2 = not (s1 `disjointVarSet` s2)
 disjointVarSet   s1 s2 = disjointUFM s1 s2
 subVarSet        s1 s2 = isEmptyVarSet (s1 `minusVarSet` s2)
+
+varSetAny :: (Var -> Bool) -> VarSet -> Bool
+varSetAny = uniqSetAny
+
+varSetAll :: (Var -> Bool) -> VarSet -> Bool
+varSetAll = uniqSetAll
+
+-- There used to exist mapVarSet, see Note [Unsound mapUniqSet] in UniqSet for
+-- why it got removed.
 
 fixVarSet :: (VarSet -> VarSet)   -- Map the current set to a new set
           -> VarSet -> VarSet
@@ -168,6 +176,28 @@ transCloVarSet fn seeds
 
 seqVarSet :: VarSet -> ()
 seqVarSet s = sizeVarSet s `seq` ()
+
+-- | Determines the pluralisation suffix appropriate for the length of a set
+-- in the same way that plural from Outputable does for lists.
+pluralVarSet :: VarSet -> SDoc
+pluralVarSet = pluralUFM
+
+-- | Pretty-print a non-deterministic set.
+-- The order of variables is non-deterministic and for pretty-printing that
+-- shouldn't be a problem.
+-- Having this function helps contain the non-determinism created with
+-- nonDetEltsUFM.
+-- Passing a list to the pretty-printing function allows the caller
+-- to decide on the order of Vars (eg. toposort them) without them having
+-- to use nonDetEltsUFM at the call site. This prevents from let-binding
+-- non-deterministically ordered lists and reusing them where determinism
+-- matters.
+pprVarSet :: VarSet          -- ^ The things to be pretty printed
+          -> ([Var] -> SDoc) -- ^ The pretty printing function to use on the
+                             -- elements
+          -> SDoc            -- ^ 'SDoc' where the things have been pretty
+                             -- printed
+pprVarSet = pprUFM
 
 -- Deterministic VarSet
 -- See Note [Deterministic UniqFM] in UniqDFM for explanation why we need
@@ -229,6 +259,9 @@ delDVarSet = delOneFromUniqDSet
 minusDVarSet :: DVarSet -> DVarSet -> DVarSet
 minusDVarSet = minusUniqDSet
 
+dVarSetMinusVarSet :: DVarSet -> VarSet -> DVarSet
+dVarSetMinusVarSet = uniqDSetMinusUniqSet
+
 foldDVarSet :: (Var -> a -> a) -> a -> DVarSet -> a
 foldDVarSet = foldUniqDSet
 
@@ -252,6 +285,10 @@ seqDVarSet s = sizeDVarSet s `seq` ()
 -- | Add a list of variables to DVarSet
 extendDVarSetList :: DVarSet -> [Var] -> DVarSet
 extendDVarSetList = addListToUniqDSet
+
+-- | Convert a DVarSet to a VarSet by forgeting the order of insertion
+dVarSetToVarSet :: DVarSet -> VarSet
+dVarSetToVarSet = udfmToUfm
 
 -- | transCloVarSet for DVarSet
 transCloDVarSet :: (DVarSet -> DVarSet)

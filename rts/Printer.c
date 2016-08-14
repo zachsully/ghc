@@ -32,7 +32,7 @@
  * local function decls
  * ------------------------------------------------------------------------*/
 
-static void    printStdObjPayload( StgClosure *obj );
+static void    printStdObjPayload( const StgClosure *obj );
 
 /* --------------------------------------------------------------------------
  * Printer
@@ -57,7 +57,7 @@ void printObj( StgClosure *obj )
 }
 
 STATIC_INLINE void
-printStdObjHdr( StgClosure *obj, char* tag )
+printStdObjHdr( const StgClosure *obj, char* tag )
 {
     debugBelch("%s(",tag);
     printPtr((StgPtr)obj->header.info);
@@ -67,7 +67,7 @@ printStdObjHdr( StgClosure *obj, char* tag )
 }
 
 static void
-printStdObjPayload( StgClosure *obj )
+printStdObjPayload( const StgClosure *obj )
 {
     StgWord i, j;
     const StgInfoTable* info;
@@ -108,11 +108,11 @@ printThunkObject( StgThunk *obj, char* tag )
 }
 
 void
-printClosure( StgClosure *obj )
+printClosure( const StgClosure *obj )
 {
-    obj = UNTAG_CLOSURE(obj);
+    const StgInfoTable *info;
 
-    StgInfoTable *info;
+    obj = UNTAG_CONST_CLOSURE(obj);
     info = get_itbl(obj);
 
     switch ( info->type ) {
@@ -126,7 +126,7 @@ printClosure( StgClosure *obj )
     case CONSTR_NOCAF_STATIC:
         {
             StgWord i, j;
-            StgConInfoTable *con_info = get_con_itbl (obj);
+            const StgConInfoTable *con_info = get_con_itbl (obj);
 
             debugBelch("%s(", GET_CON_DESC(con_info));
             for (i = 0; i < info->layout.payload.ptrs; ++i) {
@@ -386,6 +386,12 @@ printClosure( StgClosure *obj )
       break;
 #endif
 
+    case COMPACT_NFDATA:
+        debugBelch("COMPACT_NFDATA(size=%" FMT_Word ")\n",
+                   (W_)((StgCompactNFData *)obj)->totalDataW * sizeof(W_));
+        break;
+
+
     default:
             //barf("printClosure %d",get_itbl(obj)->type);
             debugBelch("*** printClosure: unknown type %d ****\n",
@@ -396,7 +402,8 @@ printClosure( StgClosure *obj )
 }
 
 // If you know you have an UPDATE_FRAME, but want to know exactly which.
-char *info_update_frame(StgClosure *closure) {
+const char *info_update_frame(const StgClosure *closure)
+{
     // Note: We intentionally don't take the info table pointer as
     // an argument. As it will be confusing whether one should pass
     // it pointing to the code or struct members when compiling with
@@ -421,9 +428,10 @@ void printGraph( StgClosure *obj )
 */
 
 static void
-printSmallBitmap( StgPtr spBottom, StgPtr payload, StgWord bitmap, nat size )
+printSmallBitmap( StgPtr spBottom, StgPtr payload, StgWord bitmap,
+                    uint32_t size )
 {
-    nat i;
+    uint32_t i;
 
     for(i = 0; i < size; i++, bitmap >>= 1 ) {
         debugBelch("   stk[%ld] (%p) = ", (long)(spBottom-(payload+i)), payload+i);
@@ -437,10 +445,11 @@ printSmallBitmap( StgPtr spBottom, StgPtr payload, StgWord bitmap, nat size )
 }
 
 static void
-printLargeBitmap( StgPtr spBottom, StgPtr payload, StgLargeBitmap* large_bitmap, nat size )
+printLargeBitmap( StgPtr spBottom, StgPtr payload, StgLargeBitmap* large_bitmap,
+                    uint32_t size )
 {
     StgWord bmp;
-    nat i, j;
+    uint32_t i, j;
 
     i = 0;
     for (bmp=0; i < size; bmp++) {
@@ -544,7 +553,7 @@ printStackChunk( StgPtr sp, StgPtr spBottom )
 
         case RET_FUN:
         {
-            StgFunInfoTable *fun_info;
+            const StgFunInfoTable *fun_info;
             StgRetFun *ret_fun;
 
             ret_fun = (StgRetFun *)sp;
@@ -647,7 +656,7 @@ static rtsBool isReal( flagword flags STG_UNUSED, const char *name )
 #endif
 }
 
-extern void DEBUG_LoadSymbols( char *name )
+extern void DEBUG_LoadSymbols( const char *name )
 {
     bfd* abfd;
     char **matching;
@@ -723,7 +732,7 @@ findPtrBlocks (StgPtr p, bdescr *bd, StgPtr arr[], int arr_size, int i)
     for (; bd; bd = bd->link) {
         searched++;
         for (q = bd->start; q < bd->free; q++) {
-            if (UNTAG_CLOSURE((StgClosure*)*q) == (StgClosure *)p) {
+            if (UNTAG_CONST_CLOSURE((StgClosure*)*q) == (const StgClosure *)p) {
                 if (i < arr_size) {
                     for (r = bd->start; r < bd->free; r = end) {
                         // skip over zeroed-out slop
@@ -756,7 +765,7 @@ findPtrBlocks (StgPtr p, bdescr *bd, StgPtr arr[], int arr_size, int i)
 void
 findPtr(P_ p, int follow)
 {
-  nat g, n;
+  uint32_t g, n;
   bdescr *bd;
   const int arr_size = 1024;
   StgPtr arr[arr_size];
@@ -782,86 +791,7 @@ findPtr(P_ p, int follow)
   }
 }
 
-/* prettyPrintClosure() is for printing out a closure using the data constructor
-   names found in the info tables. Closures are printed in a fashion that resembles
-   their Haskell representation. Useful during debugging.
-
-   Todo: support for more closure types, and support for non pointer fields in the
-   payload.
-*/
-
-void prettyPrintClosure_ (StgClosure *);
-
-void prettyPrintClosure (StgClosure *obj)
-{
-   prettyPrintClosure_ (obj);
-   debugBelch ("\n");
-}
-
-void prettyPrintClosure_ (StgClosure *obj)
-{
-    StgInfoTable *info;
-    StgConInfoTable *con_info;
-
-    /* collapse any indirections */
-    unsigned int type;
-    type = get_itbl(obj)->type;
-
-    while (type == IND ||
-           type == IND_STATIC)
-    {
-      obj = ((StgInd *)obj)->indirectee;
-      type = get_itbl(obj)->type;
-    }
-
-    /* find the info table for this object */
-    info = get_itbl(obj);
-
-    /* determine what kind of object we have */
-    switch (info->type)
-    {
-        /* full applications of data constructors */
-        case CONSTR:
-        case CONSTR_1_0:
-        case CONSTR_0_1:
-        case CONSTR_1_1:
-        case CONSTR_0_2:
-        case CONSTR_2_0:
-        case CONSTR_STATIC:
-        case CONSTR_NOCAF_STATIC:
-        {
-           nat i;
-           char *descriptor;
-
-           /* find the con_info for the constructor */
-           con_info = get_con_itbl (obj);
-
-           /* obtain the name of the constructor */
-           descriptor = GET_CON_DESC(con_info);
-
-           debugBelch ("(%s", descriptor);
-
-           /* process the payload of the closure */
-           /* we don't handle non pointers at the moment */
-           for (i = 0; i < info->layout.payload.ptrs; i++)
-           {
-              debugBelch (" ");
-              prettyPrintClosure_ ((StgClosure *) obj->payload[i]);
-           }
-           debugBelch (")");
-           break;
-        }
-
-        /* if it isn't a constructor then just print the closure type */
-        default:
-        {
-           debugBelch ("<%s>", info_type(obj));
-           break;
-        }
-    }
-}
-
-char *what_next_strs[] = {
+const char *what_next_strs[] = {
   [0]               = "(unknown)",
   [ThreadRunGHC]    = "ThreadRunGHC",
   [ThreadInterpret] = "ThreadInterpret",
@@ -889,7 +819,7 @@ void printObj( StgClosure *obj )
    NOTE: must be kept in sync with the closure types in includes/ClosureTypes.h
    -------------------------------------------------------------------------- */
 
-char *closure_type_names[] = {
+const char *closure_type_names[] = {
  [INVALID_OBJECT]        = "INVALID_OBJECT",
  [CONSTR]                = "CONSTR",
  [CONSTR_1_0]            = "CONSTR_1_0",
@@ -949,20 +879,21 @@ char *closure_type_names[] = {
  [ATOMICALLY_FRAME]      = "ATOMICALLY_FRAME",
  [CATCH_RETRY_FRAME]     = "CATCH_RETRY_FRAME",
  [CATCH_STM_FRAME]       = "CATCH_STM_FRAME",
- [WHITEHOLE]             = "WHITEHOLE"
+ [WHITEHOLE]             = "WHITEHOLE",
+ [COMPACT_NFDATA]        = "COMPACT_NFDATA"
 };
 
-char *
-info_type(StgClosure *closure){
+const char *
+info_type(const StgClosure *closure){
   return closure_type_names[get_itbl(closure)->type];
 }
 
-char *
-info_type_by_ip(StgInfoTable *ip){
+const char *
+info_type_by_ip(const StgInfoTable *ip){
   return closure_type_names[ip->type];
 }
 
 void
-info_hdr_type(StgClosure *closure, char *res){
+info_hdr_type(const StgClosure *closure, char *res){
   strcpy(res,closure_type_names[get_itbl(closure)->type]);
 }

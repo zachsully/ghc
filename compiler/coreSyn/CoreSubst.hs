@@ -110,7 +110,7 @@ import TysWiredIn
 data Subst
   = Subst InScopeSet  -- Variables in in scope (both Ids and TyVars) /after/
                       -- applying the substitution
-          IdSubstEnv  -- Substitution for Ids
+          IdSubstEnv  -- Substitution from NcIds to CoreExprs
           TvSubstEnv  -- Substitution from TyVars to Types
           CvSubstEnv  -- Substitution from CoVars to Coercions
 
@@ -180,7 +180,7 @@ TvSubstEnv and CvSubstEnv?
 -}
 
 -- | An environment for substituting for 'Id's
-type IdSubstEnv = IdEnv CoreExpr
+type IdSubstEnv = IdEnv CoreExpr   -- Domain is NcIds, i.e. not coercions
 
 ----------------------------
 isEmptySubst :: Subst -> Bool
@@ -209,11 +209,15 @@ zapSubstEnv (Subst in_scope _ _ _) = Subst in_scope emptyVarEnv emptyVarEnv empt
 -- such that the "CoreSubst#in_scope_invariant" is true after extending the substitution like this
 extendIdSubst :: Subst -> Id -> CoreExpr -> Subst
 -- ToDo: add an ASSERT that fvs(subst-result) is already in the in-scope set
-extendIdSubst (Subst in_scope ids tvs cvs) v r = Subst in_scope (extendVarEnv ids v r) tvs cvs
+extendIdSubst (Subst in_scope ids tvs cvs) v r
+  = ASSERT2( isNonCoVarId v, ppr v $$ ppr r )
+    Subst in_scope (extendVarEnv ids v r) tvs cvs
 
 -- | Adds multiple 'Id' substitutions to the 'Subst': see also 'extendIdSubst'
 extendIdSubstList :: Subst -> [(Id, CoreExpr)] -> Subst
-extendIdSubstList (Subst in_scope ids tvs cvs) prs = Subst in_scope (extendVarEnvList ids prs) tvs cvs
+extendIdSubstList (Subst in_scope ids tvs cvs) prs
+  = ASSERT( all (isNonCoVarId . fst) prs )
+    Subst in_scope (extendVarEnvList ids prs) tvs cvs
 
 -- | Add a substitution for a 'TyVar' to the 'Subst'
 -- The 'TyVar' *must* be a real TyVar, and not a CoVar
@@ -339,11 +343,13 @@ setInScope (Subst _ ids tvs cvs) in_scope = Subst in_scope ids tvs cvs
 
 instance Outputable Subst where
   ppr (Subst in_scope ids tvs cvs)
-        =  text "<InScope =" <+> braces (fsep (map ppr (varEnvElts (getInScopeVars in_scope))))
+        =  text "<InScope =" <+> in_scope_doc
         $$ text " IdSubst   =" <+> ppr ids
         $$ text " TvSubst   =" <+> ppr tvs
         $$ text " CvSubst   =" <+> ppr cvs
          <> char '>'
+    where
+    in_scope_doc = pprVarSet (getInScopeVars in_scope) (braces . fsep . map ppr)
 
 {-
 ************************************************************************
@@ -731,7 +737,7 @@ substDVarSet subst fvs
   where
   subst_fv subst fv acc
      | isId fv = expr_fvs (lookupIdSubst (text "substDVarSet") subst fv) isLocalVar emptyVarSet $! acc
-     | otherwise = tyCoVarsOfTypeAcc (lookupTCvSubst subst fv) (const True) emptyVarSet $! acc
+     | otherwise = tyCoFVsOfType (lookupTCvSubst subst fv) (const True) emptyVarSet $! acc
 
 ------------------
 substTickish :: Subst -> Tickish Id -> Tickish Id
@@ -743,7 +749,7 @@ substTickish _subst other = other
 
 {- Note [Substitute lazily]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The functions that substitute over IdInfo must be pretty lazy, becuause
+The functions that substitute over IdInfo must be pretty lazy, because
 they are knot-tied by substRecBndrs.
 
 One case in point was Trac #10627 in which a rule for a function 'f'

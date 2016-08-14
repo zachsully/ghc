@@ -1,6 +1,7 @@
 -- (c) The University of Glasgow, 1997-2006
 
-{-# LANGUAGE BangPatterns, CPP, DeriveDataTypeable, MagicHash, UnboxedTuples #-}
+{-# LANGUAGE BangPatterns, CPP, MagicHash, UnboxedTuples,
+    GeneralizedNewtypeDeriving #-}
 {-# OPTIONS_GHC -O -funbox-strict-fields #-}
 -- We always optimise this, otherwise performance of a non-optimised
 -- compiler is severely affected
@@ -97,6 +98,7 @@ import FastFunctions
 import Panic
 import Util
 
+import Control.DeepSeq
 import Control.Monad
 import Data.ByteString (ByteString)
 import qualified Data.ByteString          as BS
@@ -145,6 +147,7 @@ hashByteString bs
 -- -----------------------------------------------------------------------------
 
 newtype FastZString = FastZString ByteString
+  deriving NFData
 
 hPutFZS :: Handle -> FastZString -> IO ()
 hPutFZS handle (FastZString bs) = BS.hPut handle bs
@@ -175,7 +178,7 @@ data FastString = FastString {
       n_chars :: {-# UNPACK #-} !Int, -- number of chars
       fs_bs   :: {-# UNPACK #-} !ByteString,
       fs_ref  :: {-# UNPACK #-} !(IORef (Maybe FastZString))
-  } deriving Typeable
+  }
 
 instance Eq FastString where
   f1 == f2  =  uniq f1 == uniq f2
@@ -192,9 +195,13 @@ instance Ord FastString where
             | otherwise =  y
     compare a b = cmpFS a b
 
+instance IsString FastString where
+    fromString = fsLit
+
 instance Monoid FastString where
     mempty = nilFS
     mappend = appendFS
+    mconcat = concatFS
 
 instance Show FastString where
    show fs = show (unpackFS fs)
@@ -512,7 +519,7 @@ appendFS fs1 fs2 = mkFastStringByteString
                              (fastStringToByteString fs2)
 
 concatFS :: [FastString] -> FastString
-concatFS ls = mkFastString (Prelude.concat (map unpackFS ls)) -- ToDo: do better
+concatFS = mkFastStringByteString . BS.concat . map fs_bs
 
 headFS :: FastString -> Char
 headFS (FastString _ 0 _ _) = panic "headFS: Empty FastString"

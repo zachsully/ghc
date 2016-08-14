@@ -30,50 +30,48 @@
 SpinLock gc_alloc_block_sync;
 #endif
 
-bdescr *
-allocBlock_sync(void)
+bdescr* allocGroup_sync(uint32_t n)
 {
     bdescr *bd;
+    uint32_t node = capNoToNumaNode(gct->thread_index);
     ACQUIRE_SPIN_LOCK(&gc_alloc_block_sync);
-    bd = allocBlock();
+    bd = allocGroupOnNode(node,n);
     RELEASE_SPIN_LOCK(&gc_alloc_block_sync);
     return bd;
 }
 
-static bdescr *
-allocGroup_sync(nat n)
+bdescr* allocGroupOnNode_sync(uint32_t node, uint32_t n)
 {
     bdescr *bd;
     ACQUIRE_SPIN_LOCK(&gc_alloc_block_sync);
-    bd = allocGroup(n);
+    bd = allocGroupOnNode(node,n);
     RELEASE_SPIN_LOCK(&gc_alloc_block_sync);
     return bd;
 }
 
-
-#if 0
-static void
-allocBlocks_sync(nat n, bdescr **hd, bdescr **tl,
-                 nat gen_no, step *stp,
-                 StgWord32 flags)
+static uint32_t
+allocBlocks_sync(uint32_t n, bdescr **hd)
 {
     bdescr *bd;
-    nat i;
+    uint32_t i;
+    uint32_t node = capNoToNumaNode(gct->thread_index);
     ACQUIRE_SPIN_LOCK(&gc_alloc_block_sync);
-    bd = allocGroup(n);
+    bd = allocLargeChunkOnNode(node,1,n);
+    // NB. allocLargeChunk, rather than allocGroup(n), to allocate in a
+    // fragmentation-friendly way.
+    n = bd->blocks;
     for (i = 0; i < n; i++) {
         bd[i].blocks = 1;
-        bd[i].gen_no = gen_no;
-        bd[i].step = stp;
-        bd[i].flags = flags;
         bd[i].link = &bd[i+1];
-        bd[i].u.scan = bd[i].free = bd[i].start;
+        bd[i].free = bd[i].start;
     }
-    *hd = bd;
-    *tl = &bd[n-1];
+    bd[n-1].link = NULL;
+    // We have to hold the lock until we've finished fiddling with the metadata,
+    // otherwise the block allocator can get confused.
     RELEASE_SPIN_LOCK(&gc_alloc_block_sync);
+    *hd = bd;
+    return n;
 }
-#endif
 
 void
 freeChain_sync(bdescr *bd)
@@ -113,9 +111,9 @@ grab_local_todo_block (gen_workspace *ws)
 
 #if defined(THREADED_RTS)
 bdescr *
-steal_todo_block (nat g)
+steal_todo_block (uint32_t g)
 {
-    nat n;
+    uint32_t n;
     bdescr *bd;
 
     // look for work to steal
@@ -146,6 +144,7 @@ push_scanned_block (bdescr *bd, gen_workspace *ws)
         bd->link = ws->part_list;
         ws->part_list = bd;
         ws->n_part_blocks += bd->blocks;
+        ws->n_part_words += bd->free - bd->start;
         IF_DEBUG(sanity,
                  ASSERT(countBlocks(ws->part_list) == ws->n_part_blocks));
     }
@@ -155,6 +154,7 @@ push_scanned_block (bdescr *bd, gen_workspace *ws)
         bd->link = ws->scavd_list;
         ws->scavd_list = bd;
         ws->n_scavd_blocks += bd->blocks;
+        ws->n_scavd_words += bd->free - bd->start;
         IF_DEBUG(sanity,
                  ASSERT(countBlocks(ws->scavd_list) == ws->n_scavd_blocks));
     }
@@ -190,7 +190,7 @@ push_scanned_block (bdescr *bd, gen_workspace *ws)
 */
 
 StgPtr
-todo_block_full (nat size, gen_workspace *ws)
+todo_block_full (uint32_t size, gen_workspace *ws)
 {
     rtsBool urgent_to_push, can_extend;
     StgPtr p;
@@ -295,7 +295,7 @@ todo_block_full (nat size, gen_workspace *ws)
 }
 
 StgPtr
-alloc_todo_block (gen_workspace *ws, nat size)
+alloc_todo_block (gen_workspace *ws, uint32_t size)
 {
     bdescr *bd/*, *hd, *tl */;
 
@@ -306,29 +306,26 @@ alloc_todo_block (gen_workspace *ws, nat size)
     {
         ws->part_list = bd->link;
         ws->n_part_blocks -= bd->blocks;
+        ws->n_part_words -= bd->free - bd->start;
     }
     else
     {
-        // blocks in to-space get the BF_EVACUATED flag.
-
-//        allocBlocks_sync(16, &hd, &tl,
-//                         ws->step->gen_no, ws->step, BF_EVACUATED);
-//
-//        tl->link = ws->part_list;
-//        ws->part_list = hd->link;
-//        ws->n_part_blocks += 15;
-//
-//        bd = hd;
-
         if (size > BLOCK_SIZE_W) {
             bd = allocGroup_sync((W_)BLOCK_ROUND_UP(size*sizeof(W_))
                                  / BLOCK_SIZE);
         } else {
-            bd = allocBlock_sync();
+            if (gct->free_blocks) {
+                bd = gct->free_blocks;
+                gct->free_blocks = bd->link;
+            } else {
+                allocBlocks_sync(16, &bd);
+                gct->free_blocks = bd->link;
+            }
         }
-        initBdescr(bd, ws->gen, ws->gen->to);
+        // blocks in to-space get the BF_EVACUATED flag.
         bd->flags = BF_EVACUATED;
-        bd->u.scan = bd->free = bd->start;
+        bd->u.scan = bd->start;
+        initBdescr(bd, ws->gen, ws->gen->to);
     }
 
     bd->link = NULL;

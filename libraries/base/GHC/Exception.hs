@@ -50,6 +50,7 @@ encapsulated in a @SomeException@.
 -}
 data SomeException = forall e . Exception e => SomeException e
 
+-- | @since 3.0
 instance Show SomeException where
     showsPrec p (SomeException e) = showsPrec p e
 
@@ -59,7 +60,7 @@ instance of the @Exception@ class. The simplest case is a new exception
 type directly below the root:
 
 > data MyException = ThisException | ThatException
->     deriving (Show, Typeable)
+>     deriving Show
 >
 > instance Exception MyException
 
@@ -79,7 +80,6 @@ of exceptions:
 > -- Make the root exception type for all the exceptions in a compiler
 >
 > data SomeCompilerException = forall e . Exception e => SomeCompilerException e
->     deriving Typeable
 >
 > instance Show SomeCompilerException where
 >     show (SomeCompilerException e) = show e
@@ -98,7 +98,6 @@ of exceptions:
 > -- Make a subhierarchy for exceptions in the frontend of the compiler
 >
 > data SomeFrontendException = forall e . Exception e => SomeFrontendException e
->     deriving Typeable
 >
 > instance Show SomeFrontendException where
 >     show (SomeFrontendException e) = show e
@@ -119,7 +118,7 @@ of exceptions:
 > -- Make an exception type for a particular frontend compiler exception
 >
 > data MismatchedParentheses = MismatchedParentheses
->     deriving (Typeable, Show)
+>     deriving Show
 >
 > instance Exception MismatchedParentheses where
 >     toException   = frontendExceptionToException
@@ -156,6 +155,7 @@ class (Typeable e, Show e) => Exception e where
     displayException :: e -> String
     displayException = show
 
+-- | @since 3.0
 instance Exception SomeException where
     toException se = se
     fromException = Just
@@ -175,8 +175,10 @@ pattern ErrorCall :: String -> ErrorCall
 pattern ErrorCall err <- ErrorCallWithLocation err _ where
   ErrorCall err = ErrorCallWithLocation err ""
 
+-- | @since 4.0.0.0
 instance Exception ErrorCall
 
+-- | @since 4.0.0.0
 instance Show ErrorCall where
   showsPrec _ (ErrorCallWithLocation err "") = showString err
   showsPrec _ (ErrorCallWithLocation err loc) = showString (err ++ '\n' : loc)
@@ -241,8 +243,10 @@ divZeroException        = toException DivideByZero
 overflowException       = toException Overflow
 ratioZeroDenomException = toException RatioZeroDenominator
 
+-- | @since 4.0.0.0
 instance Exception ArithException
 
+-- | @since 4.0.0.0
 instance Show ArithException where
   showsPrec _ Overflow        = showString "arithmetic overflow"
   showsPrec _ Underflow       = showString "arithmetic underflow"

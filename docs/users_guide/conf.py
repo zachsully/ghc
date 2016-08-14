@@ -66,6 +66,7 @@ latex_elements = {
     'utf8extra': '',
     'preamble': '''
 \usepackage{fontspec}
+\usepackage{makeidx}
 \setsansfont{DejaVu Sans}
 \setromanfont{DejaVu Serif}
 \setmonofont{DejaVu Sans Mono}
@@ -171,7 +172,6 @@ def setup(app):
                         indextemplate='pair: %s; RTS option',
                         doc_field_types=[
                             Field('since', label='Introduced in GHC version', names=['since']),
-                            Field('static')
                         ])
 
 def increase_python_stack():

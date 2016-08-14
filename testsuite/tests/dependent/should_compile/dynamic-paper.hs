@@ -2,13 +2,16 @@
 Stephanie Weirich, Richard Eisenberg, and Dimitrios Vytiniotis, 2016. -}
 
 -- NB: it includes a negative-recursive function (see delta1), and
--- so will give "simplifer ticks exhausted", at least with -O
+-- so will give "simplifier ticks exhausted", at least with -O
 
 {-#  LANGUAGE RankNTypes, PolyKinds, TypeOperators,
              ScopedTypeVariables, GADTs, FlexibleInstances,
              UndecidableInstances, RebindableSyntax,
              DataKinds, MagicHash, AutoDeriveTypeable, TypeInType  #-}
-{-# OPTIONS_GHC -fno-warn-missing-methods -fno-warn-redundant-constraints #-}
+{-# OPTIONS_GHC -Wno-missing-methods -Wno-redundant-constraints #-}
+{-# OPTIONS_GHC -Wno-simplifiable-class-constraints #-}
+  -- Because we define a local Typeable class and have
+  --   instance Data.Typeable.Typeable a => Typeable a
 
 module Dynamic where
 

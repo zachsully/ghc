@@ -58,18 +58,24 @@ addNode :: Uniquable k
 addNode k node graph
  = let
         -- add back conflict edges from other nodes to this one
-        map_conflict
-                = foldUniqSet
-                        (adjustUFM_C (\n -> n { nodeConflicts = addOneToUniqSet (nodeConflicts n) k}))
-                        (graphMap graph)
-                        (nodeConflicts node)
+        map_conflict =
+          nonDetFoldUFM
+            -- It's OK to use nonDetFoldUFM here because the
+            -- operation is commutative
+            (adjustUFM_C (\n -> n { nodeConflicts =
+                                      addOneToUniqSet (nodeConflicts n) k}))
+            (graphMap graph)
+            (nodeConflicts node)
 
         -- add back coalesce edges from other nodes to this one
-        map_coalesce
-                = foldUniqSet
-                        (adjustUFM_C (\n -> n { nodeCoalesce = addOneToUniqSet (nodeCoalesce n) k}))
-                        map_conflict
-                        (nodeCoalesce node)
+        map_coalesce =
+          nonDetFoldUFM
+            -- It's OK to use nonDetFoldUFM here because the
+            -- operation is commutative
+            (adjustUFM_C (\n -> n { nodeCoalesce =
+                                      addOneToUniqSet (nodeCoalesce n) k}))
+            map_conflict
+            (nodeCoalesce node)
 
   in    graph
         { graphMap      = addToUFM map_coalesce k node}
@@ -83,11 +89,12 @@ delNode k graph
         | Just node     <- lookupNode graph k
         = let   -- delete conflict edges from other nodes to this one.
                 graph1  = foldl' (\g k1 -> let Just g' = delConflict k1 k g in g') graph
-                        $ uniqSetToList (nodeConflicts node)
+                        $ nonDetEltsUFM (nodeConflicts node)
 
                 -- delete coalesce edge from other nodes to this one.
                 graph2  = foldl' (\g k1 -> let Just g' = delCoalesce k1 k g in g') graph1
-                        $ uniqSetToList (nodeCoalesce node)
+                        $ nonDetEltsUFM (nodeCoalesce node)
+                        -- See Note [Unique Determinism and code generation]
 
                 -- delete the node
                 graph3  = graphMapModify (\fm -> delFromUFM fm k) graph2
@@ -175,7 +182,7 @@ addConflicts
 addConflicts conflicts getClass
 
         -- just a single node, but no conflicts, create the node anyway.
-        | (u : [])      <- uniqSetToList conflicts
+        | (u : [])      <- nonDetEltsUFM conflicts
         = graphMapModify
         $ adjustWithDefaultUFM
                 id
@@ -185,7 +192,8 @@ addConflicts conflicts getClass
         | otherwise
         = graphMapModify
         $ (\fm -> foldl' (\g u  -> addConflictSet1 u getClass conflicts g) fm
-                $ uniqSetToList conflicts)
+                $ nonDetEltsUFM conflicts)
+                -- See Note [Unique Determinism and code generation]
 
 
 addConflictSet1 :: Uniquable k
@@ -299,7 +307,8 @@ coalesceGraph' aggressive triv graph kkPairsAcc
  = let
         -- find all the nodes that have coalescence edges
         cNodes  = filter (\node -> not $ isEmptyUniqSet (nodeCoalesce node))
-                $ eltsUFM $ graphMap graph
+                $ nonDetEltsUFM $ graphMap graph
+                -- See Note [Unique Determinism and code generation]
 
         -- build a list of pairs of keys for node's we'll try and coalesce
         --      every pair of nodes will appear twice in this list
@@ -309,7 +318,8 @@ coalesceGraph' aggressive triv graph kkPairsAcc
         --
         cList   = [ (nodeId node1, k2)
                         | node1 <- cNodes
-                        , k2    <- uniqSetToList $ nodeCoalesce node1 ]
+                        , k2    <- nonDetEltsUFM $ nodeCoalesce node1 ]
+                        -- See Note [Unique Determinism and code generation]
 
         -- do the coalescing, returning the new graph and a list of pairs of keys
         --      that got coalesced together.
@@ -462,7 +472,9 @@ freezeNode k
                 else node       -- panic "GraphOps.freezeNode: edge to freeze wasn't in the coalesce set"
                                 -- If the edge isn't actually in the coelesce set then just ignore it.
 
-        fm2     = foldUniqSet (adjustUFM_C (freezeEdge k)) fm1
+        fm2     = nonDetFoldUFM (adjustUFM_C (freezeEdge k)) fm1
+                    -- It's OK to use nonDetFoldUFM here because the operation
+                    -- is commutative
                         $ nodeCoalesce node
 
     in  fm2
@@ -517,7 +529,8 @@ freezeAllInGraph
 freezeAllInGraph graph
         = foldr freezeNode graph
                 $ map nodeId
-                $ eltsUFM $ graphMap graph
+                $ nonDetEltsUFM $ graphMap graph
+                -- See Note [Unique Determinism and code generation]
 
 
 -- | Find all the nodes in the graph that meet some criteria
@@ -528,7 +541,8 @@ scanGraph
         -> [Node k cls color]
 
 scanGraph match graph
-        = filter match $ eltsUFM $ graphMap graph
+        = filter match $ nonDetEltsUFM $ graphMap graph
+          -- See Note [Unique Determinism and code generation]
 
 
 -- | validate the internal structure of a graph
@@ -546,20 +560,21 @@ validateGraph doc isColored graph
 
         -- Check that all edges point to valid nodes.
         | edges         <- unionManyUniqSets
-                                (  (map nodeConflicts       $ eltsUFM $ graphMap graph)
-                                ++ (map nodeCoalesce        $ eltsUFM $ graphMap graph))
+                                (  (map nodeConflicts       $ nonDetEltsUFM $ graphMap graph)
+                                ++ (map nodeCoalesce        $ nonDetEltsUFM $ graphMap graph))
 
-        , nodes         <- mkUniqSet $ map nodeId $ eltsUFM $ graphMap graph
+        , nodes         <- mkUniqSet $ map nodeId $ nonDetEltsUFM $ graphMap graph
         , badEdges      <- minusUniqSet edges nodes
         , not $ isEmptyUniqSet badEdges
         = pprPanic "GraphOps.validateGraph"
                 (  text "Graph has edges that point to non-existant nodes"
-                $$ text "  bad edges: " <> vcat (map ppr $ uniqSetToList badEdges)
+                $$ text "  bad edges: " <> pprUFM badEdges (vcat . map ppr)
                 $$ doc )
 
         -- Check that no conflicting nodes have the same color
         | badNodes      <- filter (not . (checkNode graph))
-                        $ eltsUFM $ graphMap graph
+                        $ nonDetEltsUFM $ graphMap graph
+                           -- See Note [Unique Determinism and code generation]
         , not $ null badNodes
         = pprPanic "GraphOps.validateGraph"
                 (  text "Node has same color as one of it's conflicts"
@@ -570,7 +585,7 @@ validateGraph doc isColored graph
         --      check that all nodes have a color.
         | isColored
         , badNodes      <- filter (\n -> isNothing $ nodeColor n)
-                        $  eltsUFM $ graphMap graph
+                        $  nonDetEltsUFM $ graphMap graph
         , not $ null badNodes
         = pprPanic "GraphOps.validateGraph"
                 (  text "Supposably colored graph has uncolored nodes."
@@ -594,7 +609,8 @@ checkNode
 checkNode graph node
         | Just color            <- nodeColor node
         , Just neighbors        <- sequence $ map (lookupNode graph)
-                                $  uniqSetToList $ nodeConflicts node
+                                $  nonDetEltsUFM $ nodeConflicts node
+            -- See Note [Unique Determinism and code generation]
 
         , neighbourColors       <- catMaybes $ map nodeColor neighbors
         , elem color neighbourColors
@@ -618,7 +634,8 @@ slurpNodeConflictCount graph
         $ map   (\node
                   -> let count  = sizeUniqSet $ nodeConflicts node
                      in  (count, (count, 1)))
-        $ eltsUFM
+        $ nonDetEltsUFM
+        -- See Note [Unique Determinism and code generation]
         $ graphMap graph
 
 

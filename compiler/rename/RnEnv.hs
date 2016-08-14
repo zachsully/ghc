@@ -13,7 +13,7 @@ module RnEnv (
         lookupLocalOccRn_maybe, lookupInfoOccRn,
         lookupLocalOccThLvl_maybe,
         lookupTypeOccRn, lookupKindOccRn,
-        lookupGlobalOccRn, lookupGlobalOccRnExport, lookupGlobalOccRn_maybe,
+        lookupGlobalOccRn, lookupGlobalOccRn_maybe,
         lookupOccRn_overloaded, lookupGlobalOccRn_overloaded,
         reportUnboundName, unknownNameSuggestions,
         addNameClashErrRn,
@@ -36,6 +36,10 @@ module RnEnv (
         addLocalFixities,
         bindLocatedLocalsFV, bindLocatedLocalsRn,
         extendTyVarEnvFVRn,
+
+        -- Role annotations
+        RoleAnnotEnv, emptyRoleAnnotEnv, mkRoleAnnotEnv,
+        lookupRoleAnnot, getRoleAnnots,
 
         checkDupRdrNames, checkShadowedRdrNames,
         checkDupNames, checkDupAndShadowedNames, dupNamesErr,
@@ -854,27 +858,6 @@ lookupGlobalOccRn rdr_name
            Nothing -> do { traceRn (text "lookupGlobalOccRn" <+> ppr rdr_name)
                          ; unboundName WL_Global rdr_name } }
 
--- like lookupGlobalOccRn but suggests adding 'type' keyword
--- to export type constructors mistaken for data constructors
-lookupGlobalOccRnExport :: RdrName -> RnM Name
-lookupGlobalOccRnExport rdr_name
-  = do { mb_name <- lookupGlobalOccRn_maybe rdr_name
-       ; case mb_name of
-           Just n  -> return n
-           Nothing -> do { env <- getGlobalRdrEnv
-                         ; let tycon = setOccNameSpace tcClsName (rdrNameOcc rdr_name)
-                               msg = case lookupOccEnv env tycon of
-                                   Just (gre : _) -> make_msg gre
-                                   _              -> Outputable.empty
-                               make_msg gre = hang
-                                   (hsep [text "Note: use",
-                                       quotes (text "type"),
-                                       text "keyword to export type constructor",
-                                       quotes (ppr (gre_name gre))])
-                                   2 (vcat [pprNameProvenance gre,
-                                       text "(requires TypeOperators extension)"])
-                         ; unboundNameX WL_Global rdr_name msg } }
-
 lookupInfoOccRn :: RdrName -> RnM [Name]
 -- lookupInfoOccRn is intended for use in GHCi's ":info" command
 -- It finds all the GREs that RdrName could mean, not complaining
@@ -1035,7 +1018,7 @@ addUsedDataCons :: GlobalRdrEnv -> TyCon -> RnM ()
 addUsedDataCons rdr_env tycon
   = addUsedGREs [ gre
                 | dc <- tyConDataCons tycon
-                , gre : _ <- [lookupGRE_Name rdr_env (dataConName dc) ] ]
+                , Just gre <- [lookupGRE_Name rdr_env (dataConName dc)] ]
 
 addUsedGRE :: Bool -> GlobalRdrElt -> RnM ()
 -- Called for both local and imported things
@@ -1228,7 +1211,7 @@ data HsSigCtxt
   | ClsDeclCtxt   Name       -- Class decl for this class
   | InstDeclCtxt  NameSet    -- Instance decl whose user-written method
                              -- bindings are for these methods
-  | HsBootCtxt               -- Top level of a hs-boot file
+  | HsBootCtxt NameSet       -- Top level of a hs-boot file, binding these names
   | RoleAnnotCtxt NameSet    -- A role annotation, with the names of all types
                              -- in the group
 
@@ -1270,7 +1253,7 @@ lookupBindGroupOcc ctxt what rdr_name
 
   | otherwise
   = case ctxt of
-      HsBootCtxt       -> lookup_top (const True)
+      HsBootCtxt ns    -> lookup_top (`elemNameSet` ns)
       TopSigCtxt ns    -> lookup_top (`elemNameSet` ns)
       RoleAnnotCtxt ns -> lookup_top (`elemNameSet` ns)
       LocalBindCtxt ns -> lookup_group ns
@@ -1533,6 +1516,35 @@ lookupFieldFixityRn (Ambiguous   (L _ rdr) _) = get_ambiguous_fixity rdr
 
     format_ambig (elt, fix) = hang (ppr fix)
                                  2 (pprNameProvenance elt)
+
+
+{- *********************************************************************
+*                                                                      *
+                        Role annotations
+*                                                                      *
+********************************************************************* -}
+
+type RoleAnnotEnv = NameEnv (LRoleAnnotDecl Name)
+
+mkRoleAnnotEnv :: [LRoleAnnotDecl Name] -> RoleAnnotEnv
+mkRoleAnnotEnv role_annot_decls
+ = mkNameEnv [ (name, ra_decl)
+             | ra_decl <- role_annot_decls
+             , let name = roleAnnotDeclName (unLoc ra_decl)
+             , not (isUnboundName name) ]
+       -- Some of the role annots will be unbound;
+       -- we don't wish to include these
+
+emptyRoleAnnotEnv :: RoleAnnotEnv
+emptyRoleAnnotEnv = emptyNameEnv
+
+lookupRoleAnnot :: RoleAnnotEnv -> Name -> Maybe (LRoleAnnotDecl Name)
+lookupRoleAnnot = lookupNameEnv
+
+getRoleAnnots :: [Name] -> RoleAnnotEnv -> ([LRoleAnnotDecl Name], RoleAnnotEnv)
+getRoleAnnots bndrs role_env
+  = ( mapMaybe (lookupRoleAnnot role_env) bndrs
+    , delListFromNameEnv role_env bndrs )
 
 
 {-
@@ -2107,22 +2119,23 @@ warnUnusedTypePatterns = check_unused Opt_WarnUnusedTypePatterns
 
 check_unused :: WarningFlag -> [Name] -> FreeVars -> RnM ()
 check_unused flag bound_names used_names
- = whenWOptM flag (warnUnusedLocals (filterOut (`elemNameSet` used_names) bound_names))
+  = whenWOptM flag (warnUnused flag (filterOut (`elemNameSet` used_names)
+                                               bound_names))
 
 -------------------------
 --      Helpers
 warnUnusedGREs :: [GlobalRdrElt] -> RnM ()
 warnUnusedGREs gres = mapM_ warnUnusedGRE gres
 
-warnUnusedLocals :: [Name] -> RnM ()
-warnUnusedLocals names = do
+warnUnused :: WarningFlag -> [Name] -> RnM ()
+warnUnused flag names = do
     fld_env <- mkFieldEnv <$> getGlobalRdrEnv
-    mapM_ (warnUnusedLocal fld_env) names
+    mapM_ (warnUnused1 flag fld_env) names
 
-warnUnusedLocal :: NameEnv (FieldLabelString, Name) -> Name -> RnM ()
-warnUnusedLocal fld_env name
+warnUnused1 :: WarningFlag -> NameEnv (FieldLabelString, Name) -> Name -> RnM ()
+warnUnused1 flag fld_env name
   = when (reportable name) $
-    addUnusedWarning Opt_WarnUnusedLocalBinds
+    addUnusedWarning flag
                      occ (nameSrcSpan name)
                      (text "Defined but not used")
   where
@@ -2133,7 +2146,7 @@ warnUnusedLocal fld_env name
 warnUnusedGRE :: GlobalRdrElt -> RnM ()
 warnUnusedGRE gre@(GRE { gre_name = name, gre_lcl = lcl, gre_imp = is })
   | lcl       = do fld_env <- mkFieldEnv <$> getGlobalRdrEnv
-                   warnUnusedLocal fld_env name
+                   warnUnused1 Opt_WarnUnusedTopBinds fld_env name
   | otherwise = when (reportable name) (mapM_ warn is)
   where
     occ = greOccName gre

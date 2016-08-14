@@ -398,6 +398,8 @@ of ``-W(no-)*``.
 
 .. ghc-flag:: -Wredundant-constraints
 
+    :since: 8.0
+
     .. index::
        single: redundant constraints, warning
 
@@ -513,6 +515,18 @@ of ``-W(no-)*``.
 
         h = \[] -> 2
         Just k = f y
+
+.. ghc-flag:: -fmax-pmcheck-iterations=<N>
+
+    :default: 2000000
+
+    Sets how many iterations of the pattern-match checker will perform before
+    giving up. This limit is to catch cases where pattern-match checking might
+    be excessively costly (due to the exponential complexity of coverage
+    checking in the general case). It typically shouldn't be necessary to set
+    this unless GHC informs you that it has exceeded the pattern match checker's
+    iteration limit (in which case you may want to consider refactoring your
+    pattern match, for the sake of future readers of your code.
 
 .. ghc-flag:: -Wincomplete-record-updates
 
@@ -710,6 +724,28 @@ of ``-W(no-)*``.
     where the last pattern match in ``f`` won't ever be reached, as the
     second pattern overlaps it. More often than not, redundant patterns
     is a programmer mistake/error, so this option is enabled by default.
+
+.. ghc-flag:: -Wsimplifiable-class-constraints
+
+    :since: 8.2
+
+    .. index::
+       single: simplifiable class constraints, warning
+
+    Warn about class constraints in a type signature that can be simplified
+    using a top-level instance declaration.  For example: ::
+
+       f :: Eq [a] => a -> a
+
+    Here the ``Eq [a]`` in the signature overlaps with the top-level
+    instance for ``Eq [a]``.  GHC goes to some efforts to use the former,
+    but if it should use the latter, it would then have an
+    insoluble ``Eq a`` constraint.  Best avoided by instead writing: ::
+
+       f :: Eq a => a -> a
+
+    This option is on by default. As usual you can suppress it on a
+    per-module basis with :ghc-flag:`-Wno-simplifiable-class-constraints`.
 
 .. ghc-flag:: -Wtabs
 

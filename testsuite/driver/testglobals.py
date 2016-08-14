@@ -60,15 +60,13 @@ class TestConfig:
 
         self.list_broken = False
 
-        # Path to the compiler
+        # Path to the compiler (stage2 by default)
         self.compiler = ''
         # and ghc-pkg
         self.ghc_pkg = ''
 
-        # Compiler version info
-        self.compiler_version = ''
-        self.compiler_maj_version = ''
-        self.compiler_tags = []
+        # Is self.compiler a stage 1, 2 or 3 compiler?
+        self.stage = 2
 
         # Flags we always give to this compiler
         self.compiler_always_flags = []
@@ -116,9 +114,6 @@ class TestConfig:
         self.threads = 1
         self.use_threads = 0
 
-        # Should we check for files being written more than once?
-        self.check_files_written = False
-
         # Should we skip performance tests
         self.skip_perf_tests = False
 
@@ -136,23 +131,18 @@ class TestRun:
        self.start_time = None
        self.total_tests = 0
        self.total_test_cases = 0
-       self.n_framework_failures = 0
-       self.framework_failures = {}
+
        self.n_tests_skipped = 0
-       self.tests_skipped = {}
        self.n_expected_passes = 0
-       self.expected_passes = {}
        self.n_expected_failures = 0
-       self.expected_failures = {}
-       self.n_missing_libs = 0
-       self.missing_libs = {}
-       self.n_unexpected_passes = 0
-       self.unexpected_passes = {}
-       self.n_unexpected_failures = 0
-       self.unexpected_failures = {}
-       self.n_unexpected_stat_failures = 0
-       self.unexpected_stat_failures = {}
-       
+
+       self.missing_libs = []
+       self.framework_failures = []
+
+       self.unexpected_passes = []
+       self.unexpected_failures = []
+       self.unexpected_stat_failures = []
+
 global t
 t = TestRun()
 
@@ -186,13 +176,8 @@ class TestOptions:
        self.stdin = ''
 
        # don't compare output
-       self.ignore_output = 0
-
-       # don't give anything as stdin
-       self.no_stdin = 0
-
-       # compile this test to .hc only
-       self.compile_to_hc = 0
+       self.ignore_stdout = False
+       self.ignore_stderr = False
 
        # We sometimes want to modify the compiler_always_flags, so
        # they are copied from config.compiler_always_flags when we
@@ -208,11 +193,11 @@ class TestOptions:
        # expected exit code
        self.exit_code = 0
 
-       # should we clean up after ourselves?
-       self.cleanup = ''
-
        # extra files to clean afterward
        self.clean_files = []
+
+       # extra files to copy to the testdir
+       self.extra_files = []
 
        # which -t numeric fields do we want to look at, and what bounds must
        # they fall within?
@@ -262,6 +247,9 @@ class TestOptions:
        # output, and a normaliser function given other test options
        self.check_stdout = None
 
+       # Check .hp file when profiling libraries are available?
+       self.check_hp = True
+
        # Extra normalisation for compiler error messages
        self.extra_errmsg_normaliser = lambda x: x
 
@@ -277,6 +265,12 @@ class TestOptions:
        # How should the timeout be adjusted on this test?
        self.compile_timeout_multiplier = 1.0
        self.run_timeout_multiplier = 1.0
+
+       self.cleanup = True
+
+       # Sould we run tests in a local subdirectory (<testname>-run) or
+       # in temporary directory in /tmp? See Note [Running tests in /tmp].
+       self.local = True
 
 # The default set of options
 global default_testopts

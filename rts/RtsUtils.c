@@ -57,13 +57,24 @@ extern char *ctime_r(const time_t *, char *);
    -------------------------------------------------------------------------- */
 
 void *
-stgMallocBytes (int n, char *msg)
+stgMallocBytes (size_t n, char *msg)
 {
-    char *space;
-    size_t n2;
+    void *space;
 
-    n2 = (size_t) n;
-    if ((space = (char *) malloc(n2)) == NULL) {
+    if ((space = malloc(n)) == NULL) {
+      /* Quoting POSIX.1-2008 (which says more or less the same as ISO C99):
+       *
+       *   "Upon successful completion with size not equal to 0, malloc() shall
+       *   return a pointer to the allocated space. If size is 0, either a null
+       *   pointer or a unique pointer that can be successfully passed to free()
+       *   shall be returned. Otherwise, it shall return a null pointer and set
+       *   errno to indicate the error."
+       *
+       * Consequently, a NULL pointer being returned by `malloc()` for a 0-size
+       * allocation is *not* to be considered an error.
+       */
+      if (n == 0) return NULL;
+
       /* don't fflush(stdout); WORKAROUND bug in Linux glibc */
       rtsConfig.mallocFailHook((W_) n, msg); /*msg*/
       stg_exit(EXIT_INTERNAL_ERROR);
@@ -72,13 +83,11 @@ stgMallocBytes (int n, char *msg)
 }
 
 void *
-stgReallocBytes (void *p, int n, char *msg)
+stgReallocBytes (void *p, size_t n, char *msg)
 {
-    char *space;
-    size_t n2;
+    void *space;
 
-    n2 = (size_t) n;
-    if ((space = (char *) realloc(p, (size_t) n2)) == NULL) {
+    if ((space = realloc(p, n)) == NULL) {
       /* don't fflush(stdout); WORKAROUND bug in Linux glibc */
       rtsConfig.mallocFailHook((W_) n, msg); /*msg*/
       stg_exit(EXIT_INTERNAL_ERROR);
@@ -87,17 +96,29 @@ stgReallocBytes (void *p, int n, char *msg)
 }
 
 void *
-stgCallocBytes (int n, int m, char *msg)
+stgCallocBytes (size_t n, size_t m, char *msg)
 {
-    char *space;
+    void *space;
 
-    if ((space = (char *) calloc((size_t) n, (size_t) m)) == NULL) {
+    if ((space = calloc(n, m)) == NULL) {
       /* don't fflush(stdout); WORKAROUND bug in Linux glibc */
       rtsConfig.mallocFailHook((W_) n*m, msg); /*msg*/
       stg_exit(EXIT_INTERNAL_ERROR);
     }
     return space;
 }
+
+/* borrowed from the MUSL libc project */
+char *stgStrndup(const char *s, size_t n)
+{
+    size_t l = strnlen(s, n);
+    char *d = stgMallocBytes(l+1, "stgStrndup");
+    if (!d) return NULL;
+    memcpy(d, s, l);
+    d[l] = 0;
+    return d;
+}
+
 
 /* To simplify changing the underlying allocator used
  * by stgMallocBytes(), provide stgFree() as well.

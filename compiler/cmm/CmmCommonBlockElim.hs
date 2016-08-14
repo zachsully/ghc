@@ -21,6 +21,8 @@ import Data.Word
 import qualified Data.Map as M
 import Outputable
 import UniqFM
+import UniqDFM
+import qualified TrieMap as TM
 import Unique
 import Control.Arrow (first, second)
 
@@ -285,15 +287,16 @@ copyTicks env g
 
 -- Group by [Label]
 groupByLabel :: [(Key, a)] -> [(Key, [a])]
-groupByLabel = go M.empty
+groupByLabel = go (TM.emptyTM :: TM.ListMap UniqDFM a)
   where
-    go !m [] = M.elems m
-    go !m ((k,v) : entries) = go (M.alter adjust k' m) entries
+    go !m [] = TM.foldTM (:) m []
+    go !m ((k,v) : entries) = go (TM.alterTM k' adjust m) entries
       where k' = map getUnique k
             adjust Nothing       = Just (k,[v])
             adjust (Just (_,vs)) = Just (k,v:vs)
 
 
 groupByInt :: (a -> Int) -> [a] -> [[a]]
-groupByInt f xs = eltsUFM $ List.foldl' go emptyUFM xs
+groupByInt f xs = nonDetEltsUFM $ List.foldl' go emptyUFM xs
+  -- See Note [Unique Determinism and code generation]
   where go m x = alterUFM (Just . maybe [x] (x:)) m (f x)

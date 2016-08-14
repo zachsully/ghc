@@ -45,6 +45,15 @@ T5423:
 	"$(TEST_HC)" $(TEST_HC_OPTS) -v0 T5423.o T5423_cmm.o -o T5423$(exeext)
 	./T5423
 
+.PHONY: T9405
+T9405:
+	@'$(TEST_HC)' $(TEST_HC_OPTS) -ticky -rtsopts T9405.hs; \
+    ./T9405 +RTS -rT9405.ticky & \
+    sleep 0.2; \
+    kill -2 $$!; \
+    wait $$!; \
+    [ -s T9405.ticky ] && echo Ticky-Ticky
+
 # Naming convention: 'T5423_' obj-way '_' obj-src
 # obj-way ::= v | dyn
 # obj-src ::= gcc // using __attribute__(constructor)
@@ -102,6 +111,12 @@ T7037:
 T7040_ghci_setup :
 	'$(TEST_HC)' $(TEST_HC_OPTS) $(ghciWayFlags) -c T7040_ghci_c.c
 
+.PHONY: T10296a
+T10296a:
+	$(RM) T10296a_c.o T10296a.o T10296a.hi T10296a_stub.h
+	'$(TEST_HC)' $(TEST_HC_OPTS) -v0 -threaded T10296a.hs T10296a_c.c -o T10296a
+	./T10296a +RTS -N2
+
 .PHONY: linker_unload
 linker_unload:
 	$(RM) Test.o Test.hi
@@ -147,3 +162,9 @@ linker_error3:
 	"$(TEST_HC)" -c linker_error3.c -o linker_error3_o.o
 	"$(TEST_HC)" linker_error3.o -o linker_error3 -no-hs-main -optc-g -debug -threaded
 	./linker_error3 linker_error3_o.o
+
+ .PHONY: T11788
+T11788:
+	"$(TEST_HC)" -c T11788.c -o T11788_obj.o
+	"$(AR)" rsT libT11788.a T11788_obj.o 2> /dev/null
+	echo main | "$(TEST_HC)" $(filter-out -rtsopts, $(TEST_HC_OPTS_INTERACTIVE)) T11788.hs -lT11788 -L"$(PWD)"

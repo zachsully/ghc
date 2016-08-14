@@ -571,6 +571,10 @@ mk/ghcconfig*_test___spaces_ghc*.exe.mk
 /tests/driver/T8526/A.inc
 /tests/driver/T8602/t8602.sh
 /tests/driver/T9562/Main
+/tests/driver/T11763
+/tests/driver/T12135
+/tests/driver/T12135a
+/tests/driver/T12135b
 /tests/driver/Test.081b
 /tests/driver/Test.081b.hs
 /tests/driver/Test_081a
@@ -1474,6 +1478,7 @@ mk/ghcconfig*_test___spaces_ghc*.exe.mk
 /tests/simplCore/should_run/T5997
 /tests/simplCore/should_run/T7101
 /tests/simplCore/should_run/T7924
+/tests/simplCore/should_run/T11731
 /tests/simplCore/should_run/T9128
 /tests/simplCore/should_run/T9390
 /tests/simplCore/should_run/runST

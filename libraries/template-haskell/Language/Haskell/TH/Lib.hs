@@ -46,6 +46,8 @@ type VarStrictTypeQ      = Q VarStrictType
 type FieldExpQ           = Q FieldExp
 type RuleBndrQ           = Q RuleBndr
 type TySynEqnQ           = Q TySynEqn
+type PatSynDirQ          = Q PatSynDir
+type PatSynArgsQ         = Q PatSynArgs
 
 -- must be defined here for DsMeta to find it
 type Role                = TH.Role
@@ -369,12 +371,17 @@ classD ctxt cls tvs fds decs =
     return $ ClassD ctxt1 cls tvs fds decs1
 
 instanceD :: CxtQ -> TypeQ -> [DecQ] -> DecQ
-instanceD ctxt ty decs =
+instanceD = instanceWithOverlapD Nothing
+
+instanceWithOverlapD :: Maybe Overlap -> CxtQ -> TypeQ -> [DecQ] -> DecQ
+instanceWithOverlapD o ctxt ty decs =
   do
     ctxt1 <- ctxt
     decs1 <- sequence decs
     ty1   <- ty
-    return $ InstanceD ctxt1 ty1 decs1
+    return $ InstanceD o ctxt1 ty1 decs1
+
+
 
 sigD :: Name -> TypeQ -> DecQ
 sigD fun ty = liftM (SigD fun) $ ty
@@ -525,6 +532,20 @@ defaultSigD n tyq =
   do
     ty <- tyq
     return $ DefaultSigD n ty
+
+-- | Pattern synonym declaration
+patSynD :: Name -> PatSynArgsQ -> PatSynDirQ -> PatQ -> DecQ
+patSynD name args dir pat = do
+  args'    <- args
+  dir'     <- dir
+  pat'     <- pat
+  return (PatSynD name args' dir' pat')
+
+-- | Pattern synonym type signature
+patSynSigD :: Name -> TypeQ -> DecQ
+patSynSigD nm ty =
+  do ty' <- ty
+     return $ PatSynSigD nm ty'
 
 tySynEqn :: [TypeQ] -> TypeQ -> TySynEqnQ
 tySynEqn lhs rhs =
@@ -701,8 +722,6 @@ numTyLit n = if n >= 0 then return (NumTyLit n)
 strTyLit :: String -> TyLitQ
 strTyLit s = return (StrTyLit s)
 
-
-
 -------------------------------------------------------------------------------
 -- *   Kind
 
@@ -812,6 +831,27 @@ typeAnnotation = TypeAnnotation
 
 moduleAnnotation :: AnnTarget
 moduleAnnotation = ModuleAnnotation
+
+-------------------------------------------------------------------------------
+-- * Pattern Synonyms (sub constructs)
+
+unidir, implBidir :: PatSynDirQ
+unidir    = return Unidir
+implBidir = return ImplBidir
+
+explBidir :: [ClauseQ] -> PatSynDirQ
+explBidir cls = do
+  cls' <- sequence cls
+  return (ExplBidir cls')
+
+prefixPatSyn :: [Name] -> PatSynArgsQ
+prefixPatSyn args = return $ PrefixPatSyn args
+
+recordPatSyn :: [Name] -> PatSynArgsQ
+recordPatSyn sels = return $ RecordPatSyn sels
+
+infixPatSyn :: Name -> Name -> PatSynArgsQ
+infixPatSyn arg1 arg2 = return $ InfixPatSyn arg1 arg2
 
 --------------------------------------------------------------
 -- * Useful helper function

@@ -9,6 +9,8 @@ import os
 import string
 import getopt
 import platform
+import shutil
+import tempfile
 import time
 import re
 
@@ -105,9 +107,6 @@ for opt,arg in opts:
         config.threads = int(arg)
         config.use_threads = 1
 
-    if opt == '--check-files-written':
-        config.check_files_written = True
-
     if opt == '--skip-perf-tests':
         config.skip_perf_tests = True
 
@@ -163,7 +162,7 @@ if windows:
 # Try to use UTF8
 if windows:
     import ctypes
-    # Windows Python provides windll, mingw python provides cdll.
+    # Windows and mingw* Python provide windll, msys2 python provides cdll.
     if hasattr(ctypes, 'windll'):
         mydll = ctypes.windll
     else:
@@ -258,7 +257,7 @@ print('Timeout is ' + str(config.timeout))
 if config.rootdirs == []:
     config.rootdirs = ['.']
 
-t_files = findTFiles(config.rootdirs)
+t_files = list(findTFiles(config.rootdirs))
 
 print('Found', len(t_files), '.T files...')
 
@@ -277,21 +276,48 @@ else:
     # set stdout to unbuffered (is this the best way to do it?)
     sys.stdout = os.fdopen(sys.__stdout__.fileno(), "w", 0)
 
+if config.local:
+    tempdir = ''
+else:
+    # See note [Running tests in /tmp]
+    tempdir = tempfile.mkdtemp('', 'ghctest-')
+
+    # opts.testdir should be quoted when used, to make sure the testsuite
+    # keeps working when it contains backward slashes, for example from
+    # using os.path.join. Windows native and mingw* python
+    # (/mingw64/bin/python) set `os.path.sep = '\\'`, while msys2 python
+    # (/bin/python, /usr/bin/python or /usr/local/bin/python) sets
+    # `os.path.sep = '/'`.
+    # To catch usage of unquoted opts.testdir early, insert some spaces into
+    # tempdir.
+    tempdir = os.path.join(tempdir, 'test   spaces')
+
+def cleanup_and_exit(exitcode):
+    if config.cleanup and tempdir:
+        shutil.rmtree(tempdir, ignore_errors=True)
+    exit(exitcode)
+
 # First collect all the tests to be run
+t_files_ok = True
 for file in t_files:
     if_verbose(2, '====> Scanning %s' % file)
-    newTestDir(os.path.dirname(file))
+    newTestDir(tempdir, os.path.dirname(file))
     try:
         exec(open(file).read())
-    except Exception:
-        print('*** framework failure: found an error while executing ', file, ':')
-        t.n_framework_failures = t.n_framework_failures + 1
+    except Exception as e:
         traceback.print_exc()
+        framework_fail(file, '', str(e))
+        t_files_ok = False
 
-if config.only:
-    # See Note [Mutating config.only]
-    sys.stderr.write("ERROR: tests not found: {0}\n".format(list(config.only)))
-    sys.exit(1)
+for name in config.only:
+    if t_files_ok:
+        # See Note [Mutating config.only]
+        framework_fail(name, '', 'test not found')
+    else:
+        # Let user fix .T file errors before reporting on unfound tests.
+        # The reson the test can not be found is likely because of those
+        # .T file errors.
+        pass
 
 if config.list_broken:
     global brokens
@@ -300,8 +326,8 @@ if config.list_broken:
     print(' '.join(map (lambda bdn: '#' + str(bdn[0]) + '(' + bdn[1] + '/' + bdn[2] + ')', brokens)))
     print('')
 
-    if t.n_framework_failures != 0:
-        print('WARNING:', str(t.n_framework_failures), 'framework failures!')
+    if t.framework_failures:
+        print('WARNING:', len(framework_failures), 'framework failures!')
         print('')
 else:
     # Now run all the tests
@@ -327,5 +353,36 @@ else:
     if config.summary_file != '':
         summary(t, open(config.summary_file, 'w'))
 
-sys.exit(0)
+cleanup_and_exit(0)
 
+# Note [Running tests in /tmp]
+#
+# Use LOCAL=0 to run tests in /tmp, to catch tests that use files from
+# the source directory without copying them to the test directory first.
+#
+# As an example, take a run_command test with a Makefile containing
+# `$(TEST_HC) ../Foo.hs`. GHC will now create the output files Foo.o and
+# Foo.hi in the source directory. There are 2 problems with this:
+# * Output files in the source directory won't get cleaned up automatically.
+# * Two tests might (over)write the same output file.
+#
+# Tests that only fail when run concurrently with other tests are the
+# worst, so we try to catch them early by enabling LOCAL=0 in validate.
+#
+# Adding -outputdir='.' to TEST_HC_OPTS would help a bit, but it requires
+# making changes to quite a few tests. The problem is that
+# `$(TEST_HC) ../Foo.hs -outputdir=.` with Foo.hs containing
+# `module Main where` does not produce Foo.o, as it would without
+# -outputdir, but Main.o. See [1].
+#
+# Using -outputdir='.' is not foolproof anyway, since it does not change
+# the destination of the final executable (Foo.exe).
+#
+# Another hardening method that could be tried is to `chmod -w` the
+# source directory.
+#
+# By default we set LOCAL=1, because it makes it easier to inspect the
+# test directory while working on a new test.
+#
+# [1]
+# https://downloads.haskell.org/~ghc/8.0.1/docs/html/users_guide/separate_compilation.html#output-files

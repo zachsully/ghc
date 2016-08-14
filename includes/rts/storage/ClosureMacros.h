@@ -81,19 +81,35 @@ INLINE_HEADER StgThunkInfoTable *itbl_to_thunk_itbl(const StgInfoTable *i) {retu
 INLINE_HEADER StgConInfoTable *itbl_to_con_itbl(const StgInfoTable *i) {return (StgConInfoTable *)i;}
 #endif
 
-EXTERN_INLINE StgInfoTable *get_itbl(const StgClosure *c);
-EXTERN_INLINE StgInfoTable *get_itbl(const StgClosure *c) {return INFO_PTR_TO_STRUCT(c->header.info);}
+EXTERN_INLINE const StgInfoTable *get_itbl(const StgClosure *c);
+EXTERN_INLINE const StgInfoTable *get_itbl(const StgClosure *c)
+{
+   return INFO_PTR_TO_STRUCT(c->header.info);
+}
 
-EXTERN_INLINE StgRetInfoTable *get_ret_itbl(const StgClosure *c);
-EXTERN_INLINE StgRetInfoTable *get_ret_itbl(const StgClosure *c) {return RET_INFO_PTR_TO_STRUCT(c->header.info);}
+EXTERN_INLINE const StgRetInfoTable *get_ret_itbl(const StgClosure *c);
+EXTERN_INLINE const StgRetInfoTable *get_ret_itbl(const StgClosure *c)
+{
+   return RET_INFO_PTR_TO_STRUCT(c->header.info);
+}
 
-INLINE_HEADER StgFunInfoTable *get_fun_itbl(const StgClosure *c) {return FUN_INFO_PTR_TO_STRUCT(c->header.info);}
+INLINE_HEADER const StgFunInfoTable *get_fun_itbl(const StgClosure *c)
+{
+   return FUN_INFO_PTR_TO_STRUCT(c->header.info);
+}
 
-INLINE_HEADER StgThunkInfoTable *get_thunk_itbl(const StgClosure *c) {return THUNK_INFO_PTR_TO_STRUCT(c->header.info);}
+INLINE_HEADER const StgThunkInfoTable *get_thunk_itbl(const StgClosure *c)
+{
+   return THUNK_INFO_PTR_TO_STRUCT(c->header.info);
+}
 
-INLINE_HEADER StgConInfoTable *get_con_itbl(const StgClosure *c) {return CON_INFO_PTR_TO_STRUCT((c)->header.info);}
+INLINE_HEADER const StgConInfoTable *get_con_itbl(const StgClosure *c)
+{
+   return CON_INFO_PTR_TO_STRUCT((c)->header.info);
+}
 
-INLINE_HEADER StgHalfWord GET_TAG(const StgClosure *con) {
+INLINE_HEADER StgHalfWord GET_TAG(const StgClosure *con)
+{
     return get_itbl(con)->srt_bitmap;
 }
 
@@ -177,12 +193,6 @@ STATIC_LINK(const StgInfoTable *info, StgClosure *p)
     }
 }
 
-INLINE_HEADER StgClosure *STATIC_LINK2(const StgInfoTable *info,
-                                       StgClosure *p) {
-    return (*(StgClosure**)(&((p)->payload[info->layout.payload.ptrs +
-                            info->layout.payload.nptrs + 1])));
-}
-
 /* -----------------------------------------------------------------------------
    INTLIKE and CHARLIKE closures.
    -------------------------------------------------------------------------- */
@@ -200,7 +210,7 @@ INLINE_HEADER P_ INTLIKE_CLOSURE(int n) {
    ------------------------------------------------------------------------- */
 
 static inline StgWord
-GET_CLOSURE_TAG(StgClosure * p)
+GET_CLOSURE_TAG(const StgClosure * p)
 {
     return (StgWord)p & TAG_MASK;
 }
@@ -209,6 +219,12 @@ static inline StgClosure *
 UNTAG_CLOSURE(StgClosure * p)
 {
     return (StgClosure*)((StgWord)p & ~TAG_MASK);
+}
+
+static inline const StgClosure *
+UNTAG_CONST_CLOSURE(const StgClosure * p)
+{
+    return (const StgClosure*)((StgWord)p & ~TAG_MASK);
 }
 
 static inline StgClosure *
@@ -253,29 +269,30 @@ INLINE_HEADER rtsBool LOOKS_LIKE_INFO_PTR (StgWord p)
     return (p && (IS_FORWARDING_PTR(p) || LOOKS_LIKE_INFO_PTR_NOT_NULL(p))) ? rtsTrue : rtsFalse;
 }
 
-INLINE_HEADER rtsBool LOOKS_LIKE_CLOSURE_PTR (void *p)
+INLINE_HEADER rtsBool LOOKS_LIKE_CLOSURE_PTR (const void *p)
 {
-    return LOOKS_LIKE_INFO_PTR((StgWord)(UNTAG_CLOSURE((StgClosure *)(p)))->header.info);
+    return LOOKS_LIKE_INFO_PTR((StgWord)
+            (UNTAG_CONST_CLOSURE((const StgClosure *)(p)))->header.info);
 }
 
 /* -----------------------------------------------------------------------------
    Macros for calculating the size of a closure
    -------------------------------------------------------------------------- */
 
-EXTERN_INLINE StgOffset PAP_sizeW   ( nat n_args );
-EXTERN_INLINE StgOffset PAP_sizeW   ( nat n_args )
+EXTERN_INLINE StgOffset PAP_sizeW   ( uint32_t n_args );
+EXTERN_INLINE StgOffset PAP_sizeW   ( uint32_t n_args )
 { return sizeofW(StgPAP) + n_args; }
 
-EXTERN_INLINE StgOffset AP_sizeW   ( nat n_args );
-EXTERN_INLINE StgOffset AP_sizeW   ( nat n_args )
+EXTERN_INLINE StgOffset AP_sizeW   ( uint32_t n_args );
+EXTERN_INLINE StgOffset AP_sizeW   ( uint32_t n_args )
 { return sizeofW(StgAP) + n_args; }
 
-EXTERN_INLINE StgOffset AP_STACK_sizeW ( nat size );
-EXTERN_INLINE StgOffset AP_STACK_sizeW ( nat size )
+EXTERN_INLINE StgOffset AP_STACK_sizeW ( uint32_t size );
+EXTERN_INLINE StgOffset AP_STACK_sizeW ( uint32_t size )
 { return sizeofW(StgAP_STACK) + size; }
 
-EXTERN_INLINE StgOffset CONSTR_sizeW( nat p, nat np );
-EXTERN_INLINE StgOffset CONSTR_sizeW( nat p, nat np )
+EXTERN_INLINE StgOffset CONSTR_sizeW( uint32_t p, uint32_t np );
+EXTERN_INLINE StgOffset CONSTR_sizeW( uint32_t p, uint32_t np )
 { return sizeofW(StgHeader) + p + np; }
 
 EXTERN_INLINE StgOffset THUNK_SELECTOR_sizeW ( void );
@@ -338,14 +355,19 @@ EXTERN_INLINE StgWord bco_sizeW ( StgBCO *bco );
 EXTERN_INLINE StgWord bco_sizeW ( StgBCO *bco )
 { return bco->size; }
 
+EXTERN_INLINE StgWord compact_nfdata_full_sizeW ( StgCompactNFData *str );
+EXTERN_INLINE StgWord compact_nfdata_full_sizeW ( StgCompactNFData *str )
+{ return str->totalW; }
+
 /*
- * TODO: Consider to switch return type from 'nat' to 'StgWord' #8742
+ * TODO: Consider to switch return type from 'uint32_t' to 'StgWord' #8742
  *
  * (Also for 'closure_sizeW' below)
  */
-EXTERN_INLINE nat closure_sizeW_ (StgClosure *p, StgInfoTable *info);
-EXTERN_INLINE nat
-closure_sizeW_ (StgClosure *p, StgInfoTable *info)
+EXTERN_INLINE uint32_t
+closure_sizeW_ (const StgClosure *p, const StgInfoTable *info);
+EXTERN_INLINE uint32_t
+closure_sizeW_ (const StgClosure *p, const StgInfoTable *info)
 {
     switch (info->type) {
     case THUNK_0_1:
@@ -399,14 +421,20 @@ closure_sizeW_ (StgClosure *p, StgInfoTable *info)
         return bco_sizeW((StgBCO *)p);
     case TREC_CHUNK:
         return sizeofW(StgTRecChunk);
+    case COMPACT_NFDATA:
+        // Nothing should ever call closure_sizeW() on a StgCompactNFData
+        // because CompactNFData is a magical object/list-of-objects that
+        // requires special paths pretty much everywhere in the GC
+        barf("closure_sizeW() called on a StgCompactNFData. "
+             "This should never happen.");
     default:
         return sizeW_fromITBL(info);
     }
 }
 
 // The definitive way to find the size, in words, of a heap-allocated closure
-EXTERN_INLINE nat closure_sizeW (StgClosure *p);
-EXTERN_INLINE nat closure_sizeW (StgClosure *p)
+EXTERN_INLINE uint32_t closure_sizeW (const StgClosure *p);
+EXTERN_INLINE uint32_t closure_sizeW (const StgClosure *p)
 {
     return closure_sizeW_(p, get_itbl(p));
 }
@@ -418,7 +446,7 @@ EXTERN_INLINE nat closure_sizeW (StgClosure *p)
 EXTERN_INLINE StgWord stack_frame_sizeW( StgClosure *frame );
 EXTERN_INLINE StgWord stack_frame_sizeW( StgClosure *frame )
 {
-    StgRetInfoTable *info;
+    const StgRetInfoTable *info;
 
     info = get_ret_itbl(frame);
     switch (info->i.type) {
@@ -511,13 +539,13 @@ INLINE_HEADER StgWord8 *mutArrPtrsCard (StgMutArrPtrs *a, W_ n)
 #endif
 
 #ifdef PROFILING
-void LDV_recordDead (StgClosure *c, nat size);
+void LDV_recordDead (const StgClosure *c, uint32_t size);
 #endif
 
 EXTERN_INLINE void overwritingClosure (StgClosure *p);
 EXTERN_INLINE void overwritingClosure (StgClosure *p)
 {
-    nat size, i;
+    uint32_t size, i;
 
 #if ZERO_SLOP_FOR_LDV_PROF && !ZERO_SLOP_FOR_SANITY_CHECK
     // see Note [zeroing slop], also #8402
@@ -543,10 +571,10 @@ EXTERN_INLINE void overwritingClosure (StgClosure *p)
 //
 // Note: As this calls LDV_recordDead() you have to call LDV_RECORD()
 //       on the final state of the closure at the call-site
-EXTERN_INLINE void overwritingClosureOfs (StgClosure *p, nat offset);
-EXTERN_INLINE void overwritingClosureOfs (StgClosure *p, nat offset)
+EXTERN_INLINE void overwritingClosureOfs (StgClosure *p, uint32_t offset);
+EXTERN_INLINE void overwritingClosureOfs (StgClosure *p, uint32_t offset)
 {
-    nat size, i;
+    uint32_t size, i;
 
 #if ZERO_SLOP_FOR_LDV_PROF && !ZERO_SLOP_FOR_SANITY_CHECK
     // see Note [zeroing slop], also #8402

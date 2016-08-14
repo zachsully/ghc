@@ -70,7 +70,7 @@ data ImportDecl name
      --     to location in ideclHiding
 
      -- For details on above see note [Api annotations] in ApiAnnotation
-       deriving (Data, Typeable)
+       deriving Data
 
 simpleImportDecl :: ModuleName -> ImportDecl name
 simpleImportDecl mn = ImportDecl {
@@ -177,9 +177,9 @@ data IE name
   | IEGroup             Int HsDocString  -- ^ Doc section heading
   | IEDoc               HsDocString      -- ^ Some documentation
   | IEDocNamed          String           -- ^ Reference to named doc
-  deriving (Eq, Data, Typeable)
+  deriving (Eq, Data)
 
-data IEWildcard = NoIEWildcard | IEWildcard Int deriving (Eq, Data, Typeable)
+data IEWildcard = NoIEWildcard | IEWildcard Int deriving (Eq, Data)
 
 {-
 Note [IEThingWith]
@@ -228,8 +228,8 @@ instance (HasOccName name, OutputableBndr name) => Outputable (IE name) where
     ppr (IEThingAll      thing) = hcat [pprImpExp (unLoc thing), text "(..)"]
     ppr (IEThingWith thing wc withs flds)
         = pprImpExp (unLoc thing) <> parens (fsep (punctuate comma
-                                              ppWiths ++
-                                              map (ppr . flLabel . unLoc) flds))
+                                              (ppWiths ++
+                                              map (ppr . flLabel . unLoc) flds)))
       where
         ppWiths =
           case wc of

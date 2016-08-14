@@ -49,7 +49,6 @@ import Id
 import MkId(proxyHashId)
 import Class
 import Name
-import IdInfo   ( IdDetails(..) )
 import VarSet
 import Rules
 import VarEnv
@@ -125,7 +124,9 @@ dsHsBind dflags
 dsHsBind dflags
          (FunBind { fun_id = L _ fun, fun_matches = matches
                   , fun_co_fn = co_fn, fun_tick = tick })
- = do   { (args, body) <- matchWrapper (FunRhs (idName fun)) Nothing matches
+ = do   { (args, body) <- matchWrapper
+                           (FunRhs (noLoc $ idName fun) Prefix)
+                           Nothing matches
         ; let body' = mkOptTickBox tick body
         ; rhs <- dsHsWrapper co_fn (mkLams args body')
         ; let core_binds@(id,_) = makeCorePair dflags fun False 0 rhs
@@ -314,7 +315,9 @@ dsHsBind dflags (AbsBindsSig { abs_tvs = tyvars, abs_ev_vars = dicts
   = putSrcSpanDs bind_loc $
     addDictsDs (toTcTypeBag (listToBag dicts)) $
              -- addDictsDs: push type constraints deeper for pattern match check
-    do { (args, body) <- matchWrapper (FunRhs (idName global)) Nothing matches
+    do { (args, body) <- matchWrapper
+                           (FunRhs (noLoc $ idName global) Prefix)
+                           Nothing matches
        ; let body' = mkOptTickBox tick body
        ; fun_rhs <- dsHsWrapper co_fn $
                     mkLams args body'
@@ -350,9 +353,6 @@ makeCorePair dflags gbl_id is_default_method dict_arity rhs
   | is_default_method                 -- Default methods are *always* inlined
   = (gbl_id `setIdUnfolding` mkCompulsoryUnfolding rhs, rhs)
 
-  | DFunId is_newtype <- idDetails gbl_id
-  = (mk_dfun_w_stuff is_newtype, rhs)
-
   | otherwise
   = case inlinePragmaSpec inline_prag of
           EmptyInlineSpec -> (gbl_id, rhs)
@@ -375,23 +375,6 @@ makeCorePair dflags gbl_id is_default_method dict_arity rhs
        | otherwise
        = pprTrace "makeCorePair: arity missing" (ppr gbl_id) $
          (gbl_id `setIdUnfolding` mkInlineUnfolding Nothing rhs, rhs)
-
-                -- See Note [ClassOp/DFun selection] in TcInstDcls
-                -- See Note [Single-method classes]  in TcInstDcls
-    mk_dfun_w_stuff is_newtype
-       | is_newtype
-       = gbl_id `setIdUnfolding`  mkInlineUnfolding (Just 0) rhs
-                `setInlinePragma` alwaysInlinePragma { inl_sat = Just 0 }
-       | otherwise
-       = gbl_id `setIdUnfolding`  mkDFunUnfolding dfun_bndrs dfun_constr dfun_args
-                `setInlinePragma` dfunInlinePragma
-    (dfun_bndrs, dfun_body) = collectBinders (simpleOptExpr rhs)
-    (dfun_con, dfun_args)   = collectArgs dfun_body
-    dfun_constr | Var id <- dfun_con
-                , DataConWorkId con <- idDetails id
-                = con
-                | otherwise = pprPanic "makeCorePair: dfun" (ppr rhs)
-
 
 dictArity :: [Var] -> Arity
 -- Don't count coercion variables in arity
@@ -641,7 +624,7 @@ dsSpec mb_poly_rhs (L loc (SpecPrag poly_id spec_co spec_inl))
              spec_name = mkInternalName uniq spec_occ (getSrcSpan poly_name)
        ; (bndrs, ds_lhs) <- liftM collectBinders
                                   (dsHsWrapper spec_co (Var poly_id))
-       ; let spec_ty = mkPiTypes bndrs (exprType ds_lhs)
+       ; let spec_ty = mkLamTypes bndrs (exprType ds_lhs)
        ; -- pprTrace "dsRule" (vcat [ text "Id:" <+> ppr poly_id
          --                         , text "spec_co:" <+> ppr spec_co
          --                         , text "ds_rhs:" <+> ppr ds_lhs ]) $
@@ -797,14 +780,14 @@ decomposeRuleLhs orig_bndrs orig_lhs
   = Left (vcat (map dead_msg unbound))
 
   | Just (fn_id, args) <- decompose fun2 args2
-  , let extra_dict_bndrs = mk_extra_dict_bndrs fn_id args
+  , let extra_bndrs = mk_extra_bndrs fn_id args
   = -- pprTrace "decmposeRuleLhs" (vcat [ text "orig_bndrs:" <+> ppr orig_bndrs
     --                                  , text "orig_lhs:" <+> ppr orig_lhs
     --                                  , text "lhs1:"     <+> ppr lhs1
     --                                  , text "extra_dict_bndrs:" <+> ppr extra_dict_bndrs
     --                                  , text "fn_id:" <+> ppr fn_id
     --                                  , text "args:"   <+> ppr args]) $
-    Right (orig_bndrs ++ extra_dict_bndrs, fn_id, args)
+    Right (orig_bndrs ++ extra_bndrs, fn_id, args)
 
   | otherwise
   = Left bad_shape_msg
@@ -818,13 +801,19 @@ decomposeRuleLhs orig_bndrs orig_lhs
 
    orig_bndr_set = mkVarSet orig_bndrs
 
-        -- Add extra dict binders: Note [Free dictionaries]
-   mk_extra_dict_bndrs fn_id args
-     = [ mkLocalId (localiseName (idName d)) (idType d)
-       | d <- varSetElems (exprsFreeVars args `delVarSetList` (fn_id : orig_bndrs))
-              -- fn_id: do not quantify over the function itself, which may
-              -- itself be a dictionary (in pathological cases, Trac #10251)
-       , isDictId d ]
+        -- Add extra tyvar binders: Note [Free tyvars in rule LHS]
+        -- and extra dict binders: Note [Free dictionaries in rule LHS]
+   mk_extra_bndrs fn_id args
+     = toposortTyVars unbound_tvs ++ unbound_dicts
+     where
+       unbound_tvs   = [ v | v <- unbound_vars, isTyVar v ]
+       unbound_dicts = [ mkLocalId (localiseName (idName d)) (idType d)
+                       | d <- unbound_vars, isDictId d ]
+       unbound_vars  = [ v | v <- exprsFreeVarsList args
+                           , not (v `elemVarSet` orig_bndr_set)
+                           , not (v == fn_id) ]
+         -- fn_id: do not quantify over the function itself, which may
+         -- itself be a dictionary (in pathological cases, Trac #10251)
 
    decompose (Var fn_id) args
       | not (fn_id `elemVarSet` orig_bndr_set)
@@ -885,6 +874,54 @@ There are several things going on here.
 * drop_dicts: see Note [Drop dictionary bindings on rule LHS]
 * simpleOptExpr: see Note [Simplify rule LHS]
 * extra_dict_bndrs: see Note [Free dictionaries]
+
+Note [Free tyvars on rule LHS]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider
+  data T a = C
+
+  foo :: T a -> Int
+  foo C = 1
+
+  {-# RULES "myrule"  foo C = 1 #-}
+
+After type checking the LHS becomes (foo alpha (C alpha)), where alpha
+is an unbound meta-tyvar.  The zonker in TcHsSyn is careful not to
+turn the free alpha into Any (as it usually does).  Instead it turns it
+into a skolem 'a'.  See TcHsSyn Note [Zonking the LHS of a RULE].
+
+Now we must quantify over that 'a'.  It's /really/ inconvenient to do that
+in the zonker, because the HsExpr data type is very large.  But it's /easy/
+to do it here in the desugarer.
+
+Moreover, we have to do something rather similar for dictionaries;
+see Note [Free dictionaries on rule LHS].   So that's why we look for
+type variables free on the LHS, and quantify over them.
+
+Note [Free dictionaries on rule LHS]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When the LHS of a specialisation rule, (/\as\ds. f es) has a free dict,
+which is presumably in scope at the function definition site, we can quantify
+over it too.  *Any* dict with that type will do.
+
+So for example when you have
+        f :: Eq a => a -> a
+        f = <rhs>
+        ... SPECIALISE f :: Int -> Int ...
+
+Then we get the SpecPrag
+        SpecPrag (f Int dInt)
+
+And from that we want the rule
+
+        RULE forall dInt. f Int dInt = f_spec
+        f_spec = let f = <rhs> in f Int dInt
+
+But be careful!  That dInt might be GHC.Base.$fOrdInt, which is an External
+Name, and you can't bind them in a lambda or forall without getting things
+confused.   Likewise it might have an InlineRule or something, which would be
+utterly bogus. So we really make a fresh Id, with the same unique and type
+as the old one, but with an Internal name and no IdInfo.
 
 Note [Drop dictionary bindings on rule LHS]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -984,31 +1021,6 @@ not bound on the LHS!  But it's a silly specialisation anyway, because
 the constraint is unused.  We could bind 'd' to (error "unused")
 but it seems better to reject the program because it's almost certainly
 a mistake.  That's what the isDeadBinder call detects.
-
-Note [Free dictionaries]
-~~~~~~~~~~~~~~~~~~~~~~~~
-When the LHS of a specialisation rule, (/\as\ds. f es) has a free dict,
-which is presumably in scope at the function definition site, we can quantify
-over it too.  *Any* dict with that type will do.
-
-So for example when you have
-        f :: Eq a => a -> a
-        f = <rhs>
-        ... SPECIALISE f :: Int -> Int ...
-
-Then we get the SpecPrag
-        SpecPrag (f Int dInt)
-
-And from that we want the rule
-
-        RULE forall dInt. f Int dInt = f_spec
-        f_spec = let f = <rhs> in f Int dInt
-
-But be careful!  That dInt might be GHC.Base.$fOrdInt, which is an External
-Name, and you can't bind them in a lambda or forall without getting things
-confused.   Likewise it might have an InlineRule or something, which would be
-utterly bogus. So we really make a fresh Id, with the same unique and type
-as the old one, but with an Internal name and no IdInfo.
 
 ************************************************************************
 *                                                                      *

@@ -28,24 +28,25 @@
 #include "Printer.h"
 #include "Arena.h"
 #include "RetainerProfile.h"
+#include "CNF.h"
 
 /* -----------------------------------------------------------------------------
    Forward decls.
    -------------------------------------------------------------------------- */
 
-static void      checkSmallBitmap    ( StgPtr payload, StgWord bitmap, nat );
-static void      checkLargeBitmap    ( StgPtr payload, StgLargeBitmap*, nat );
-static void      checkClosureShallow ( StgClosure * );
-static void      checkSTACK          (StgStack *stack);
+static void  checkSmallBitmap    ( StgPtr payload, StgWord bitmap, uint32_t );
+static void  checkLargeBitmap    ( StgPtr payload, StgLargeBitmap*, uint32_t );
+static void  checkClosureShallow ( const StgClosure * );
+static void  checkSTACK          (StgStack *stack);
 
 /* -----------------------------------------------------------------------------
    Check stack sanity
    -------------------------------------------------------------------------- */
 
 static void
-checkSmallBitmap( StgPtr payload, StgWord bitmap, nat size )
+checkSmallBitmap( StgPtr payload, StgWord bitmap, uint32_t size )
 {
-    nat i;
+    uint32_t i;
 
     for(i = 0; i < size; i++, bitmap >>= 1 ) {
         if ((bitmap & 1) == 0) {
@@ -55,10 +56,10 @@ checkSmallBitmap( StgPtr payload, StgWord bitmap, nat size )
 }
 
 static void
-checkLargeBitmap( StgPtr payload, StgLargeBitmap* large_bitmap, nat size )
+checkLargeBitmap( StgPtr payload, StgLargeBitmap* large_bitmap, uint32_t size )
 {
     StgWord bmp;
-    nat i, j;
+    uint32_t i, j;
 
     i = 0;
     for (bmp=0; i < size; bmp++) {
@@ -79,11 +80,11 @@ checkLargeBitmap( StgPtr payload, StgLargeBitmap* large_bitmap, nat size )
  */
 
 static void
-checkClosureShallow( StgClosure* p )
+checkClosureShallow( const StgClosure* p )
 {
-    StgClosure *q;
+    const StgClosure *q;
 
-    q = UNTAG_CLOSURE(p);
+    q = UNTAG_CONST_CLOSURE(p);
     ASSERT(LOOKS_LIKE_CLOSURE_PTR(q));
 
     /* Is it a static closure? */
@@ -98,7 +99,7 @@ checkClosureShallow( StgClosure* p )
 StgOffset
 checkStackFrame( StgPtr c )
 {
-    nat size;
+    uint32_t size;
     const StgRetInfoTable* info;
 
     info = get_ret_itbl((StgClosure *)c);
@@ -123,7 +124,7 @@ checkStackFrame( StgPtr c )
 
     case RET_BCO: {
         StgBCO *bco;
-        nat size;
+        uint32_t size;
         bco = (StgBCO *)*(c+1);
         size = BCO_BITMAP_SIZE(bco);
         checkLargeBitmap((StgPtr)c + 2, BCO_BITMAP(bco), size);
@@ -137,11 +138,11 @@ checkStackFrame( StgPtr c )
 
     case RET_FUN:
     {
-        StgFunInfoTable *fun_info;
+        const StgFunInfoTable *fun_info;
         StgRetFun *ret_fun;
 
         ret_fun = (StgRetFun *)c;
-        fun_info = get_fun_itbl(UNTAG_CLOSURE(ret_fun->fun));
+        fun_info = get_fun_itbl(UNTAG_CONST_CLOSURE(ret_fun->fun));
         size = ret_fun->size;
         switch (fun_info->f.fun_type) {
         case ARG_GEN:
@@ -182,10 +183,10 @@ checkStackChunk( StgPtr sp, StgPtr stack_end )
 static void
 checkPAP (StgClosure *tagged_fun, StgClosure** payload, StgWord n_args)
 {
-    StgClosure *fun;
-    StgFunInfoTable *fun_info;
+    const StgClosure *fun;
+    const StgFunInfoTable *fun_info;
 
-    fun = UNTAG_CLOSURE(tagged_fun);
+    fun = UNTAG_CONST_CLOSURE(tagged_fun);
     ASSERT(LOOKS_LIKE_CLOSURE_PTR(fun));
     fun_info = get_fun_itbl(fun);
 
@@ -217,13 +218,13 @@ checkPAP (StgClosure *tagged_fun, StgClosure** payload, StgWord n_args)
 
 
 StgOffset
-checkClosure( StgClosure* p )
+checkClosure( const StgClosure* p )
 {
     const StgInfoTable *info;
 
     ASSERT(LOOKS_LIKE_CLOSURE_PTR(p));
 
-    p = UNTAG_CLOSURE(p);
+    p = UNTAG_CONST_CLOSURE(p);
     /* Is it a static closure (i.e. in the data segment)? */
     if (!HEAP_ALLOCED(p)) {
         ASSERT(closure_STATIC(p));
@@ -257,7 +258,7 @@ checkClosure( StgClosure* p )
     case THUNK_0_2:
     case THUNK_2_0:
       {
-        nat i;
+        uint32_t i;
         for (i = 0; i < info->layout.payload.ptrs; i++) {
           ASSERT(LOOKS_LIKE_CLOSURE_PTR(((StgThunk *)p)->payload[i]));
         }
@@ -287,7 +288,7 @@ checkClosure( StgClosure* p )
     case THUNK_STATIC:
     case FUN_STATIC:
         {
-            nat i;
+            uint32_t i;
             for (i = 0; i < info->layout.payload.ptrs; i++) {
                 ASSERT(LOOKS_LIKE_CLOSURE_PTR(p->payload[i]));
             }
@@ -395,7 +396,7 @@ checkClosure( StgClosure* p )
     case MUT_ARR_PTRS_FROZEN0:
         {
             StgMutArrPtrs* a = (StgMutArrPtrs *)p;
-            nat i;
+            uint32_t i;
             for (i = 0; i < a->ptrs; i++) {
                 ASSERT(LOOKS_LIKE_CLOSURE_PTR(a->payload[i]));
             }
@@ -412,7 +413,7 @@ checkClosure( StgClosure* p )
 
     case TREC_CHUNK:
       {
-        nat i;
+        uint32_t i;
         StgTRecChunk *tc = (StgTRecChunk *)p;
         ASSERT(LOOKS_LIKE_CLOSURE_PTR(tc->prev_chunk));
         for (i = 0; i < tc -> next_entry_idx; i ++) {
@@ -424,7 +425,7 @@ checkClosure( StgClosure* p )
       }
 
     default:
-            barf("checkClosure (closure type %d)", info->type);
+        barf("checkClosure (closure type %d)", info->type);
     }
 }
 
@@ -446,7 +447,7 @@ void checkHeapChain (bdescr *bd)
         if(!(bd->flags & BF_SWEPT)) {
             p = bd->start;
             while (p < bd->free) {
-                nat size = checkClosure((StgClosure *)p);
+                uint32_t size = checkClosure((StgClosure *)p);
                 /* This is the smallest size of closure that can live in the heap */
                 ASSERT( size >= MIN_PAYLOAD_SIZE + sizeofW(StgHeader) );
                 p += size;
@@ -463,7 +464,7 @@ void
 checkHeapChunk(StgPtr start, StgPtr end)
 {
   StgPtr p;
-  nat size;
+  uint32_t size;
 
   for (p=start; p<end; p+=size) {
     ASSERT(LOOKS_LIKE_INFO_PTR(*p));
@@ -482,6 +483,37 @@ checkLargeObjects(bdescr *bd)
     }
     bd = bd->link;
   }
+}
+
+static void
+checkCompactObjects(bdescr *bd)
+{
+    // Compact objects are similar to large objects,
+    // but they have a StgCompactNFDataBlock at the beginning,
+    // before the actual closure
+
+    for ( ; bd != NULL; bd = bd->link) {
+        StgCompactNFDataBlock *block, *last;
+        StgCompactNFData *str;
+        StgWord totalW;
+
+        ASSERT (bd->flags & BF_COMPACT);
+
+        block = (StgCompactNFDataBlock*)bd->start;
+        str = block->owner;
+        ASSERT ((W_)str == (W_)block + sizeof(StgCompactNFDataBlock));
+
+        totalW = 0;
+        for ( ; block ; block = block->next) {
+            last = block;
+            ASSERT (block->owner == str);
+
+            totalW += Bdescr((P_)block)->blocks * BLOCK_SIZE_W;
+        }
+
+        ASSERT (str->totalW == totalW);
+        ASSERT (str->last == last);
+    }
 }
 
 static void
@@ -542,7 +574,7 @@ void
 checkGlobalTSOList (rtsBool checkTSOs)
 {
   StgTSO *tso;
-  nat g;
+  uint32_t g;
 
   for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
       for (tso=generations[g].threads; tso != END_TSO_QUEUE;
@@ -585,7 +617,7 @@ checkGlobalTSOList (rtsBool checkTSOs)
    -------------------------------------------------------------------------- */
 
 static void
-checkMutableList( bdescr *mut_bd, nat gen )
+checkMutableList( bdescr *mut_bd, uint32_t gen )
 {
     bdescr *bd;
     StgPtr q;
@@ -610,9 +642,9 @@ checkMutableList( bdescr *mut_bd, nat gen )
 }
 
 static void
-checkLocalMutableLists (nat cap_no)
+checkLocalMutableLists (uint32_t cap_no)
 {
-    nat g;
+    uint32_t g;
     for (g = 1; g < RtsFlags.GcFlags.generations; g++) {
         checkMutableList(capabilities[cap_no]->mut_lists[g], g);
     }
@@ -621,7 +653,7 @@ checkLocalMutableLists (nat cap_no)
 static void
 checkMutableLists (void)
 {
-    nat i;
+    uint32_t i;
     for (i = 0; i < n_capabilities; i++) {
         checkLocalMutableLists(i);
     }
@@ -634,7 +666,7 @@ void
 checkStaticObjects ( StgClosure* static_objects )
 {
   StgClosure *p = static_objects;
-  StgInfoTable *info;
+  const StgInfoTable *info;
 
   while (p != END_OF_STATIC_OBJECT_LIST) {
     p = UNTAG_STATIC_LIST_PTR(p);
@@ -643,8 +675,9 @@ checkStaticObjects ( StgClosure* static_objects )
     switch (info->type) {
     case IND_STATIC:
       {
-        StgClosure *indirectee = UNTAG_CLOSURE(((StgIndStatic *)p)->indirectee);
+        const StgClosure *indirectee;
 
+        indirectee = UNTAG_CONST_CLOSURE(((StgIndStatic *)p)->indirectee);
         ASSERT(LOOKS_LIKE_CLOSURE_PTR(indirectee));
         ASSERT(LOOKS_LIKE_INFO_PTR((StgWord)indirectee->header.info));
         p = *IND_STATIC_LINK((StgClosure *)p);
@@ -675,7 +708,7 @@ void
 checkNurserySanity (nursery *nursery)
 {
     bdescr *bd, *prev;
-    nat blocks = 0;
+    uint32_t blocks = 0;
 
     prev = NULL;
     for (bd = nursery->blocks; bd != NULL; bd = bd->link) {
@@ -691,7 +724,7 @@ checkNurserySanity (nursery *nursery)
 static void checkGeneration (generation *gen,
                              rtsBool after_major_gc USED_IF_THREADS)
 {
-    nat n;
+    uint32_t n;
     gen_workspace *ws;
 
     ASSERT(countBlocks(gen->blocks) == gen->n_blocks);
@@ -714,12 +747,13 @@ static void checkGeneration (generation *gen,
     }
 
     checkLargeObjects(gen->large_objects);
+    checkCompactObjects(gen->compact_objects);
 }
 
 /* Full heap sanity check. */
 static void checkFullHeap (rtsBool after_major_gc)
 {
-    nat g, n;
+    uint32_t g, n;
 
     for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
         checkGeneration(&generations[g], after_major_gc);
@@ -743,6 +777,14 @@ void checkSanity (rtsBool after_gc, rtsBool major_gc)
     }
 }
 
+static void
+markCompactBlocks(bdescr *bd)
+{
+    for (; bd != NULL; bd = bd->link) {
+        compactMarkKnown(((StgCompactNFDataBlock*)bd->start)->owner);
+    }
+}
+
 // If memInventory() calculates that we have a memory leak, this
 // function will try to find the block(s) that are leaking by marking
 // all the ones that we know about, and search through memory to find
@@ -753,7 +795,7 @@ void checkSanity (rtsBool after_gc, rtsBool major_gc)
 static void
 findMemoryLeak (void)
 {
-    nat g, i;
+    uint32_t g, i;
     for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
         for (i = 0; i < n_capabilities; i++) {
             markBlocks(capabilities[i]->mut_lists[g]);
@@ -763,6 +805,7 @@ findMemoryLeak (void)
         }
         markBlocks(generations[g].blocks);
         markBlocks(generations[g].large_objects);
+        markCompactBlocks(generations[g].compact_objects);
     }
 
     for (i = 0; i < n_nurseries; i++) {
@@ -770,6 +813,7 @@ findMemoryLeak (void)
     }
 
     for (i = 0; i < n_capabilities; i++) {
+        markBlocks(gc_threads[i]->free_blocks);
         markBlocks(capabilities[i]->pinned_object_block);
     }
 
@@ -795,12 +839,14 @@ checkRunQueue(Capability *cap)
 {
     StgTSO *prev, *tso;
     prev = END_TSO_QUEUE;
-    for (tso = cap->run_queue_hd; tso != END_TSO_QUEUE;
-         prev = tso, tso = tso->_link) {
+    uint32_t n;
+    for (n = 0, tso = cap->run_queue_hd; tso != END_TSO_QUEUE;
+         prev = tso, tso = tso->_link, n++) {
         ASSERT(prev == END_TSO_QUEUE || prev->_link == tso);
         ASSERT(tso->block_info.prev == prev);
     }
     ASSERT(cap->run_queue_tl == prev);
+    ASSERT(cap->n_run_queue == n);
 }
 
 /* -----------------------------------------------------------------------------
@@ -820,7 +866,7 @@ void findSlop(bdescr *bd)
     for (; bd != NULL; bd = bd->link) {
         slop = (bd->blocks * BLOCK_SIZE_W) - (bd->free - bd->start);
         if (slop > (1024/sizeof(W_))) {
-            debugBelch("block at %p (bdescr %p) has %" FMT_SizeT "KB slop\n",
+            debugBelch("block at %p (bdescr %p) has %" FMT_Word "KB slop\n",
                        bd->start, bd, slop / (1024/sizeof(W_)));
         }
     }
@@ -831,17 +877,20 @@ genBlocks (generation *gen)
 {
     ASSERT(countBlocks(gen->blocks) == gen->n_blocks);
     ASSERT(countBlocks(gen->large_objects) == gen->n_large_blocks);
+    ASSERT(countCompactBlocks(gen->compact_objects) == gen->n_compact_blocks);
+    ASSERT(countCompactBlocks(gen->compact_blocks_in_import) == gen->n_compact_blocks_in_import);
     return gen->n_blocks + gen->n_old_blocks +
-            countAllocdBlocks(gen->large_objects);
+        countAllocdBlocks(gen->large_objects) +
+        gen->n_compact_blocks + gen->n_compact_blocks_in_import;
 }
 
 void
 memInventory (rtsBool show)
 {
-  nat g, i;
+  uint32_t g, i;
   W_ gen_blocks[RtsFlags.GcFlags.generations];
   W_ nursery_blocks, retainer_blocks,
-       arena_blocks, exec_blocks;
+      arena_blocks, exec_blocks, gc_free_blocks = 0;
   W_ live_blocks = 0, free_blocks = 0;
   rtsBool leak;
 
@@ -864,6 +913,7 @@ memInventory (rtsBool show)
       nursery_blocks += nurseries[i].n_blocks;
   }
   for (i = 0; i < n_capabilities; i++) {
+      gc_free_blocks += countBlocks(gc_threads[i]->free_blocks);
       if (capabilities[i]->pinned_object_block != NULL) {
           nursery_blocks += capabilities[i]->pinned_object_block->blocks;
       }
@@ -891,7 +941,7 @@ memInventory (rtsBool show)
       live_blocks += gen_blocks[g];
   }
   live_blocks += nursery_blocks +
-               + retainer_blocks + arena_blocks + exec_blocks;
+               + retainer_blocks + arena_blocks + exec_blocks + gc_free_blocks;
 
 #define MB(n) (((double)(n) * BLOCK_SIZE_W) / ((1024*1024)/sizeof(W_)))
 
@@ -916,6 +966,8 @@ memInventory (rtsBool show)
                  arena_blocks, MB(arena_blocks));
       debugBelch("  exec         : %5" FMT_Word " blocks (%6.1lf MB)\n",
                  exec_blocks, MB(exec_blocks));
+      debugBelch("  GC free pool : %5" FMT_Word " blocks (%6.1lf MB)\n",
+                 gc_free_blocks, MB(gc_free_blocks));
       debugBelch("  free         : %5" FMT_Word " blocks (%6.1lf MB)\n",
                  free_blocks, MB(free_blocks));
       debugBelch("  total        : %5" FMT_Word " blocks (%6.1lf MB)\n",

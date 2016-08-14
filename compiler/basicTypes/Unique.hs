@@ -23,7 +23,7 @@ module Unique (
         Unique, Uniquable(..),
 
         -- ** Constructors, destructors and operations on 'Unique's
-        hasKey, cmpByUnique,
+        hasKey,
 
         pprUnique,
 
@@ -35,6 +35,7 @@ module Unique (
         deriveUnique,                   -- Ditto
         newTagUnique,                   -- Used in CgCase
         initTyVarUnique,
+        nonDetCmpUnique,
 
         -- ** Making built-in uniques
 
@@ -43,6 +44,7 @@ module Unique (
         mkAlphaTyVarUnique,
         mkPrimOpIdUnique,
         mkTupleTyConUnique, mkTupleDataConUnique,
+        mkSumTyConUnique, mkSumDataConUnique,
         mkCTupleTyConUnique,
         mkPreludeMiscIdUnique, mkPreludeDataConUnique,
         mkPreludeTyConUnique, mkPreludeClassUnique,
@@ -85,12 +87,10 @@ The @Chars@ are ``tag letters'' that identify the @UniqueSupply@.
 Fast comparison is everything on @Uniques@:
 -}
 
---why not newtype Int?
-
 -- | The type of unique identifiers that are used in many places in GHC
 -- for fast ordering and equality tests. You should generate these with
 -- the functions from the 'UniqSupply' module
-data Unique = MkUnique {-# UNPACK #-} !Int
+newtype Unique = MkUnique Int
 
 {-
 Now come the functions which construct uniques from their pieces, and vice versa.
@@ -168,9 +168,6 @@ instance Uniquable FastString where
 instance Uniquable Int where
  getUnique i = mkUniqueGrimily i
 
-cmpByUnique :: Uniquable a => a -> a -> Ordering
-cmpByUnique x y = (getUnique x) `cmpUnique` (getUnique y)
-
 {-
 ************************************************************************
 *                                                                      *
@@ -198,28 +195,54 @@ use `deriving' because we want {\em precise} control of ordering
 -- As such, to get deterministic builds, the order of the allocated
 -- @Uniques@ should not affect the final result.
 -- see also wiki/DeterministicBuilds
+--
+-- Note [Unique Determinism and code generation]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- The goal of the deterministic builds (wiki/DeterministicBuilds, #4012)
+-- is to get ABI compatible binaries given the same inputs and environment.
+-- The motivation behind that is that if the ABI doesn't change the
+-- binaries can be safely reused.
+-- Note that this is weaker than bit-for-bit identical binaries and getting
+-- bit-for-bit identical binaries is not a goal for now.
+-- This means that we don't care about nondeterminism that happens after
+-- the interface files are created, in particular we don't care about
+-- register allocation and code generation.
+-- To track progress on bit-for-bit determinism see #12262.
 
-eqUnique, ltUnique, leUnique :: Unique -> Unique -> Bool
+eqUnique :: Unique -> Unique -> Bool
 eqUnique (MkUnique u1) (MkUnique u2) = u1 == u2
-ltUnique (MkUnique u1) (MkUnique u2) = u1 <  u2
-leUnique (MkUnique u1) (MkUnique u2) = u1 <= u2
 
-cmpUnique :: Unique -> Unique -> Ordering
-cmpUnique (MkUnique u1) (MkUnique u2)
+-- Provided here to make it explicit at the call-site that it can
+-- introduce non-determinism.
+-- See Note [Unique Determinism]
+-- See Note [No Ord for Unique]
+nonDetCmpUnique :: Unique -> Unique -> Ordering
+nonDetCmpUnique (MkUnique u1) (MkUnique u2)
   = if u1 == u2 then EQ else if u1 < u2 then LT else GT
+
+{-
+Note [No Ord for Unique]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+As explained in Note [Unique Determinism] the relative order of Uniques
+is nondeterministic. To prevent from accidental use the Ord Unique
+instance has been removed.
+This makes it easier to maintain deterministic builds, but comes with some
+drawbacks.
+The biggest drawback is that Maps keyed by Uniques can't directly be used.
+The alternatives are:
+
+  1) Use UniqFM or UniqDFM, see Note [Deterministic UniqFM] to decide which
+  2) Create a newtype wrapper based on Unique ordering where nondeterminism
+     is controlled. See Module.ModuleEnv
+  3) Change the algorithm to use nonDetCmpUnique and document why it's still
+     deterministic
+  4) Use TrieMap as done in CmmCommonBlockElim.groupByLabel
+-}
 
 instance Eq Unique where
     a == b = eqUnique a b
     a /= b = not (eqUnique a b)
 
-instance Ord Unique where
-    a  < b = ltUnique a b
-    a <= b = leUnique a b
-    a  > b = not (leUnique a b)
-    a >= b = not (ltUnique a b)
-    compare a b = cmpUnique a b
-
------------------
 instance Uniquable Unique where
     getUnique u = u
 
@@ -345,6 +368,34 @@ mkPreludeDataConUnique i              = mkUnique '6' (3*i)    -- Must be alphabe
 mkTupleDataConUnique Boxed          a = mkUnique '7' (3*a)    -- ditto (*may* be used in C labels)
 mkTupleDataConUnique Unboxed        a = mkUnique '8' (3*a)
 
+--------------------------------------------------
+-- Sum arities start from 2. A sum of arity N has N data constructors, so it
+-- occupies N+1 slots: 1 TyCon + N DataCons.
+--
+-- So arity 2 sum takes uniques 0 (tycon), 1, 2  (2 data cons)
+--    arity 3 sum takes uniques 3 (tycon), 4, 5, 6 (3 data cons)
+-- etc.
+
+mkSumTyConUnique :: Arity -> Unique
+mkSumTyConUnique arity = mkUnique 'z' (sumUniqsOccupied arity)
+
+mkSumDataConUnique :: ConTagZ -> Arity -> Unique
+mkSumDataConUnique alt arity
+  | alt >= arity
+  = panic ("mkSumDataConUnique: " ++ show alt ++ " >= " ++ show arity)
+  | otherwise
+  = mkUnique 'z' (sumUniqsOccupied arity + alt + 1 {- skip the tycon -})
+
+-- How many unique slots occupied by sum types (including constructors) up to
+-- the given arity?
+sumUniqsOccupied :: Arity -> Int
+sumUniqsOccupied arity
+  = ASSERT(arity >= 2)
+    -- 3 + 4 + ... + arity
+    ((arity * (arity + 1)) `div` 2) - 3
+{-# INLINE sumUniqsOccupied #-}
+
+--------------------------------------------------
 dataConRepNameUnique, dataConWorkerUnique :: Unique -> Unique
 dataConWorkerUnique  u = incrUnique u
 dataConRepNameUnique u = stepUnique u 2

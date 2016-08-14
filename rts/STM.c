@@ -92,6 +92,7 @@
 #include "Trace.h"
 #include "Threads.h"
 #include "sm/Storage.h"
+#include "SMPClosureOps.h"
 
 #include <stdio.h>
 
@@ -353,7 +354,7 @@ static void unlock_inv(StgAtomicInvariant *inv) {
 
 static StgBool watcher_is_tso(StgTVarWatchQueue *q) {
   StgClosure *c = q -> closure;
-  StgInfoTable *info = get_itbl(c);
+  const StgInfoTable *info = get_itbl(c);
   return (info -> type) == TSO;
 }
 

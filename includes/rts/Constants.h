@@ -212,11 +212,6 @@
 /* Win32 only: */
 #define BlockedOnDoProc     7
 
-/* Only relevant for PAR: */
-  /* blocked on a remote closure represented by a Global Address: */
-#define BlockedOnGA         8
-  /* same as above but without sending a Fetch message */
-#define BlockedOnGA_NoSend  9
 /* Only relevant for THREADED_RTS: */
 #define BlockedOnCCall      10
 #define BlockedOnCCall_Interruptible 11
@@ -299,5 +294,11 @@
    -------------------------------------------------------------------------- */
 
 #define MAX_SPARE_WORKERS 6
+
+/*
+ * The maximum number of NUMA nodes we support.  This is a fixed limit so that
+ * we can have static arrays of this size in the RTS for speed.
+ */
+#define MAX_NUMA_NODES 16
 
 #endif /* RTS_CONSTANTS_H */

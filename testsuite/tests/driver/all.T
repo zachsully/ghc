@@ -326,14 +326,14 @@ test('dynHelloWorld',
      [''])
 
 test('T5313',
-     [ when(arch('powerpc64'), expect_broken(11259)),
+     [ when(arch('powerpc64') or arch('powerpc64le'), expect_broken(11259)),
        extra_run_opts('"' + config.libdir + '"')],
      compile_and_run,
      ['-package ghc'])
 
 test('T2464', normal, compile, [''])
 test('T3674',
-     [ignore_output,
+     [
       extra_clean(['T3674_pre.hi', 'T3674_pre.o', 'T3674_pre', 'T3674_pre.exe'])],
      run_command,
      ['$MAKE -s --no-print-directory T3674'])
@@ -371,6 +371,14 @@ test('spacesInArgs',
      extra_run_opts('"a   b"   "c   d"'),
      compile_and_run,
      [''])
+
+fobject_code = when(doing_ghci(), extra_hc_opts('-fobject-code'))
+
+test( 'T4114a', fobject_code, compile_and_run, ['-cpp'])
+test( 'T4114b', fobject_code, compile_and_run, ['-no-keep-hi-files'])
+test( 'T4114c', fobject_code, compile_and_run, ['-no-keep-o-files'])
+test( 'T4114d', fobject_code, compile_and_run,
+     ['-hisuf .myhi -osuf .myo -no-keep-o-files'])
 
 test('T5584',
      extra_clean(['T5584_in/A.hi-boot', 'T5584_out/T5584/A.o-boot']),
@@ -410,9 +418,8 @@ test('T8101', expect_broken(10600), compile, ['-Wall -fno-code'])
 test('T8101b', expect_broken(10600), multimod_compile,
      ['T8101b', '-Wall -fno-code'])
 
-def build_T9050(name, way):
-     return simple_build(name + '.cmm', way, '-outputdir=. ', 0, '', 0, 0, 0)
-test('T9050', normal, build_T9050, [])
+# Should not panic when compiling cmm file together with -outputdir.
+test('T9050', cmm_src, compile, ['-outputdir=.'])
 
 test('write_interface_oneshot',
      extra_clean(['write_interface_oneshot_hidir/*']),
@@ -463,12 +470,25 @@ test('T365',
 test('T9360a', normal, run_command, ['{compiler} --interactive -e "" -ignore-dot-ghci'])
 test('T9360b', normal, run_command, ['{compiler} -e "" --interactive -ignore-dot-ghci'])
 
-test('T10970', normal, compile_and_run, ['-hide-all-packages -package base -package containers'])
-test('T10970a', normal, compile_and_run, [''])
+test('T10970', normal, compile_and_run, [''])
 test('T4931', normal, compile_and_run, [''])
 test('T11182', normal, compile_and_run, [''])
 test('T11381', normal, compile_fail, [''])
 test('T11429a', normal, compile, ['-Wunrecognised-warning-flags -Wfoobar'])
 test('T11429b', normal, compile, ['-Wno-unrecognised-warning-flags -Wfoobar'])
 test('T11429c', normal, compile_fail, ['-Wunrecognised-warning-flags -Werror -Wfoobar'])
+test('T11763', normal, compile_and_run, ['-fno-version-macros'])
 
+test('T10320',
+     [
+       extra_clean(['T10320', 'T10320.o', 'T10320.hi'])],
+     run_command,
+     ['$MAKE -s --no-print-directory T10320'])
+
+test('T12135',
+     [expect_broken(12135),
+      extra_clean(['T12135.o', 'T12135.hi', 'T12135', 'T12135a/T12135.h', 'T12135b/T12135.h'])],
+     run_command,
+     ['$MAKE -s --no-print-directory T12135'])
+
+test('T12192', normal, run_command, ['mkdir foo && (cd foo && {compiler} -v0 ../T12192)']) 

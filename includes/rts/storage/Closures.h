@@ -79,12 +79,12 @@ typedef struct {
 
 typedef struct StgClosure_ {
     StgHeader   header;
-    struct StgClosure_ *payload[FLEXIBLE_ARRAY];
+    struct StgClosure_ *payload[];
 } *StgClosurePtr; // StgClosure defined in rts/Types.h
 
 typedef struct {
     StgThunkHeader  header;
-    struct StgClosure_ *payload[FLEXIBLE_ARRAY];
+    struct StgClosure_ *payload[];
 } StgThunk;
 
 typedef struct {
@@ -97,7 +97,7 @@ typedef struct {
     StgHalfWord arity;          /* zero if it is an AP */
     StgHalfWord n_args;
     StgClosure *fun;            /* really points to a fun */
-    StgClosure *payload[FLEXIBLE_ARRAY];
+    StgClosure *payload[];
 } StgPAP;
 
 typedef struct {
@@ -105,14 +105,14 @@ typedef struct {
     StgHalfWord arity;          /* zero if it is an AP */
     StgHalfWord n_args;
     StgClosure *fun;            /* really points to a fun */
-    StgClosure *payload[FLEXIBLE_ARRAY];
+    StgClosure *payload[];
 } StgAP;
 
 typedef struct {
     StgThunkHeader   header;
     StgWord     size;                    /* number of words in payload */
     StgClosure *fun;
-    StgClosure *payload[FLEXIBLE_ARRAY]; /* contains a chunk of *stack* */
+    StgClosure *payload[]; /* contains a chunk of *stack* */
 } StgAP_STACK;
 
 typedef struct {
@@ -138,21 +138,21 @@ typedef struct StgBlockingQueue_ {
 typedef struct {
     StgHeader  header;
     StgWord    bytes;
-    StgWord    payload[FLEXIBLE_ARRAY];
+    StgWord    payload[];
 } StgArrBytes;
 
 typedef struct {
     StgHeader   header;
     StgWord     ptrs;
     StgWord     size; // ptrs plus card table
-    StgClosure *payload[FLEXIBLE_ARRAY];
+    StgClosure *payload[];
     // see also: StgMutArrPtrs macros in ClosureMacros.h
 } StgMutArrPtrs;
 
 typedef struct {
     StgHeader   header;
     StgWord     ptrs;
-    StgClosure *payload[FLEXIBLE_ARRAY];
+    StgClosure *payload[];
 } StgSmallMutArrPtrs;
 
 typedef struct {
@@ -241,7 +241,7 @@ typedef struct {
     StgMutArrPtrs *ptrs;        /* a pointer to a  MutArrPtrs */
     StgHalfWord   arity;        /* arity of this BCO */
     StgHalfWord   size;         /* size of this BCO (in words) */
-    StgWord       bitmap[FLEXIBLE_ARRAY];  /* an StgLargeBitmap */
+    StgWord       bitmap[];  /* an StgLargeBitmap */
 } StgBCO;
 
 #define BCO_BITMAP(bco)      ((StgLargeBitmap *)((StgBCO *)(bco))->bitmap)
@@ -261,7 +261,7 @@ typedef struct {
     const StgInfoTable* info;
     StgWord        size;
     StgClosure *   fun;
-    StgClosure *   payload[FLEXIBLE_ARRAY];
+    StgClosure *   payload[];
 } StgRetFun;
 
 /* Concurrent communication objects */
@@ -418,5 +418,51 @@ typedef struct MessageBlackHole_ {
     StgTSO     *tso;
     StgClosure *bh;
 } MessageBlackHole;
+
+// This is not a closure, it a bare
+// structure that lives at the beginning of
+// each consecutive block group in a
+// compact structure
+//
+// See Note [Compact Normal Forms] for details
+typedef struct StgCompactNFDataBlock_ {
+    struct StgCompactNFDataBlock_ *self; // the address of this block
+                                         // this is copied over to the receiving
+                                         // end when serializing a compact, so
+                                         // the receiving end can allocate the
+                                         // block at best as it can, and then
+                                         // verify if pointer adjustment is
+                                         // needed or not by comparing self with
+                                         // the actual address; the same data
+                                         // is sent over as SerializedCompact
+                                         // metadata, but having it here
+                                         // simplifies the fixup implementation
+    struct StgCompactNFData_ *owner; // the closure who owns this
+                                     // block (used in objectGetCompact)
+    struct StgCompactNFDataBlock_ *next; // chain of blocks used for
+                                         // serialization and freeing
+} StgCompactNFDataBlock;
+
+typedef struct StgCompactNFData_ {
+    StgHeader              header; // for sanity and other checks in practice,
+                                   // nothing should ever need the compact info
+                                   // pointer (we don't even need fwding
+                                   // pointers because it's a large object)
+    StgWord                totalW; // for proper accounting in evac, includes
+                                   // slop, and removes the first block in
+                                   // larger than megablock allocation
+                                   // essentially meaningless, but if we got it
+                                   // wrong sanity would complain loudly
+    StgWord                totalDataW; // for stats/profiling only, it's the
+                                       // full amount of memory used by this
+                                       // compact, including the portions not
+                                       // yet used
+    StgWord                autoBlockW; // size of automatically appended blocks
+    StgCompactNFDataBlock *nursery; // where to (try to) allocate from when
+                                    // appending
+    StgCompactNFDataBlock *last; // the last block of the chain (to know where
+                                 // to append new blocks for resize)
+} StgCompactNFData;
+
 
 #endif /* RTS_STORAGE_CLOSURES_H */

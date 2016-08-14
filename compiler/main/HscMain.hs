@@ -1,4 +1,5 @@
 {-# LANGUAGE BangPatterns, CPP, MagicHash, NondecreasingIndentation #-}
+{-# OPTIONS_GHC -fprof-auto-top #-}
 
 -------------------------------------------------------------------------------
 --
@@ -65,7 +66,7 @@ module HscMain
     , hscTcRnLookupRdrName
     , hscStmt, hscStmtWithLocation, hscParsedStmt
     , hscDecls, hscDeclsWithLocation
-    , hscTcExpr, hscImport, hscKcType
+    , hscTcExpr, TcRnExprMode(..), hscImport, hscKcType
     , hscParseExpr
     , hscCompileCoreExpr
     -- * Low-level exports for hooks
@@ -130,7 +131,6 @@ import CmmBuildInfoTables
 import CmmPipeline
 import CmmInfo
 import CodeOutput
-import NameEnv          ( emptyNameEnv )
 import InstEnv
 import FamInstEnv
 import Fingerprint      ( Fingerprint )
@@ -213,7 +213,9 @@ allKnownKeyNames                -- where templateHaskellNames are defined
     namesEnv      = foldl (\m n -> extendNameEnv_Acc (:) singleton m n n)
                           emptyUFM all_names
     badNamesEnv   = filterNameEnv (\ns -> length ns > 1) namesEnv
-    badNamesPairs = nameEnvUniqueElts badNamesEnv
+    badNamesPairs = nonDetUFMToList badNamesEnv
+      -- It's OK to use nonDetUFMToList here because the ordering only affects
+      -- the message when we get a panic
     badNamesStrs  = map pairToStr badNamesPairs
     badNamesStr   = unlines badNamesStrs
 
@@ -339,15 +341,15 @@ hscParse hsc_env mod_summary = runHsc hsc_env $ hscParse' mod_summary
 
 -- internal version, that doesn't fail due to -Werror
 hscParse' :: ModSummary -> Hsc HsParsedModule
-hscParse' mod_summary = do
+hscParse' mod_summary = {-# SCC "Parser" #-}
+    withTiming getDynFlags
+               (text "Parser"<+>brackets (ppr $ ms_mod mod_summary))
+               (const ()) $ do
     dflags <- getDynFlags
     let src_filename  = ms_hspp_file mod_summary
         maybe_src_buf = ms_hspp_buf  mod_summary
 
     --------------------------  Parser  ----------------
-    liftIO $ showPass dflags "Parser"
-    {-# SCC "Parser" #-} do
-
     -- sometimes we already have the buffer in memory, perhaps
     -- because we needed to parse the imports out of it, or get the
     -- module name.
@@ -362,7 +364,7 @@ hscParse' mod_summary = do
             liftIO $ throwOneError (mkPlainErrMsg dflags span err)
 
         POk pst rdr_module -> do
-            logWarningsReportErrors (getMessages pst)
+            logWarningsReportErrors (getMessages pst dflags)
             liftIO $ dumpIfSet_dyn dflags Opt_D_dump_parsed "Parser" $
                                    ppr rdr_module
             liftIO $ dumpIfSet_dyn dflags Opt_D_source_stats "Source Statistics" $
@@ -664,9 +666,8 @@ hscIncrementalCompile always_do_basic_recompilation_check m_tc_result
                 hm_iface = iface,
                 hm_linkable = Nothing
             })
-        Right (result, mb_old_hash) -> do
-            (status, hmi, no_change) <- case result of
-                FrontendTypecheck tc_result ->
+        Right (FrontendTypecheck tc_result, mb_old_hash) -> do
+            (status, hmi, no_change) <-
                     if hscTarget dflags /= HscNothing &&
                        ms_hsc_src mod_summary == HsSrcFile
                        then finish              hsc_env mod_summary tc_result mb_old_hash
@@ -1252,7 +1253,8 @@ hscGenHardCode hsc_env cgguts mod_summary output_filename = do
         -- PREPARE FOR CODE GENERATION
         -- Do saturation and convert to A-normal form
         prepd_binds <- {-# SCC "CorePrep" #-}
-                       corePrepPgm hsc_env location core_binds data_tycons ;
+                       corePrepPgm hsc_env this_mod location
+                                   core_binds data_tycons
         -----------------  Convert to STG ------------------
         (stg_binds, cost_centre_info)
             <- {-# SCC "CoreToStg" #-}
@@ -1268,27 +1270,28 @@ hscGenHardCode hsc_env cgguts mod_summary output_filename = do
         -- top-level function, so showPass isn't very useful here.
         -- Hence we have one showPass for the whole backend, the
         -- next showPass after this will be "Assembler".
-        showPass dflags "CodeGen"
+        withTiming (pure dflags)
+                   (text "CodeGen"<+>brackets (ppr this_mod))
+                   (const ()) $ do
+            cmms <- {-# SCC "StgCmm" #-}
+                            doCodeGen hsc_env this_mod data_tycons
+                                cost_centre_info
+                                stg_binds hpc_info
 
-        cmms <- {-# SCC "StgCmm" #-}
-                         doCodeGen hsc_env this_mod data_tycons
-                             cost_centre_info
-                             stg_binds hpc_info
+            ------------------  Code output -----------------------
+            rawcmms0 <- {-# SCC "cmmToRawCmm" #-}
+                      cmmToRawCmm dflags cmms
 
-        ------------------  Code output -----------------------
-        rawcmms0 <- {-# SCC "cmmToRawCmm" #-}
-                   cmmToRawCmm dflags cmms
+            let dump a = do dumpIfSet_dyn dflags Opt_D_dump_cmm_raw "Raw Cmm"
+                              (ppr a)
+                            return a
+                rawcmms1 = Stream.mapM dump rawcmms0
 
-        let dump a = do dumpIfSet_dyn dflags Opt_D_dump_cmm_raw "Raw Cmm"
-                           (ppr a)
-                        return a
-            rawcmms1 = Stream.mapM dump rawcmms0
-
-        (output_filename, (_stub_h_exists, stub_c_exists))
-            <- {-# SCC "codeOutput" #-}
-               codeOutput dflags this_mod output_filename location
-               foreign_stubs dependencies rawcmms1
-        return (output_filename, stub_c_exists)
+            (output_filename, (_stub_h_exists, stub_c_exists))
+                <- {-# SCC "codeOutput" #-}
+                  codeOutput dflags this_mod output_filename location
+                  foreign_stubs dependencies rawcmms1
+            return (output_filename, stub_c_exists)
 
 
 hscInteractive :: HscEnv
@@ -1315,7 +1318,7 @@ hscInteractive hsc_env cgguts mod_summary = do
     -- PREPARE FOR CODE GENERATION
     -- Do saturation and convert to A-normal form
     prepd_binds <- {-# SCC "CorePrep" #-}
-                   corePrepPgm hsc_env location core_binds data_tycons
+                   corePrepPgm hsc_env this_mod location core_binds data_tycons
     -----------------  Generate byte code ------------------
     comp_bc <- byteCodeGen hsc_env this_mod prepd_binds data_tycons mod_breaks
     ------------------ Create f-x-dynamic C-side stuff ---
@@ -1335,16 +1338,16 @@ hscCompileCmmFile hsc_env filename output_filename = runHsc hsc_env $ do
     liftIO $ do
         us <- mkSplitUniqSupply 'S'
         let initTopSRT = initUs_ us emptySRT
-        dumpIfSet_dyn dflags Opt_D_dump_cmm "Parsed Cmm" (ppr cmm)
+        dumpIfSet_dyn dflags Opt_D_dump_cmm_verbose "Parsed Cmm" (ppr cmm)
         (_, cmmgroup) <- cmmPipeline hsc_env initTopSRT cmm
         rawCmms <- cmmToRawCmm dflags (Stream.yield cmmgroup)
         _ <- codeOutput dflags no_mod output_filename no_loc NoStubs [] rawCmms
         return ()
   where
-    no_mod = panic "hscCmmFile: no_mod"
+    no_mod = panic "hscCompileCmmFile: no_mod"
     no_loc = ModLocation{ ml_hs_file  = Just filename,
-                          ml_hi_file  = panic "hscCmmFile: no hi file",
-                          ml_obj_file = panic "hscCmmFile: no obj file" }
+                          ml_hi_file  = panic "hscCompileCmmFile: no hi file",
+                          ml_obj_file = panic "hscCompileCmmFile: no obj file" }
 
 -------------------- Stuff for new code gen ---------------------
 
@@ -1370,8 +1373,8 @@ doCodeGen hsc_env this_mod data_tycons
         -- CmmGroup on input may produce many CmmGroups on output due
         -- to proc-point splitting).
 
-    let dump1 a = do dumpIfSet_dyn dflags Opt_D_dump_cmm
-                       "Cmm produced by new codegen" (ppr a)
+    let dump1 a = do dumpIfSet_dyn dflags Opt_D_dump_cmm_from_stg
+                       "Cmm produced by codegen" (ppr a)
                      return a
 
         ppr_stream1 = Stream.mapM dump1 cmm_stream
@@ -1404,7 +1407,8 @@ doCodeGen hsc_env this_mod data_tycons
                 Stream.yield (srtToData topSRT)
 
     let
-        dump2 a = do dumpIfSet_dyn dflags Opt_D_dump_cmm "Output Cmm" $ ppr a
+        dump2 a = do dumpIfSet_dyn dflags Opt_D_dump_cmm
+                        "Output Cmm" (ppr a)
                      return a
 
         ppr_stream2 = Stream.mapM dump2 pipeline_stream
@@ -1549,7 +1553,7 @@ hscDeclsWithLocation hsc_env0 str source linenumber =
     {- Prepare For Code Generation -}
     -- Do saturation and convert to A-normal form
     prepd_binds <- {-# SCC "CorePrep" #-}
-      liftIO $ corePrepPgm hsc_env iNTERACTIVELoc core_binds data_tycons
+      liftIO $ corePrepPgm hsc_env this_mod iNTERACTIVELoc core_binds data_tycons
 
     {- Generate byte code -}
     cbc <- liftIO $ byteCodeGen hsc_env this_mod
@@ -1607,14 +1611,14 @@ hscImport hsc_env str = runInteractiveHsc hsc_env $ do
                      text "parse error in import declaration"
 
 -- | Typecheck an expression (but don't run it)
--- Returns its most general type
 hscTcExpr :: HscEnv
+          -> TcRnExprMode
           -> String -- ^ The expression
           -> IO Type
-hscTcExpr hsc_env0 expr = runInteractiveHsc hsc_env0 $ do
+hscTcExpr hsc_env0 mode expr = runInteractiveHsc hsc_env0 $ do
   hsc_env <- getHscEnv
   parsed_expr <- hscParseExpr expr
-  ioMsgMaybe $ tcRnExpr hsc_env parsed_expr
+  ioMsgMaybe $ tcRnExpr hsc_env mode parsed_expr
 
 -- | Find the kind of a type
 -- Currently this does *not* generalise the kinds of the type
@@ -1659,9 +1663,10 @@ hscParseThing = hscParseThingWithLocation "<interactive>" 1
 hscParseThingWithLocation :: (Outputable thing) => String -> Int
                           -> Lexer.P thing -> String -> Hsc thing
 hscParseThingWithLocation source linenumber parser str
-  = {-# SCC "Parser" #-} do
+  = withTiming getDynFlags
+               (text "Parser [source]")
+               (const ()) $ {-# SCC "Parser" #-} do
     dflags <- getDynFlags
-    liftIO $ showPass dflags "Parser"
 
     let buf = stringToStringBuffer str
         loc = mkRealSrcLoc (fsLit source) linenumber 1
@@ -1672,7 +1677,7 @@ hscParseThingWithLocation source linenumber parser str
             throwErrors $ unitBag msg
 
         POk pst thing -> do
-            logWarningsReportErrors (getMessages pst)
+            logWarningsReportErrors (getMessages pst dflags)
             liftIO $ dumpIfSet_dyn dflags Opt_D_dump_parsed "Parser" (ppr thing)
             return thing
 

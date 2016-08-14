@@ -51,8 +51,8 @@ warningsOptions =
   , flag { flagName = "-fdefer-type-errors"
          , flagDescription =
            "Turn type errors into warnings, :ref:`deferring the error until "++
-           "runtime <defer-type-errors>`. Implies :ghc-flag:`fdefer-typed-holes`. "++
-           "See also :ghc-flag:`Wdeferred-type-errors`"
+           "runtime <defer-type-errors>`. Implies :ghc-flag:`-fdefer-typed-holes`. "++
+           "See also :ghc-flag:`-Wdeferred-type-errors`"
          , flagType = DynamicFlag
          , flagReverse = "-fno-defer-type-errors"
          }
@@ -60,8 +60,8 @@ warningsOptions =
          , flagDescription =
            "Convert :ref:`typed hole <typed-holes>` errors into warnings, "++
            ":ref:`deferring the error until runtime <defer-type-errors>`. "++
-           "Implied by :ghc-flag:`fdefer-type-errors`. "++
-           "See also :ghc-flag:`Wtyped-holes`."
+           "Implied by :ghc-flag:`-fdefer-type-errors`. "++
+           "See also :ghc-flag:`-Wtyped-holes`."
          , flagType = DynamicFlag
          , flagReverse = "-fno-defer-typed-holes"
          }
@@ -116,6 +116,11 @@ warningsOptions =
            "pattern binding could fail"
          , flagType = DynamicFlag
          , flagReverse = "-Wno-incomplete-uni-patterns"
+         }
+  , flag { flagName = "-Wmax-pmcheck-iterations=<N>"
+         , flagDescription =
+           "the iteration limit for the pattern match checker"
+         , flagType = DynamicFlag
          }
   , flag { flagName = "-Wincomplete-record-updates"
          , flagDescription = "warn when a record update could fail"
@@ -269,8 +274,8 @@ warningsOptions =
   , flag { flagName = "-Wunused-binds"
          , flagDescription =
            "warn about bindings that are unused. Alias for "++
-           ":ghc-flag:`Wunused-top-binds`, :ghc-flag:`Wunused-local-binds` and "++
-           ":ghc-flag:`Wunused-pattern-binds`"
+           ":ghc-flag:`-Wunused-top-binds`, :ghc-flag:`-Wunused-local-binds` and "++
+           ":ghc-flag:`-Wunused-pattern-binds`"
          , flagType = DynamicFlag
          , flagReverse = "-Wno-unused-binds"
          }
@@ -331,7 +336,7 @@ warningsOptions =
            "Should be used to check the safety status of modules when using "++
            "safe inference. Works on all module types, even those using "++
            "explicit :ref:`Safe Haskell <safe-haskell>` modes (such as "++
-           ":ghc-flag:`XTrustworthy`) and so can be used to have the compiler check "++
+           ":ghc-flag:`-XTrustworthy`) and so can be used to have the compiler check "++
            "any assumptions made."
          , flagType = DynamicFlag
          , flagReverse = "-Wno-unsafe"
@@ -342,7 +347,7 @@ warningsOptions =
            "be used to check the safety status of modules when using safe "++
            "inference. Works on all module types, even those using explicit "++
            ":ref:`Safe Haskell <safe-haskell>` modes (such as "++
-           ":ghc-flag:`XTrustworthy`) and so can be used to have the compiler check "++
+           ":ghc-flag:`-XTrustworthy`) and so can be used to have the compiler check "++
            "any assumptions made."
          , flagType = DynamicFlag
          , flagReverse = "-Wno-safe"
@@ -350,8 +355,8 @@ warningsOptions =
   , flag { flagName = "-Wtrustworthy-safe"
          , flagDescription =
            "warn if the module being compiled is marked as "++
-           ":ghc-flag:`XTrustworthy` but it could instead be marked as "++
-           ":ghc-flag:`XSafe`, a more informative bound. Can be used to detect"++
+           ":ghc-flag:`-XTrustworthy` but it could instead be marked as "++
+           ":ghc-flag:`-XSafe`, a more informative bound. Can be used to detect"++
            "once a Safe Haskell bound can be improved as dependencies are updated."
          , flagType = DynamicFlag
          , flagReverse = "-Wno-safe"
@@ -370,11 +375,18 @@ warningsOptions =
          , flagType = DynamicFlag
          , flagReverse = "-Wno-amp"
          }
+  , flag { flagName = "-Wredundant-constraints"
+         , flagDescription =
+           "Have the compiler warn about redundant constraints in type"++
+           "signatures."
+         , flagType = DynamicFlag
+         , flagReverse = "-Wno-redundant-constraints"
+         }
   , flag { flagName = "-Wdeferred-type-errors"
          , flagDescription =
            "Report warnings when :ref:`deferred type errors "++
            "<defer-type-errors>` are enabled. This option is enabled by "++
-           "default. See :ghc-flag:`fdefer-type-errors`."
+           "default. See :ghc-flag:`-fdefer-type-errors`."
          , flagType = DynamicFlag
          , flagReverse = "-Wno-deferred-type-errors"
          }
@@ -382,15 +394,15 @@ warningsOptions =
          , flagDescription =
            "Report warnings when :ref:`typed hole <typed-holes>` errors are "++
            ":ref:`deferred until runtime <defer-type-errors>`. See "++
-           ":ghc-flag:`fdefer-typed-holes`."
+           ":ghc-flag:`-fdefer-typed-holes`."
          , flagType = DynamicFlag
          , flagReverse = "-Wno-typed-holes"
          }
   , flag { flagName = "-Wpartial-type-signatures"
          , flagDescription =
            "warn about holes in partial type signatures when "++
-           ":ghc-flag:`XPartialTypeSignatures` is enabled. Not applicable when "++
-           ":ghc-flag:`XPartialTypesignatures` is not enabled, in which case "++
+           ":ghc-flag:`-XPartialTypeSignatures` is enabled. Not applicable when "++
+           ":ghc-flag:`-XPartialTypesignatures` is not enabled, in which case "++
            "errors are generated for such holes. See "++
            ":ref:`partial-type-signatures`."
          , flagType = DynamicFlag

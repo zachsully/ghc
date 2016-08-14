@@ -31,6 +31,7 @@ import Outputable
 import DynFlags
 
 import Data.Word
+import Data.Int
 import Data.Bits
 
 -- -----------------------------------------------------------------------------
@@ -127,6 +128,7 @@ pprData (CmmUninitialised bytes) = keyword <> int bytes
     where keyword = sdocWithPlatform $ \platform ->
                     case platformOS platform of
                     OSDarwin -> text ".space "
+                    OSAIX    -> text ".space "
                     _        -> text ".skip "
 pprData (CmmStaticLit lit)       = pprDataItem lit
 
@@ -262,6 +264,11 @@ pprImm (ImmConstantSum a b) = pprImm a <> char '+' <> pprImm b
 pprImm (ImmConstantDiff a b) = pprImm a <> char '-'
                    <> lparen <> pprImm b <> rparen
 
+pprImm (LO (ImmInt i))     = pprImm (LO (ImmInteger (toInteger i)))
+pprImm (LO (ImmInteger i)) = pprImm (ImmInteger (toInteger lo16))
+  where
+    lo16 = fromInteger (i .&. 0xffff) :: Int16
+
 pprImm (LO i)
   = sdocWithPlatform $ \platform ->
     if platformOS platform == OSDarwin
@@ -273,6 +280,13 @@ pprImm (HI i)
     if platformOS platform == OSDarwin
     then hcat [ text "hi16(", pprImm i, rparen ]
     else pprImm i <> text "@h"
+
+pprImm (HA (ImmInt i))     = pprImm (HA (ImmInteger (toInteger i)))
+pprImm (HA (ImmInteger i)) = pprImm (ImmInteger ha16)
+  where
+    ha16 = if lo16 >= 0x8000 then hi16+1 else hi16
+    hi16 = (i `shiftR` 16)
+    lo16 = i .&. 0xffff
 
 pprImm (HA i)
   = sdocWithPlatform $ \platform ->
@@ -480,9 +494,10 @@ pprInstr (STU fmt reg addr) = hcat [
         char '\t',
         text "st",
         pprFormat fmt,
-        text "u\t",
+        char 'u',
         case addr of AddrRegImm _ _ -> empty
                      AddrRegReg _ _ -> char 'x',
+        char '\t',
         pprReg reg,
         text ", ",
         pprAddr addr
@@ -570,7 +585,11 @@ pprInstr (BCCFAR cond blockid) = vcat [
     ]
     where lbl = mkAsmTempLabel (getUnique blockid)
 
-pprInstr (JMP lbl) = hcat [ -- an alias for b that takes a CLabel
+pprInstr (JMP lbl)
+  -- We never jump to ForeignLabels; if we ever do, c.f. handling for "BL"
+  | isForeignLabel lbl = panic "PPC.Ppr.pprInstr: JMP to ForeignLabel"
+  | otherwise =
+    hcat [ -- an alias for b that takes a CLabel
         char '\t',
         text "b",
         char '\t',
@@ -587,10 +606,27 @@ pprInstr (BCTR _ _) = hcat [
         char '\t',
         text "bctr"
     ]
-pprInstr (BL lbl _) = hcat [
-        text "\tbl\t",
-        ppr lbl
-    ]
+pprInstr (BL lbl _) = do
+    sdocWithPlatform $ \platform -> case platformOS platform of
+        OSAIX ->
+          -- On AIX, "printf" denotes a function-descriptor (for use
+          -- by function pointers), whereas the actual entry-code
+          -- address is denoted by the dot-prefixed ".printf" label.
+          -- Moreover, the PPC NCG only ever emits a BL instruction
+          -- for calling C ABI functions. Most of the time these calls
+          -- originate from FFI imports and have a 'ForeignLabel',
+          -- but when profiling the codegen inserts calls via
+          -- 'emitRtsCallGen' which are 'CmmLabel's even though
+          -- they'd technically be more like 'ForeignLabel's.
+          hcat [
+            text "\tbl\t.",
+            ppr lbl
+          ]
+        _ ->
+          hcat [
+            text "\tbl\t",
+            ppr lbl
+          ]
 pprInstr (BCTRL _) = hcat [
         char '\t',
         text "bctrl"
@@ -756,6 +792,17 @@ pprInstr (RLWINM reg1 reg2 sh mb me) = hcat [
         int me
     ]
 
+pprInstr (CLRRI fmt reg1 reg2 n) = hcat [
+        text "\tclrr",
+        pprFormat fmt,
+        text "i ",
+        pprReg reg1,
+        text ", ",
+        pprReg reg2,
+        text ", ",
+        int n
+    ]
+
 pprInstr (FADD fmt reg1 reg2 reg3) = pprBinaryF (sLit "fadd") fmt reg1 reg2 reg3
 pprInstr (FSUB fmt reg1 reg2 reg3) = pprBinaryF (sLit "fsub") fmt reg1 reg2 reg3
 pprInstr (FMUL fmt reg1 reg2 reg3) = pprBinaryF (sLit "fmul") fmt reg1 reg2 reg3
@@ -764,10 +811,14 @@ pprInstr (FNEG reg1 reg2) = pprUnary (sLit "fneg") reg1 reg2
 
 pprInstr (FCMP reg1 reg2) = hcat [
         char '\t',
-        text "fcmpu\tcr0, ",
+        text "fcmpu\t0, ",
             -- Note: we're using fcmpu, not fcmpo
             -- The difference is with fcmpo, compare with NaN is an invalid operation.
-            -- We don't handle invalid fp ops, so we don't care
+            -- We don't handle invalid fp ops, so we don't care.
+            -- Morever, we use `fcmpu 0, ...` rather than `fcmpu cr0, ...` for
+            -- better portability since some non-GNU assembler (such as
+            -- IBM's `as`) tend not to support the symbolic register name cr0.
+            -- This matches the syntax that GCC seems to emit for PPC targets.
         pprReg reg1,
         text ", ",
         pprReg reg2

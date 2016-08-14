@@ -26,7 +26,7 @@ void endEventLogging(void);
 void freeEventLogging(void);
 void abortEventLogging(void); // #4512 - after fork child needs to abort
 void flushEventLog(void);     // event log inherited from parent
-void moreCapEventBufs (nat from, nat to);
+void moreCapEventBufs (uint32_t from, uint32_t to);
 
 /*
  * Post a scheduler event to the capability's event buffer (an event
@@ -107,7 +107,7 @@ void postHeapEvent (Capability    *cap,
                     W_           info1);
 
 void postEventHeapInfo (EventCapsetID heap_capset,
-                        nat           gens,
+                        uint32_t    gens,
                         W_          maxHeapSize,
                         W_          allocAreaSize,
                         W_          mblockSize,
@@ -115,11 +115,11 @@ void postEventHeapInfo (EventCapsetID heap_capset,
 
 void postEventGcStats  (Capability    *cap,
                         EventCapsetID  heap_capset,
-                        nat            gen,
+                        uint32_t     gen,
                         W_           copied,
                         W_           slop,
                         W_           fragmentation,
-                        nat            par_n_threads,
+                        uint32_t     par_n_threads,
                         W_           par_max_copied,
                         W_           par_tot_copied);
 
@@ -132,6 +132,26 @@ void postTaskMigrateEvent (EventTaskId taskId,
                            EventCapNo new_capno);
 
 void postTaskDeleteEvent (EventTaskId taskId);
+
+void postHeapProfBegin(StgWord8 profile_id);
+
+void postHeapProfSampleBegin(StgInt era);
+
+void postHeapProfSampleString(StgWord8 profile_id,
+                              const char *label,
+                              StgWord64 residency);
+
+#ifdef PROFILING
+void postHeapProfCostCentre(StgWord32 ccID,
+                            const char *label,
+                            const char *module,
+                            const char *srcloc,
+                            StgBool is_caf);
+
+void postHeapProfSampleCostCentre(StgWord8 profile_id,
+                                  CostCentreStack *stack,
+                                  StgWord64 residency);
+#endif /* PROFILING */
 
 #else /* !TRACING */
 

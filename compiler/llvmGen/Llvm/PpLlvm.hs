@@ -73,7 +73,7 @@ ppLlvmGlobal (LMGlobal var@(LMGlobalVar _ _ link x a c) dat) =
             Nothing -> empty
 
         rhs = case dat of
-            Just stat -> ppr stat
+            Just stat -> pprSpecialStatic stat
             Nothing   -> ppr (pLower $ getVarType var)
 
         -- Position of linkage is different for aliases.
@@ -106,23 +106,13 @@ ppLlvmMetas metas = vcat $ map ppLlvmMeta metas
 
 -- | Print out an LLVM metadata definition.
 ppLlvmMeta :: MetaDecl -> SDoc
-ppLlvmMeta (MetaUnamed n m)
-  = exclamation <> int n <> text " = " <> ppLlvmMetaExpr m
+ppLlvmMeta (MetaUnnamed n m)
+  = ppr n <+> equals <+> ppr m
 
 ppLlvmMeta (MetaNamed n m)
-  = exclamation <> ftext n <> text " = !" <> braces nodes
+  = exclamation <> ftext n <+> equals <+> exclamation <> braces nodes
   where
-    nodes = hcat $ intersperse comma $ map pprNode m
-    pprNode n = exclamation <> int n
-
--- | Print out an LLVM metadata value.
-ppLlvmMetaExpr :: MetaExpr -> SDoc
-ppLlvmMetaExpr (MetaVar (LMLitVar (LMNullLit _))) = text "null"
-ppLlvmMetaExpr (MetaStr    s ) = text "!" <> doubleQuotes (ftext s)
-ppLlvmMetaExpr (MetaNode   n ) = text "!" <> int n
-ppLlvmMetaExpr (MetaVar    v ) = ppr v
-ppLlvmMetaExpr (MetaStruct es) =
-    text "!{" <> hsep (punctuate comma (map ppLlvmMetaExpr es)) <> char '}'
+    nodes = hcat $ intersperse comma $ map ppr m
 
 
 -- | Print out a list of function definitions.
@@ -489,7 +479,7 @@ ppMetaAnnots meta = hcat $ map ppMeta meta
     ppMeta (MetaAnnot name e)
         = comma <+> exclamation <> ftext name <+>
           case e of
-            MetaNode n    -> exclamation <> int n
+            MetaNode n    -> ppr n
             MetaStruct ms -> exclamation <> braces (ppCommaJoin ms)
             other         -> exclamation <> braces (ppr other) -- possible?
 

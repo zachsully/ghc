@@ -11,7 +11,7 @@ they may be affected by renaming (which isn't fully worked out yet).
 
 module RnBinds (
    -- Renaming top-level bindings
-   rnTopBindsLHS, rnTopBindsRHS, rnValBindsRHS,
+   rnTopBindsLHS, rnTopBindsBoot, rnValBindsRHS,
 
    -- Renaming local bindings
    rnLocalBindsAndThen, rnLocalValBindsLHS, rnLocalValBindsRHS,
@@ -46,6 +46,7 @@ import Bag
 import Util
 import Outputable
 import FastString
+import UniqFM
 import Maybes           ( orElse )
 import qualified GHC.LanguageExtensions as LangExt
 
@@ -168,22 +169,14 @@ rnTopBindsLHS :: MiniFixityEnv
 rnTopBindsLHS fix_env binds
   = rnValBindsLHS (topRecNameMaker fix_env) binds
 
-rnTopBindsRHS :: NameSet -> HsValBindsLR Name RdrName
-              -> RnM (HsValBinds Name, DefUses)
-rnTopBindsRHS bound_names binds
-  = do { is_boot <- tcIsHsBootOrSig
-       ; if is_boot
-         then rnTopBindsBoot binds
-         else rnValBindsRHS (TopSigCtxt bound_names) binds }
-
-rnTopBindsBoot :: HsValBindsLR Name RdrName -> RnM (HsValBinds Name, DefUses)
+rnTopBindsBoot :: NameSet -> HsValBindsLR Name RdrName -> RnM (HsValBinds Name, DefUses)
 -- A hs-boot file has no bindings.
 -- Return a single HsBindGroup with empty binds and renamed signatures
-rnTopBindsBoot (ValBindsIn mbinds sigs)
+rnTopBindsBoot bound_names (ValBindsIn mbinds sigs)
   = do  { checkErr (isEmptyLHsBinds mbinds) (bindsInHsBootFile mbinds)
-        ; (sigs', fvs) <- renameSigs HsBootCtxt sigs
+        ; (sigs', fvs) <- renameSigs (HsBootCtxt bound_names) sigs
         ; return (ValBindsOut [] sigs', usesOnly fvs) }
-rnTopBindsBoot b = pprPanic "rnTopBindsBoot" (ppr b)
+rnTopBindsBoot _ b = pprPanic "rnTopBindsBoot" (ppr b)
 
 {-
 *********************************************************
@@ -474,7 +467,7 @@ rnBind sig_fn bind@(FunBind { fun_id = name
 
         ; (matches', rhs_fvs) <- bindSigTyVarsFV (sig_fn plain_name) $
                                 -- bindSigTyVars tests for LangExt.ScopedTyVars
-                                 rnMatchGroup (FunRhs plain_name)
+                                 rnMatchGroup (FunRhs name Prefix)
                                               rnLExpr matches
         ; let is_infix = isInfixFunBind bind
         ; when is_infix $ checkPrecMatch plain_name matches'
@@ -524,7 +517,9 @@ depAnalBinds binds_w_dus
   = (map get_binds sccs, map get_du sccs)
   where
     sccs = depAnal (\(_, defs, _) -> defs)
-                   (\(_, _, uses) -> nameSetElems uses)
+                   (\(_, _, uses) -> nonDetEltsUFM uses)
+                   -- It's OK to use nonDetEltsUFM here as explained in
+                   -- Note [depAnal determinism] in NameEnv.
                    (bagToList binds_w_dus)
 
     get_binds (AcyclicSCC (bind, _, _)) = (NonRecursive, unitBag bind)
@@ -563,8 +558,8 @@ mkSigTvFn sigs
       = add_scoped_tvs names (hsScopedTvs sig_ty) env
     add_scoped_sig (L _ (TypeSig names sig_ty)) env
       = add_scoped_tvs names (hsWcScopedTvs sig_ty) env
-    add_scoped_sig (L _ (PatSynSig name sig_ty)) env
-      = add_scoped_tvs [name] (hsScopedTvs sig_ty) env
+    add_scoped_sig (L _ (PatSynSig names sig_ty)) env
+      = add_scoped_tvs names (hsScopedTvs sig_ty) env
     add_scoped_sig _ env = env
 
     add_scoped_tvs :: [Located Name] -> [Name] -> NameEnv [Name] -> NameEnv [Name]
@@ -617,7 +612,7 @@ dupFixityDecl loc rdr_name
 rnPatSynBind :: (Name -> [Name])                -- Signature tyvar function
              -> PatSynBind Name RdrName
              -> RnM (PatSynBind Name Name, [Name], Uses)
-rnPatSynBind sig_fn bind@(PSB { psb_id = L _ name
+rnPatSynBind sig_fn bind@(PSB { psb_id = L l name
                               , psb_args = details
                               , psb_def = pat
                               , psb_dir = dir })
@@ -647,10 +642,12 @@ rnPatSynBind sig_fn bind@(PSB { psb_id = L _ name
                RecordPatSyn vars ->
                    do { checkDupRdrNames (map recordPatSynSelectorId vars)
                       ; let rnRecordPatSynField
-                              (RecordPatSynField visible hidden) = do {
-                              ; visible' <- lookupLocatedTopBndrRn visible
-                              ; hidden'  <- lookupVar hidden
-                              ; return $ RecordPatSynField visible' hidden' }
+                              (RecordPatSynField { recordPatSynSelectorId = visible
+                                                 , recordPatSynPatVar = hidden })
+                              = do { visible' <- lookupLocatedTopBndrRn visible
+                                   ; hidden'  <- lookupVar hidden
+                                   ; return $ RecordPatSynField { recordPatSynSelectorId = visible'
+                                                                , recordPatSynPatVar = hidden' } }
                       ; names <- mapM rnRecordPatSynField  vars
                       ; return ( (pat', RecordPatSyn names)
                                , mkFVs (map (unLoc . recordPatSynPatVar) names)) }
@@ -660,7 +657,8 @@ rnPatSynBind sig_fn bind@(PSB { psb_id = L _ name
             ImplicitBidirectional -> return (ImplicitBidirectional, emptyFVs)
             ExplicitBidirectional mg ->
                 do { (mg', fvs) <- bindSigTyVarsFV sig_tvs $
-                                   rnMatchGroup PatSyn rnLExpr mg
+                                   rnMatchGroup (FunRhs (L l name) Prefix)
+                                                rnLExpr mg
                    ; return (ExplicitBidirectional mg', fvs) }
 
         ; mod <- getModule
@@ -927,13 +925,17 @@ renameSig ctxt sig@(MinimalSig s (L l bf))
   = do new_bf <- traverse (lookupSigOccRn ctxt sig) bf
        return (MinimalSig s (L l new_bf), emptyFVs)
 
-renameSig ctxt sig@(PatSynSig v ty)
-  = do  { v' <- lookupSigOccRn ctxt sig v
+renameSig ctxt sig@(PatSynSig vs ty)
+  = do  { new_vs <- mapM (lookupSigOccRn ctxt sig) vs
         ; (ty', fvs) <- rnHsSigType ty_ctxt ty
-        ; return (PatSynSig v' ty', fvs) }
+        ; return (PatSynSig new_vs ty', fvs) }
   where
     ty_ctxt = GenericCtx (text "a pattern synonym signature for"
-                          <+> quotes (ppr v))
+                          <+> ppr_sig_bndrs vs)
+
+renameSig ctxt sig@(SCCFunSig st v s)
+  = do  { new_v <- lookupSigOccRn ctxt sig v
+        ; return (SCCFunSig st new_v s, emptyFVs) }
 
 ppr_sig_bndrs :: [Located RdrName] -> SDoc
 ppr_sig_bndrs bs = quotes (pprWithCommas ppr bs)
@@ -959,8 +961,8 @@ okHsSig ctxt (L _ sig)
      (IdSig {}, InstDeclCtxt {}) -> True
      (IdSig {}, _)               -> False
 
-     (InlineSig {}, HsBootCtxt) -> False
-     (InlineSig {}, _)          -> True
+     (InlineSig {}, HsBootCtxt {}) -> False
+     (InlineSig {}, _)             -> True
 
      (SpecSig {}, TopSigCtxt {})    -> True
      (SpecSig {}, LocalBindCtxt {}) -> True
@@ -972,6 +974,9 @@ okHsSig ctxt (L _ sig)
 
      (MinimalSig {}, ClsDeclCtxt {}) -> True
      (MinimalSig {}, _)              -> False
+
+     (SCCFunSig {}, HsBootCtxt {}) -> False
+     (SCCFunSig {}, _)             -> True
 
 -------------------
 findDupSigs :: [LSig RdrName] -> [[(Located RdrName, Sig RdrName)]]
@@ -990,6 +995,8 @@ findDupSigs sigs
     expand_sig sig@(InlineSig n _)           = [(n,sig)]
     expand_sig sig@(TypeSig ns _)            = [(n,sig) | n <- ns]
     expand_sig sig@(ClassOpSig _ ns _)       = [(n,sig) | n <- ns]
+    expand_sig sig@(PatSynSig ns  _ )        = [(n,sig) | n <- ns]
+    expand_sig sig@(SCCFunSig _ n _)         = [(n,sig)]
     expand_sig _ = []
 
     matching_sig (L _ n1,sig1) (L _ n2,sig2)       = n1 == n2 && mtch sig1 sig2
@@ -997,6 +1004,8 @@ findDupSigs sigs
     mtch (InlineSig {})        (InlineSig {})      = True
     mtch (TypeSig {})          (TypeSig {})        = True
     mtch (ClassOpSig d1 _ _)   (ClassOpSig d2 _ _) = d1 == d2
+    mtch (PatSynSig _ _)       (PatSynSig _ _)     = True
+    mtch (SCCFunSig{})         (SCCFunSig{})       = True
     mtch _ _ = False
 
 -- Warn about multiple MINIMAL signatures
@@ -1034,23 +1043,23 @@ rnMatch' :: Outputable (body RdrName) => HsMatchContext Name
          -> (Located (body RdrName) -> RnM (Located (body Name), FreeVars))
          -> Match RdrName (Located (body RdrName))
          -> RnM (Match Name (Located (body Name)), FreeVars)
-rnMatch' ctxt rnBody match@(Match { m_fixity = mf, m_pats = pats
+rnMatch' ctxt rnBody match@(Match { m_ctxt = mf, m_pats = pats
                                   , m_type = maybe_rhs_sig, m_grhss = grhss })
   = do  {       -- Result type signatures are no longer supported
           case maybe_rhs_sig of
                 Nothing -> return ()
-                Just (L loc ty) -> addErrAt loc (resSigErr ctxt match ty)
+                Just (L loc ty) -> addErrAt loc (resSigErr match ty)
 
-        ; let isinfix = isInfixMatch match
+        ; let fixity = if isInfixMatch match then Infix else Prefix
                -- Now the main event
                -- Note that there are no local fixity decls for matches
         ; rnPats ctxt pats      $ \ pats' -> do
         { (grhss', grhss_fvs) <- rnGRHSs ctxt rnBody grhss
         ; let mf' = case (ctxt,mf) of
-                      (FunRhs funid,FunBindMatch (L lf _) _)
-                                            -> FunBindMatch (L lf funid) isinfix
-                      _                     -> NonFunBindMatch
-        ; return (Match { m_fixity = mf', m_pats = pats'
+                      (FunRhs (L _ funid) _,FunRhs (L lf _) _)
+                                            -> FunRhs (L lf funid) fixity
+                      _                     -> ctxt
+        ; return (Match { m_ctxt = mf', m_pats = pats'
                         , m_type = Nothing, m_grhss = grhss'}, grhss_fvs ) }}
 
 emptyCaseErr :: HsMatchContext Name -> SDoc
@@ -1064,12 +1073,12 @@ emptyCaseErr ctxt = hang (text "Empty list of alternatives in" <+> pp_ctxt)
 
 
 resSigErr :: Outputable body
-          => HsMatchContext Name -> Match RdrName body -> HsType RdrName -> SDoc
-resSigErr ctxt match ty
+          => Match RdrName body -> HsType RdrName -> SDoc
+resSigErr match ty
    = vcat [ text "Illegal result type signature" <+> quotes (ppr ty)
           , nest 2 $ ptext (sLit
                  "Result signatures are no longer supported in pattern matches")
-          , pprMatchInCtxt ctxt match ]
+          , pprMatchInCtxt match ]
 
 {-
 ************************************************************************

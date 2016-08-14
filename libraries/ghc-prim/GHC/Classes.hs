@@ -34,8 +34,17 @@ module GHC.Classes(
     IP(..),
 
     -- * Equality and ordering
-    Eq(..), eqInt, neInt,
-    Ord(..), gtInt, geInt, leInt, ltInt, compareInt, compareInt#,
+    Eq(..),
+    Ord(..),
+    -- ** Monomorphic equality operators
+    -- | See GHC.Classes#matching_overloaded_methods_in_rules
+    eqInt, neInt,
+    eqWord, neWord,
+    eqChar, neChar,
+    eqFloat, eqDouble,
+    -- ** Monomorphic comparison operators
+    gtInt, geInt, leInt, ltInt, compareInt, compareInt#,
+    gtWord, geWord, leWord, ltWord, compareWord, compareWord#,
 
     -- * Functions over Bool
     (&&), (||), not,
@@ -65,6 +74,44 @@ default ()              -- Double isn't available yet
 class IP (x :: Symbol) a | x -> a where
   ip :: a
 
+{- $matching_overloaded_methods_in_rules
+
+Matching on class methods (e.g. @(==)@) in rewrite rules tends to be a bit
+fragile. For instance, consider this motivating example from the @bytestring@
+library,
+
+> break :: (Word8 -> Bool) -> ByteString -> (ByteString, ByteString)
+> breakByte :: Word8 -> ByteString -> (ByteString, ByteString)
+> {-# RULES "break -> breakByte" forall a. break (== x) = breakByte x #-}
+
+Here we have two functions, with @breakByte@ providing an optimized
+implementation of @break@ where the predicate is merely testing for equality
+with a known @Word8@. As written, however, this rule will be quite fragile as
+the @(==)@ class operation rule may rewrite the predicate before our @break@
+rule has a chance to fire.
+
+For this reason, most of the primitive types in @base@ have 'Eq' and 'Ord'
+instances defined in terms of helper functions with inlinings delayed to phase
+1. For instance, @Word8@\'s @Eq@ instance looks like,
+
+> instance Eq Word8 where
+>     (==) = eqWord8
+>     (/=) = neWord8
+>
+> eqWord8, neWord8 :: Word8 -> Word8 -> Bool
+> eqWord8 (W8# x) (W8# y) = ...
+> neWord8 (W8# x) (W8# y) = ...
+> {-# INLINE [1] eqWord8 #-}
+> {-# INLINE [1] neWord8 #-}
+
+This allows us to save our @break@ rule above by rewriting it to instead match
+against @eqWord8@,
+
+> {-# RULES "break -> breakByte" forall a. break (`eqWord8` x) = breakByte x #-}
+
+Currently this is only done for '(==)', '(/=)', '(<)', '(<=)', '(>)', and '(>=)'
+for the types in "GHC.Word" and "GHC.Int".
+-}
 
 -- | The 'Eq' class defines equality ('==') and inequality ('/=').
 -- All the basic datatypes exported by the "Prelude" are instances of 'Eq',
@@ -126,24 +173,53 @@ instance (Eq a) => Eq [a] where
 
 deriving instance Eq Bool
 deriving instance Eq Ordering
-deriving instance Eq Word
 
+instance Eq Word where
+    (==) = eqWord
+    (/=) = neWord
+
+-- See GHC.Classes#matching_overloaded_methods_in_rules
+{-# INLINE [1] eqWord #-}
+{-# INLINE [1] neWord #-}
+eqWord, neWord :: Word -> Word -> Bool
+(W# x) `eqWord` (W# y) = isTrue# (x `eqWord#` y)
+(W# x) `neWord` (W# y) = isTrue# (x `neWord#` y)
+
+-- See GHC.Classes#matching_overloaded_methods_in_rules
 instance Eq Char where
-    (C# c1) == (C# c2) = isTrue# (c1 `eqChar#` c2)
-    (C# c1) /= (C# c2) = isTrue# (c1 `neChar#` c2)
+    (==) = eqChar
+    (/=) = neChar
+
+-- See GHC.Classes#matching_overloaded_methods_in_rules
+{-# INLINE [1] eqChar #-}
+{-# INLINE [1] neChar #-}
+eqChar, neChar :: Char -> Char -> Bool
+(C# x) `eqChar` (C# y) = isTrue# (x `eqChar#` y)
+(C# x) `neChar` (C# y) = isTrue# (x `neChar#` y)
 
 instance Eq Float where
-    (F# x) == (F# y) = isTrue# (x `eqFloat#` y)
+    (==) = eqFloat
+
+-- See GHC.Classes#matching_overloaded_methods_in_rules
+{-# INLINE [1] eqFloat #-}
+eqFloat :: Float -> Float -> Bool
+(F# x) `eqFloat` (F# y) = isTrue# (x `eqFloat#` y)
 
 instance Eq Double where
-    (D# x) == (D# y) = isTrue# (x ==## y)
+    (==) = eqDouble
+
+-- See GHC.Classes#matching_overloaded_methods_in_rules
+{-# INLINE [1] eqDouble #-}
+eqDouble :: Double -> Double -> Bool
+(D# x) `eqDouble` (D# y) = isTrue# (x ==## y)
 
 instance Eq Int where
     (==) = eqInt
     (/=) = neInt
 
-{-# INLINE eqInt #-}
-{-# INLINE neInt #-}
+-- See GHC.Classes#matching_overloaded_methods_in_rules
+{-# INLINE [1] eqInt #-}
+{-# INLINE [1] neInt #-}
 eqInt, neInt :: Int -> Int -> Bool
 (I# x) `eqInt` (I# y) = isTrue# (x ==# y)
 (I# x) `neInt` (I# y) = isTrue# (x /=# y)
@@ -254,7 +330,6 @@ instance (Ord a) => Ord [a] where
 
 deriving instance Ord Bool
 deriving instance Ord Ordering
-deriving instance Ord Word
 
 -- We don't use deriving for Ord Char, because for Ord the derived
 -- instance defines only compare, which takes two primops.  Then
@@ -294,10 +369,11 @@ instance Ord Int where
     (>=)    = geInt
     (>)     = gtInt
 
-{-# INLINE gtInt #-}
-{-# INLINE geInt #-}
-{-# INLINE ltInt #-}
-{-# INLINE leInt #-}
+-- See GHC.Classes#matching_overloaded_methods_in_rules
+{-# INLINE [1] gtInt #-}
+{-# INLINE [1] geInt #-}
+{-# INLINE [1] ltInt #-}
+{-# INLINE [1] leInt #-}
 gtInt, geInt, ltInt, leInt :: Int -> Int -> Bool
 (I# x) `gtInt` (I# y) = isTrue# (x >#  y)
 (I# x) `geInt` (I# y) = isTrue# (x >=# y)
@@ -312,6 +388,33 @@ compareInt# x# y#
     | isTrue# (x# <#  y#) = LT
     | isTrue# (x# ==# y#) = EQ
     | True                = GT
+
+instance Ord Word where
+    compare = compareWord
+    (<)     = ltWord
+    (<=)    = leWord
+    (>=)    = geWord
+    (>)     = gtWord
+
+-- See GHC.Classes#matching_overloaded_methods_in_rules
+{-# INLINE [1] gtWord #-}
+{-# INLINE [1] geWord #-}
+{-# INLINE [1] ltWord #-}
+{-# INLINE [1] leWord #-}
+gtWord, geWord, ltWord, leWord :: Word -> Word -> Bool
+(W# x) `gtWord` (W# y) = isTrue# (x `gtWord#` y)
+(W# x) `geWord` (W# y) = isTrue# (x `geWord#` y)
+(W# x) `ltWord` (W# y) = isTrue# (x `ltWord#` y)
+(W# x) `leWord` (W# y) = isTrue# (x `leWord#` y)
+
+compareWord :: Word -> Word -> Ordering
+(W# x#) `compareWord` (W# y#) = compareWord# x# y#
+
+compareWord# :: Word# -> Word# -> Ordering
+compareWord# x# y#
+    | isTrue# (x# `ltWord#` y#) = LT
+    | isTrue# (x# `eqWord#` y#) = EQ
+    | True                      = GT
 
 -- OK, so they're technically not part of a class...:
 

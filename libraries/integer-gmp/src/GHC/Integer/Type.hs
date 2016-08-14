@@ -418,15 +418,49 @@ plusInteger (Jp# x) (Jn# y)
       GT -> bigNatToInteger (minusBigNat x y)
 {-# CONSTANT_FOLDED plusInteger #-}
 
--- TODO
--- | Subtract two 'Integer's from each other.
+-- | Subtract one 'Integer' from another.
 minusInteger :: Integer -> Integer -> Integer
-minusInteger x y = inline plusInteger x (inline negateInteger y)
+minusInteger x       (S# 0#)            = x
+minusInteger (S# 0#) (S# INT_MINBOUND#) = Jp# (wordToBigNat ABS_INT_MINBOUND##)
+minusInteger (S# 0#) (S# y#)            = S# (negateInt# y#)
+minusInteger (S# x#) (S# y#)
+  = case subIntC# x# y# of
+    (# z#, 0# #) -> S# z#
+    (# 0#, _  #) -> Jn# (wordToBigNat2 1## 0##)
+    (# z#, _  #)
+      | isTrue# (z# ># 0#) -> Jn# (wordToBigNat ( (int2Word# (negateInt# z#))))
+      | True               -> Jp# (wordToBigNat ( (int2Word# z#)))
+minusInteger (S# x#) (Jp# y)
+  | isTrue# (x# >=# 0#) = bigNatToNegInteger (minusBigNatWord y (int2Word# x#))
+  | True                = Jn# (plusBigNatWord y (int2Word# (negateInt# x#)))
+minusInteger (S# x#) (Jn# y)
+  | isTrue# (x# >=# 0#) = Jp# (plusBigNatWord y (int2Word# x#))
+  | True                = bigNatToInteger (minusBigNatWord y (int2Word#
+                                                              (negateInt# x#)))
+minusInteger (Jp# x) (Jp# y)
+    = case compareBigNat x y of
+      LT -> bigNatToNegInteger (minusBigNat y x)
+      EQ -> S# 0#
+      GT -> bigNatToInteger (minusBigNat x y)
+minusInteger (Jp# x) (Jn# y) = Jp# (plusBigNat x y)
+minusInteger (Jn# x) (Jp# y) = Jn# (plusBigNat x y)
+minusInteger (Jn# x) (Jn# y)
+    = case compareBigNat x y of
+      LT -> bigNatToInteger (minusBigNat y x)
+      EQ -> S# 0#
+      GT -> bigNatToNegInteger (minusBigNat x y)
+minusInteger (Jp# x) (S# y#)
+  | isTrue# (y# >=# 0#) = bigNatToInteger (minusBigNatWord x (int2Word# y#))
+  | True                = Jp# (plusBigNatWord x (int2Word# (negateInt# y#)))
+minusInteger (Jn# x) (S# y#)
+  | isTrue# (y# >=# 0#) = Jn# (plusBigNatWord x (int2Word# y#))
+  | True                = bigNatToNegInteger (minusBigNatWord x
+                                              (int2Word# (negateInt# y#)))
 {-# CONSTANT_FOLDED minusInteger #-}
 
 -- | Multiply two 'Integer's
 timesInteger :: Integer -> Integer -> Integer
-timesInteger _       (S# 0#) = S# 0#
+timesInteger !_      (S# 0#) = S# 0#
 timesInteger (S# 0#) _       = S# 0#
 timesInteger x       (S# 1#) = x
 timesInteger (S# 1#) y       = y
@@ -515,7 +549,7 @@ bitInteger i#
 
 -- | Test if /n/-th bit is set.
 testBitInteger :: Integer -> Int# -> Bool
-testBitInteger _  n# | isTrue# (n# <# 0#) = False
+testBitInteger !_  n# | isTrue# (n# <# 0#) = False
 testBitInteger (S# i#) n#
   | isTrue# (n# <# GMP_LIMB_BITS#) = isTrue# (((uncheckedIShiftL# 1# n#)
                                                `andI#` i#) /=# 0#)
@@ -614,7 +648,7 @@ xorInteger x           y {- S# -} = xorInteger x (unsafePromote y)
 -- | Bitwise AND operation
 andInteger :: Integer -> Integer -> Integer
 -- short-cuts
-andInteger (S# 0#)       _       = S# 0#
+andInteger (S# 0#)     !_        = S# 0#
 andInteger _           (S# 0#)   = S# 0#
 andInteger (S# -1#)   y          = y
 andInteger x           (S# -1#)  = x
@@ -646,7 +680,7 @@ unsafePromote x = x
 quotRemInteger :: Integer -> Integer -> (# Integer, Integer #)
 quotRemInteger n       (S# 1#) = (# n, S# 0# #)
 quotRemInteger n      (S# -1#) = let !q = negateInteger n in (# q, (S# 0#) #)
-quotRemInteger _       (S# 0#) = (# S# (quotInt# 0# 0#),S# (remInt# 0# 0#) #)
+quotRemInteger !_      (S# 0#) = (# S# (quotInt# 0# 0#),S# (remInt# 0# 0#) #)
 quotRemInteger (S# 0#) _       = (# S# 0#, S# 0# #)
 quotRemInteger (S# n#) (S# d#) = case quotRemInt# n# d# of
     (# q#, r# #) -> (# S# q#, S# r# #)
@@ -679,7 +713,7 @@ quotRemInteger n@(S# n#) (Jp# d) -- need to account for (S# minBound)
 quotInteger :: Integer -> Integer -> Integer
 quotInteger n       (S# 1#) = n
 quotInteger n      (S# -1#) = negateInteger n
-quotInteger _       (S# 0#) = S# (quotInt# 0# 0#)
+quotInteger !_      (S# 0#) = S# (quotInt# 0# 0#)
 quotInteger (S# 0#) _       = S# 0#
 quotInteger (S# n#)  (S# d#) = S# (quotInt# n# d#)
 quotInteger (Jp# n)   (S# d#)
@@ -699,7 +733,7 @@ quotInteger n d = case inline quotRemInteger n d of (# q, _ #) -> q
 {-# CONSTANT_FOLDED quotInteger #-}
 
 remInteger :: Integer -> Integer -> Integer
-remInteger _        (S# 1#) = S# 0#
+remInteger !_       (S# 1#) = S# 0#
 remInteger _       (S# -1#) = S# 0#
 remInteger _        (S# 0#) = S# (remInt# 0# 0#)
 remInteger (S# 0#) _        = S# 0#
@@ -763,7 +797,7 @@ gcdInteger (Jp# a) (S# b#)
 
 -- | Compute least common multiple.
 lcmInteger :: Integer -> Integer -> Integer
-lcmInteger (S# 0#) _   = S# 0#
+lcmInteger (S# 0#) !_  = S# 0#
 lcmInteger (S# 1#)  b  = absInteger b
 lcmInteger (S# -1#) b  = absInteger b
 lcmInteger _ (S# 0#)   = S# 0#
@@ -998,7 +1032,7 @@ sqrBigNat x
 sqrBigNat x = timesBigNat x x -- TODO: mpn_sqr
 
 timesBigNatWord :: BigNat -> GmpLimb# -> BigNat
-timesBigNatWord _ 0## = zeroBigNat
+timesBigNatWord !_ 0## = zeroBigNat
 timesBigNatWord x 1## = x
 timesBigNatWord x@(BN# x#) y#
   | isTrue# (nx# ==# 1#) =
@@ -1231,7 +1265,7 @@ remBigNat n@(BN# nba#) d@(BN# dba#)
 
 -- | Note: Result of div/0 undefined
 quotRemBigNatWord :: BigNat -> GmpLimb# -> (# BigNat, GmpLimb# #)
-quotRemBigNatWord _            0## = (# nullBigNat, 0## #)
+quotRemBigNatWord !_           0## = (# nullBigNat, 0## #)
 quotRemBigNatWord n            1## = (# n,          0## #)
 quotRemBigNatWord n@(BN# nba#) d# = case compareBigNatWord n d# of
     LT -> (# zeroBigNat, bigNatToWord n #)

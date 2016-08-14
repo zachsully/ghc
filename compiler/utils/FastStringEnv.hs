@@ -12,27 +12,36 @@ module FastStringEnv (
 
         -- ** Manipulating these environments
         mkFsEnv,
-        emptyFsEnv, unitFsEnv, fsEnvElts, fsEnvUniqueElts,
+        emptyFsEnv, unitFsEnv,
         extendFsEnv_C, extendFsEnv_Acc, extendFsEnv,
         extendFsEnvList, extendFsEnvList_C,
-        foldFsEnv, filterFsEnv,
+        filterFsEnv,
         plusFsEnv, plusFsEnv_C, alterFsEnv,
         lookupFsEnv, lookupFsEnv_NF, delFromFsEnv, delListFromFsEnv,
         elemFsEnv, mapFsEnv,
+
+        -- * Deterministic FastString environments (maps)
+        DFastStringEnv,
+
+        -- ** Manipulating these environments
+        mkDFsEnv, emptyDFsEnv, dFsEnvElts,
     ) where
 
-import Unique
 import UniqFM
+import UniqDFM
 import Maybes
 import FastString
 
 
+-- | A non-deterministic set of FastStrings.
+-- See Note [Deterministic UniqFM] in UniqDFM for explanation why it's not
+-- deterministic and why it matters. Use DFastStringEnv if the set eventually
+-- gets converted into a list or folded over in a way where the order
+-- changes the generated code.
 type FastStringEnv a = UniqFM a  -- Domain is FastString
 
 emptyFsEnv         :: FastStringEnv a
 mkFsEnv            :: [(FastString,a)] -> FastStringEnv a
-fsEnvElts          :: FastStringEnv a -> [a]
-fsEnvUniqueElts    :: FastStringEnv a -> [(Unique, a)]
 alterFsEnv         :: (Maybe a-> Maybe a) -> FastStringEnv a -> FastString -> FastStringEnv a
 extendFsEnv_C      :: (a->a->a) -> FastStringEnv a -> FastString -> a -> FastStringEnv a
 extendFsEnv_Acc    :: (a->b->b) -> (a->b) -> FastStringEnv b -> FastString -> a -> FastStringEnv b
@@ -47,11 +56,9 @@ elemFsEnv          :: FastString -> FastStringEnv a -> Bool
 unitFsEnv          :: FastString -> a -> FastStringEnv a
 lookupFsEnv        :: FastStringEnv a -> FastString -> Maybe a
 lookupFsEnv_NF     :: FastStringEnv a -> FastString -> a
-foldFsEnv          :: (a -> b -> b) -> b -> FastStringEnv a -> b
 filterFsEnv        :: (elt -> Bool) -> FastStringEnv elt -> FastStringEnv elt
 mapFsEnv           :: (elt1 -> elt2) -> FastStringEnv elt1 -> FastStringEnv elt2
 
-fsEnvElts x               = eltsUFM x
 emptyFsEnv                = emptyUFM
 unitFsEnv x y             = unitUFM x y
 extendFsEnv x y z         = addToUFM x y z
@@ -60,12 +67,10 @@ lookupFsEnv x y           = lookupUFM x y
 alterFsEnv                = alterUFM
 mkFsEnv     l             = listToUFM l
 elemFsEnv x y             = elemUFM x y
-foldFsEnv a b c           = foldUFM a b c
 plusFsEnv x y             = plusUFM x y
 plusFsEnv_C f x y         = plusUFM_C f x y
 extendFsEnv_C f x y z     = addToUFM_C f x y z
 mapFsEnv f x              = mapUFM f x
-fsEnvUniqueElts x         = ufmToList x
 extendFsEnv_Acc x y z a b = addToUFM_Acc x y z a b
 extendFsEnvList_C x y z   = addListToUFM_C x y z
 delFromFsEnv x y          = delFromUFM x y
@@ -73,3 +78,18 @@ delListFromFsEnv x y      = delListFromUFM x y
 filterFsEnv x y           = filterUFM x y
 
 lookupFsEnv_NF env n = expectJust "lookupFsEnv_NF" (lookupFsEnv env n)
+
+-- Deterministic FastStringEnv
+-- See Note [Deterministic UniqFM] in UniqDFM for explanation why we need
+-- DFastStringEnv.
+
+type DFastStringEnv a = UniqDFM a  -- Domain is FastString
+
+emptyDFsEnv :: DFastStringEnv a
+emptyDFsEnv = emptyUDFM
+
+dFsEnvElts :: DFastStringEnv a -> [a]
+dFsEnvElts = eltsUDFM
+
+mkDFsEnv :: [(FastString,a)] -> DFastStringEnv a
+mkDFsEnv l = listToUDFM l

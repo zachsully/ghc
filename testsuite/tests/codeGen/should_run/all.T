@@ -21,11 +21,14 @@ test('cgrun017', normal, compile_and_run, [''])
 test('cgrun018', normal, compile_and_run, [''])
 test('cgrun019', normal, compile_and_run, [''])
 test('cgrun020', normal, compile_and_run, [''])
-test('cgrun021', normal, compile_and_run, [''])
+
+# cgrun021 does some GC, so let's use it to test GC parameters
+test('cgrun021', extra_ways(['nursery_chunks']), compile_and_run, [''])
+
 test('cgrun022', normal, compile_and_run, [''])
 test('cgrun024', normal, compile_and_run, [''])
 test('cgrun025',
-     [reqlib('regex-compat'), extra_run_opts('cg025.hs'), exit_code(1)],
+     [reqlib('regex-compat'), extra_run_opts('cgrun025.hs'), exit_code(1)],
      compile_and_run, ['-package regex-compat'])
 test('cgrun026', normal, compile_and_run, [''])
 test('cgrun027', normal, compile_and_run, [''])
@@ -127,9 +130,8 @@ test('T9013', omit_ways(['ghci']),  # ghci doesn't support unboxed tuples
      compile_and_run, [''])
 test('T9340', normal, compile_and_run, [''])
 test('cgrun074', normal, compile_and_run, [''])
-test('CmmSwitchTest',
-     [when(fast(), skip), when(wordsize(32), expect_broken(11297))],
-     compile_and_run, [''])
+test('CmmSwitchTest32', unless(wordsize(32), skip), compile_and_run, [''])
+test('CmmSwitchTest64', unless(wordsize(64), skip), compile_and_run, [''])
 # Skipping WAY=ghci, because it is not broken.
 test('T10245', [omit_ways(['ghci']), expect_broken(10246)], compile_and_run, [''])
 test('T10246', expect_broken(10246), compile_and_run, [''])
@@ -137,6 +139,7 @@ test('T10414', [only_ways(['threaded2']), extra_ways(['threaded2']), req_smp],
      compile_and_run, ['-feager-blackholing'])
 test('T10521', normal, compile_and_run, [''])
 test('T10521b', normal, compile_and_run, [''])
-test('T10870', normal, compile_and_run, [''])
+test('T10870', when(wordsize(32), skip), compile_and_run, [''])
 test('PopCnt', omit_ways(['ghci']), multi_compile_and_run,
                  ['PopCnt', [('PopCnt_cmm.cmm', '')], ''])
+test('T12059', normal, compile_and_run, [''])

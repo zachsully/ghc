@@ -48,6 +48,9 @@ import Control.Monad
 import TysWiredIn       ( nilDataConName )
 import qualified GHC.LanguageExtensions as LangExt
 
+import Data.Ord
+import Data.Array
+
 {-
 ************************************************************************
 *                                                                      *
@@ -90,7 +93,11 @@ rnUnboundVar v
         then -- Treat this as a "hole"
              -- Do not fail right now; instead, return HsUnboundVar
              -- and let the type checker report the error
-             return (HsUnboundVar (rdrNameOcc v), emptyFVs)
+             do { let occ = rdrNameOcc v
+                ; uv <- if startsWithUnderscore occ
+                        then return (TrueExprHole occ)
+                        else OutOfScope occ <$> getGlobalRdrEnv
+                ; return (HsUnboundVar uv, emptyFVs) }
 
         else -- Fail immediately (qualified name)
              do { n <- reportUnboundName v
@@ -142,6 +149,11 @@ rnExpr (HsApp fun arg)
   = do { (fun',fvFun) <- rnLExpr fun
        ; (arg',fvArg) <- rnLExpr arg
        ; return (HsApp fun' arg', fvFun `plusFV` fvArg) }
+
+rnExpr (HsAppType fun arg)
+  = do { (fun',fvFun) <- rnLExpr fun
+       ; (arg',fvArg) <- rnHsWcType HsTypeCtx arg
+       ; return (HsAppType fun' arg', fvFun `plusFV` fvArg) }
 
 rnExpr (OpApp e1 op  _ e2)
   = do  { (e1', fv_e1) <- rnLExpr e1
@@ -212,10 +224,9 @@ rnExpr (HsLam matches)
   = do { (matches', fvMatch) <- rnMatchGroup LambdaExpr rnLExpr matches
        ; return (HsLam matches', fvMatch) }
 
-rnExpr (HsLamCase _arg matches)
+rnExpr (HsLamCase matches)
   = do { (matches', fvs_ms) <- rnMatchGroup CaseAlt rnLExpr matches
-       -- ; return (HsLamCase arg matches', fvs_ms) }
-       ; return (HsLamCase placeHolderType matches', fvs_ms) }
+       ; return (HsLamCase matches', fvs_ms) }
 
 rnExpr (HsCase expr matches)
   = do { (new_expr, e_fvs) <- rnLExpr expr
@@ -260,6 +271,10 @@ rnExpr (ExplicitTuple tup_args boxity)
     rnTupArg (L l (Missing _)) = return (L l (Missing placeHolderType)
                                         , emptyFVs)
 
+rnExpr (ExplicitSum alt arity expr _)
+  = do { (expr', fvs) <- rnLExpr expr
+       ; return (ExplicitSum alt arity expr' PlaceHolder, fvs) }
+
 rnExpr (RecordCon { rcon_con_name = con_id
                   , rcon_flds = rec_binds@(HsRecFields { rec_dotdot = dd }) })
   = do { con_lname@(L _ con_name) <- lookupLocatedOccRn con_id
@@ -300,10 +315,6 @@ rnExpr (HsMultiIf _ty alts)
        -- ; return (HsMultiIf ty alts', fvs) }
        ; return (HsMultiIf placeHolderType alts', fvs) }
 
-rnExpr (HsType ty)
-  = do { (ty', fvT) <- rnHsWcType HsTypeCtx ty
-       ; return (HsType ty', fvT) }
-
 rnExpr (ArithSeq _ _ seq)
   = do { opt_OverloadedLists <- xoptM LangExt.OverloadedLists
        ; (new_seq, fvs) <- rnArithSeq seq
@@ -342,7 +353,7 @@ value bindings. This is done by checking that the name is external or
 wired-in. See the Notes about the NameSorts in Name.hs.
 -}
 
-rnExpr e@(HsStatic expr) = do
+rnExpr e@(HsStatic _ expr) = do
     target <- fmap hscTarget getDynFlags
     case target of
       -- SPT entries are expected to exist in object code so far, and this is
@@ -355,28 +366,14 @@ rnExpr e@(HsStatic expr) = do
     (expr',fvExpr) <- rnLExpr expr
     stage <- getStage
     case stage of
-      Brack _ _ -> return () -- Don't check names if we are inside brackets.
-                             -- We don't want to reject cases like:
-                             -- \e -> [| static $(e) |]
-                             -- if $(e) turns out to produce a legal expression.
       Splice _ -> addErr $ sep
              [ text "static forms cannot be used in splices:"
              , nest 2 $ ppr e
              ]
-      _ -> do
-       let isTopLevelName n = isExternalName n || isWiredInName n
-       case nameSetElems $ filterNameSet
-                             (\n -> not (isTopLevelName n || isUnboundName n))
-                             fvExpr                                           of
-         [] -> return ()
-         fvNonGlobal -> addErr $ cat
-             [ text $ "Only identifiers of top-level bindings can "
-                      ++ "appear in the body of the static form:"
-             , nest 2 $ ppr e
-             , text "but the following identifiers were found instead:"
-             , nest 2 $ vcat $ map ppr fvNonGlobal
-             ]
-    return (HsStatic expr', fvExpr)
+      _ -> return ()
+    mod <- getModule
+    let fvExpr' = filterNameSet (nameIsLocalOrFrom mod) fvExpr
+    return (HsStatic fvExpr' expr', fvExpr)
 
 {-
 ************************************************************************
@@ -400,7 +397,7 @@ rnExpr other = pprPanic "rnExpr: unexpected expression" (ppr other)
         -- HsWrap
 
 hsHoleExpr :: HsExpr id
-hsHoleExpr = HsUnboundVar (mkVarOcc "_")
+hsHoleExpr = HsUnboundVar (TrueExprHole (mkVarOcc "_"))
 
 arrowFail :: HsExpr RdrName -> RnM (HsExpr Name, FreeVars)
 arrowFail e
@@ -448,7 +445,7 @@ rnCmdTop = wrapLocFstM rnCmdTop'
   rnCmdTop' (HsCmdTop cmd _ _ _)
    = do { (cmd', fvCmd) <- rnLCmd cmd
         ; let cmd_names = [arrAName, composeAName, firstAName] ++
-                          nameSetElems (methodNamesCmd (unLoc cmd'))
+                          nameSetElemsStable (methodNamesCmd (unLoc cmd'))
         -- Generate the rebindable syntax for the monad
         ; (cmd_names', cmd_fvs) <- lookupSyntaxNames cmd_names
 
@@ -640,6 +637,27 @@ rnArithSeq (FromThenTo expr1 expr2 expr3)
 ************************************************************************
 -}
 
+{-
+Note [Deterministic ApplicativeDo and RecursiveDo desugaring]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Both ApplicativeDo and RecursiveDo need to create tuples not
+present in the source text.
+
+For ApplicativeDo we create:
+
+  (a,b,c) <- (\c b a -> (a,b,c)) <$>
+
+For RecursiveDo we create:
+
+  mfix (\ ~(a,b,c) -> do ...; return (a',b',c'))
+
+The order of the components in those tuples needs to be stable
+across recompilations, otherwise they can get optimized differently
+and we end up with incompatible binaries.
+To get a stable order we use nameSetElemsStable.
+See Note [Deterministic UniqFM] to learn more about nondeterminism.
+-}
+
 -- | Rename some Stmts
 rnStmts :: Outputable (body RdrName)
         => HsStmtContext Name
@@ -821,8 +839,11 @@ rnStmt ctxt rnBody (L loc (RecStmt { recS_stmts = rec_stmts })) thing_inside
         -- (This set may not be empty, because we're in a recursive
         -- context.)
         ; rnRecStmtsAndThen rnBody rec_stmts   $ \ segs -> do
-        { let bndrs = nameSetElems $ foldr (unionNameSet . (\(ds,_,_,_) -> ds))
-                                            emptyNameSet segs
+        { let bndrs = nameSetElemsStable $
+                        foldr (unionNameSet . (\(ds,_,_,_) -> ds))
+                              emptyNameSet
+                              segs
+          -- See Note [Deterministic ApplicativeDo and RecursiveDo desugaring]
         ; (thing, fvs_later) <- thing_inside bndrs
         ; let (rec_stmts', fvs) = segmentRecStmts loc ctxt empty_rec_stmt segs fvs_later
         -- We aren't going to try to group RecStmts with
@@ -1179,8 +1200,11 @@ segmentRecStmts loc ctxt empty_rec_stmt segs fvs_later
   | otherwise
   = ([ L loc $
        empty_rec_stmt { recS_stmts = ss
-                      , recS_later_ids = nameSetElems (defs `intersectNameSet` fvs_later)
-                      , recS_rec_ids   = nameSetElems (defs `intersectNameSet` uses) }]
+                      , recS_later_ids = nameSetElemsStable
+                                           (defs `intersectNameSet` fvs_later)
+                      , recS_rec_ids   = nameSetElemsStable
+                                           (defs `intersectNameSet` uses) }]
+          -- See Note [Deterministic ApplicativeDo and RecursiveDo desugaring]
     , uses `plusFV` fvs_later)
 
   where
@@ -1305,8 +1329,9 @@ segsToStmts empty_rec_stmt ((defs, uses, fwds, ss) : segs) fvs_later
     new_stmt | non_rec   = head ss
              | otherwise = L (getLoc (head ss)) rec_stmt
     rec_stmt = empty_rec_stmt { recS_stmts     = ss
-                              , recS_later_ids = nameSetElems used_later
-                              , recS_rec_ids   = nameSetElems fwds }
+                              , recS_later_ids = nameSetElemsStable used_later
+                              , recS_rec_ids   = nameSetElemsStable fwds }
+          -- See Note [Deterministic ApplicativeDo and RecursiveDo desugaring]
     non_rec    = isSingleton ss && isEmptyNameSet fwds
     used_later = defs `intersectNameSet` later_uses
                                 -- The ones needed after the RecStmt
@@ -1435,25 +1460,120 @@ rearrangeForApplicativeDo
   -> RnM ([ExprLStmt Name], FreeVars)
 
 rearrangeForApplicativeDo _ [] = return ([], emptyNameSet)
+rearrangeForApplicativeDo _ [(one,_)] = return ([one], emptyNameSet)
 rearrangeForApplicativeDo ctxt stmts0 = do
-  (stmts', fvs) <- ado ctxt stmts [last] last_fvs
-  return (stmts', fvs)
-  where (stmts,(last,last_fvs)) = findLast stmts0
-        findLast [] = error "findLast"
-        findLast [last] = ([],last)
-        findLast (x:xs) = (x:rest,last) where (rest,last) = findLast xs
+  optimal_ado <- goptM Opt_OptimalApplicativeDo
+  let stmt_tree | optimal_ado = mkStmtTreeOptimal stmts
+                | otherwise = mkStmtTreeHeuristic stmts
+  stmtTreeToStmts ctxt stmt_tree [last] last_fvs
+  where
+    (stmts,(last,last_fvs)) = findLast stmts0
+    findLast [] = error "findLast"
+    findLast [last] = ([],last)
+    findLast (x:xs) = (x:rest,last) where (rest,last) = findLast xs
 
--- | The ApplicativeDo transformation.
-ado
+-- | A tree of statements using a mixture of applicative and bind constructs.
+data StmtTree a
+  = StmtTreeOne a
+  | StmtTreeBind (StmtTree a) (StmtTree a)
+  | StmtTreeApplicative [StmtTree a]
+
+flattenStmtTree :: StmtTree a -> [a]
+flattenStmtTree t = go t []
+ where
+  go (StmtTreeOne a) as = a : as
+  go (StmtTreeBind l r) as = go l (go r as)
+  go (StmtTreeApplicative ts) as = foldr go as ts
+
+type ExprStmtTree = StmtTree (ExprLStmt Name, FreeVars)
+type Cost = Int
+
+-- | Turn a sequence of statements into an ExprStmtTree using a
+-- heuristic algorithm.  /O(n^2)/
+mkStmtTreeHeuristic :: [(ExprLStmt Name, FreeVars)] -> ExprStmtTree
+mkStmtTreeHeuristic [one] = StmtTreeOne one
+mkStmtTreeHeuristic stmts =
+  case segments stmts of
+    [one] -> split one
+    segs -> StmtTreeApplicative (map split segs)
+ where
+  split [one] = StmtTreeOne one
+  split stmts =
+    StmtTreeBind (mkStmtTreeHeuristic before) (mkStmtTreeHeuristic after)
+    where (before, after) = splitSegment stmts
+
+-- | Turn a sequence of statements into an ExprStmtTree optimally,
+-- using dynamic programming.  /O(n^3)/
+mkStmtTreeOptimal :: [(ExprLStmt Name, FreeVars)] -> ExprStmtTree
+mkStmtTreeOptimal stmts =
+  ASSERT(not (null stmts)) -- the empty case is handled by the caller;
+                           -- we don't support empty StmtTrees.
+  fst (arr ! (0,n))
+  where
+    n = length stmts - 1
+    stmt_arr = listArray (0,n) stmts
+
+    -- lazy cache of optimal trees for subsequences of the input
+    arr :: Array (Int,Int) (ExprStmtTree, Cost)
+    arr = array ((0,0),(n,n))
+             [ ((lo,hi), tree lo hi)
+             | lo <- [0..n]
+             , hi <- [lo..n] ]
+
+    -- compute the optimal tree for the sequence [lo..hi]
+    tree lo hi
+      | hi == lo = (StmtTreeOne (stmt_arr ! lo), 1)
+      | otherwise =
+         case segments [ stmt_arr ! i | i <- [lo..hi] ] of
+           [] -> panic "mkStmtTree"
+           [_one] -> split lo hi
+           segs -> (StmtTreeApplicative trees, maximum costs)
+             where
+               bounds = scanl (\(_,hi) a -> (hi+1, hi + length a)) (0,lo-1) segs
+               (trees,costs) = unzip (map (uncurry split) (tail bounds))
+
+    -- find the best place to split the segment [lo..hi]
+    split :: Int -> Int -> (ExprStmtTree, Cost)
+    split lo hi
+      | hi == lo = (StmtTreeOne (stmt_arr ! lo), 1)
+      | otherwise = (StmtTreeBind before after, c1+c2)
+        where
+         -- As per the paper, for a sequence s1...sn, we want to find
+         -- the split with the minimum cost, where the cost is the
+         -- sum of the cost of the left and right subsequences.
+         --
+         -- As an optimisation (also in the paper) if the cost of
+         -- s1..s(n-1) is different from the cost of s2..sn, we know
+         -- that the optimal solution is the lower of the two.  Only
+         -- in the case that these two have the same cost do we need
+         -- to do the exhaustive search.
+         --
+         ((before,c1),(after,c2))
+           | hi - lo == 1
+           = ((StmtTreeOne (stmt_arr ! lo), 1),
+              (StmtTreeOne (stmt_arr ! hi), 1))
+           | left_cost < right_cost
+           = ((left,left_cost), (StmtTreeOne (stmt_arr ! hi), 1))
+           | otherwise -- left_cost > right_cost
+           = ((StmtTreeOne (stmt_arr ! lo), 1), (right,right_cost))
+           | otherwise = minimumBy (comparing cost) alternatives
+           where
+             (left, left_cost) = arr ! (lo,hi-1)
+             (right, right_cost) = arr ! (lo+1,hi)
+             cost ((_,c1),(_,c2)) = c1 + c2
+             alternatives = [ (arr ! (lo,k), arr ! (k+1,hi))
+                            | k <- [lo .. hi-1] ]
+
+
+-- | Turn the ExprStmtTree back into a sequence of statements, using
+-- ApplicativeStmt where necessary.
+stmtTreeToStmts
   :: HsStmtContext Name
-  -> [(ExprLStmt Name, FreeVars)] -- ^ input statements
+  -> ExprStmtTree
   -> [ExprLStmt Name]             -- ^ the "tail"
-  -> FreeVars                                -- ^ free variables of the tail
+  -> FreeVars                     -- ^ free variables of the tail
   -> RnM ( [ExprLStmt Name]       -- ( output statements,
-         , FreeVars )                        -- , things we needed
-                                             --    e.g. <$>, <*>, join )
-
-ado _ctxt []        tail _ = return (tail, emptyNameSet)
+         , FreeVars )             -- , things we needed
 
 -- If we have a single bind, and we can do it without a join, transform
 -- to an ApplicativeStmt.  This corresponds to the rule
@@ -1461,7 +1581,8 @@ ado _ctxt []        tail _ = return (tail, emptyNameSet)
 -- In the spec, but we do it here rather than in the desugarer,
 -- because we need the typechecker to typecheck the <$> form rather than
 -- the bind form, which would give rise to a Monad constraint.
-ado ctxt [(L _ (BindStmt pat rhs _ _ _),_)] tail _
+stmtTreeToStmts ctxt (StmtTreeOne (L _ (BindStmt pat rhs _ _ _),_))
+                tail _tail_fvs
   | isIrrefutableHsPat pat, (False,tail') <- needJoin tail
     -- WARNING: isIrrefutableHsPat on (HsPat Name) doesn't have enough info
     --          to know which types have only one constructor.  So only
@@ -1470,65 +1591,42 @@ ado ctxt [(L _ (BindStmt pat rhs _ _ _),_)] tail _
     --          isIrrefuatableHsPat
   = mkApplicativeStmt ctxt [ApplicativeArgOne pat rhs] False tail'
 
-ado _ctxt [(one,_)] tail _ = return (one:tail, emptyNameSet)
+stmtTreeToStmts _ctxt (StmtTreeOne (s,_)) tail _tail_fvs =
+  return (s : tail, emptyNameSet)
 
-ado ctxt stmts tail tail_fvs =
-  case segments stmts of  -- chop into segments
-    [] -> panic "ado"
-    [one] ->
-      -- one indivisible segment, divide it by adding a bind
-      adoSegment ctxt one tail tail_fvs
-    segs ->
-      -- multiple segments; recursively transform the segments, and
-      -- combine into an ApplicativeStmt
-      do { pairs <- mapM (adoSegmentArg ctxt tail_fvs) segs
-         ; let (stmts', fvss) = unzip pairs
-         ; let (need_join, tail') = needJoin tail
-         ; (stmts, fvs) <- mkApplicativeStmt ctxt stmts' need_join tail'
-         ; return (stmts, unionNameSets (fvs:fvss)) }
+stmtTreeToStmts ctxt (StmtTreeBind before after) tail tail_fvs = do
+  (stmts1, fvs1) <- stmtTreeToStmts ctxt after tail tail_fvs
+  let tail1_fvs = unionNameSets (tail_fvs : map snd (flattenStmtTree after))
+  (stmts2, fvs2) <- stmtTreeToStmts ctxt before stmts1 tail1_fvs
+  return (stmts2, fvs1 `plusFV` fvs2)
 
--- | Deal with an indivisible segment.  We pick a place to insert a
--- bind (it will actually be a join), and recursively transform the
--- two halves.
-adoSegment
-  :: HsStmtContext Name
-  -> [(ExprLStmt Name, FreeVars)]
-  -> [ExprLStmt Name]
-  -> FreeVars
-  -> RnM ( [ExprLStmt Name], FreeVars )
-adoSegment ctxt stmts tail tail_fvs
- = do {  -- choose somewhere to put a bind
-        let (before,after) = splitSegment stmts
-      ; (stmts1, fvs1) <- ado ctxt after tail tail_fvs
-      ; let tail1_fvs = unionNameSets (tail_fvs : map snd after)
-      ; (stmts2, fvs2) <- ado ctxt before stmts1 tail1_fvs
-      ; return (stmts2, fvs1 `plusFV` fvs2) }
+stmtTreeToStmts ctxt (StmtTreeApplicative trees) tail tail_fvs = do
+   pairs <- mapM (stmtTreeArg ctxt tail_fvs) trees
+   let (stmts', fvss) = unzip pairs
+   let (need_join, tail') = needJoin tail
+   (stmts, fvs) <- mkApplicativeStmt ctxt stmts' need_join tail'
+   return (stmts, unionNameSets (fvs:fvss))
+ where
+   stmtTreeArg _ctxt _tail_fvs (StmtTreeOne (L _ (BindStmt pat exp _ _ _), _)) =
+     return (ApplicativeArgOne pat exp, emptyFVs)
+   stmtTreeArg ctxt tail_fvs tree = do
+     let stmts = flattenStmtTree tree
+         pvarset = mkNameSet (concatMap (collectStmtBinders.unLoc.fst) stmts)
+                     `intersectNameSet` tail_fvs
+         pvars = nameSetElemsStable pvarset
+           -- See Note [Deterministic ApplicativeDo and RecursiveDo desugaring]
+         pat = mkBigLHsVarPatTup pvars
+         tup = mkBigLHsVarTup pvars
+     (stmts',fvs2) <- stmtTreeToStmts ctxt tree [] pvarset
+     (mb_ret, fvs1) <-
+        if | L _ ApplicativeStmt{} <- last stmts' ->
+             return (unLoc tup, emptyNameSet)
+           | otherwise -> do
+             (ret,fvs) <- lookupStmtNamePoly ctxt returnMName
+             return (HsApp (noLoc ret) tup, fvs)
+     return ( ApplicativeArgMany stmts' mb_ret pat
+            , fvs1 `plusFV` fvs2)
 
--- | Given a segment, make an ApplicativeArg.  Here we recursively
--- call adoSegment on the segment's contents to extract any further
--- available parallelism.
-adoSegmentArg
-  :: HsStmtContext Name
-  -> FreeVars
-  -> [(ExprLStmt Name, FreeVars)]
-  -> RnM (ApplicativeArg Name Name, FreeVars)
-adoSegmentArg _ _ [(L _ (BindStmt pat exp _ _ _),_)] =
-  return (ApplicativeArgOne pat exp, emptyFVs)
-adoSegmentArg ctxt tail_fvs stmts =
-  do { let pvarset = mkNameSet (concatMap (collectStmtBinders.unLoc.fst) stmts)
-                      `intersectNameSet` tail_fvs
-           pvars = nameSetElems pvarset
-           pat = mkBigLHsVarPatTup pvars
-           tup = mkBigLHsVarTup pvars
-     ; (stmts',fvs2) <- adoSegment ctxt stmts [] pvarset
-     ; (mb_ret, fvs1) <-
-          if | L _ ApplicativeStmt{} <- last stmts' ->
-               return (unLoc tup, emptyNameSet)
-             | otherwise -> do
-               (ret,fvs) <- lookupStmtNamePoly ctxt returnMName
-               return (HsApp (noLoc ret) tup, fvs)
-     ; return ( ApplicativeArgMany stmts' mb_ret pat
-              , fvs1 `plusFV` fvs2) }
 
 -- | Divide a sequence of statements into segments, where no segment
 -- depends on any variables defined by a statement in another segment.
@@ -1671,19 +1769,23 @@ needJoin [L loc (LastStmt e _ t)]
  | Just arg <- isReturnApp e = (False, [L loc (LastStmt arg True t)])
 needJoin stmts = (True, stmts)
 
--- | @Just e@, if the expression is @return e@, otherwise @Nothing@
+-- | @Just e@, if the expression is @return e@ or @return $ e@,
+-- otherwise @Nothing@
 isReturnApp :: LHsExpr Name -> Maybe (LHsExpr Name)
 isReturnApp (L _ (HsPar expr)) = isReturnApp expr
-isReturnApp (L _ (HsApp f arg))
-  | is_return f = Just arg
-  | otherwise = Nothing
+isReturnApp (L _ e) = case e of
+  OpApp l op _ r | is_return l, is_dollar op -> Just r
+  HsApp f arg    | is_return f               -> Just arg
+  _otherwise -> Nothing
  where
-  is_return (L _ (HsPar e)) = is_return e
-  is_return (L _ (HsVar (L _ r))) = r == returnMName || r == pureAName
+  is_var f (L _ (HsPar e)) = is_var f e
+  is_var f (L _ (HsAppType e _)) = is_var f e
+  is_var f (L _ (HsVar (L _ r))) = f r
        -- TODO: I don't know how to get this right for rebindable syntax
-  is_return _ = False
-isReturnApp _ = Nothing
+  is_var _ _ = False
 
+  is_return = is_var (\n -> n == returnMName || n == pureAName)
+  is_dollar = is_var (`hasKey` dollarIdKey)
 
 {-
 ************************************************************************

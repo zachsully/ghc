@@ -1,6 +1,22 @@
 # Changelog for [`base` package](http://hackage.haskell.org/package/base)
 
-## 4.9.0.0  *TBA*
+## next *TBA*
+  * Bundled with GHC *TBA*
+
+  * `Data.Type.Bool.Not` given a type family dependency (#12057).
+
+  * `Foreign.Ptr` now exports the constructors for `IntPtr` and `WordPtr`
+    (#11983)
+
+  * `Generic1`, as well as the associated datatypes and typeclasses in
+    `GHC.Generics`, are now poly-kinded (#10604)
+
+  * `New modules `Data.Bifoldable` and `Data.Bitraversable` (previously defined
+    in the `bifunctors` package) (#10448)
+
+  * `Data.Either` now provides `fromLeft` and `fromRight` (#12402)
+
+## 4.9.0.0  *May 2016*
 
   * Bundled with GHC 8.0
 
@@ -78,6 +94,9 @@
     `Data.Functor.Product`, and `Data.Functor.Sum` (previously provided by
     `transformers` package). (#11135)
 
+  * New instances for `Proxy`: `Eq1`, `Ord1`, `Show1`, `Read1`. All
+    of the classes are from `Data.Functor.Classes` (#11756).
+
   * New module `Control.Monad.Fail` providing new `MonadFail(fail)`
     class (#10751)
 
@@ -128,9 +147,9 @@
 
   * `Identity` now has `Semigroup` and `Monoid` instances
 
-  * `Identity` and `Const` now have `Bounded`, `Enum` and `Ix` instances
-
-  * `Identity` and `Const` now have `Storable` instances
+  * `Identity` and `Const` now have `Bits`, `Bounded`, `Enum`, `FiniteBits`,
+    `Floating`, `Fractional`, `Integral`, `IsString`, `Ix`, `Num`, `Real`,
+    `RealFloat`, `RealFrac` and `Storable` instances. (#11210, #11790)
 
   * `()` now has a `Storable` instance
 
@@ -147,6 +166,9 @@
     (previously orphans in `transformers`) (#10755)
 
   * `CallStack` now has an `IsList` instance
+
+  * The field `spInfoName` of `GHC.StaticPtr.StaticPtrInfo` has been removed.
+    The value is no longer available when constructing the `StaticPtr`.
 
 ### Generalizations
 
