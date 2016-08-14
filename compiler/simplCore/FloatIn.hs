@@ -192,7 +192,11 @@ fiExpr dflags to_drop ann_expr@(_,AnnApp {})
            (zipWith (fiExpr dflags) arg_drops ann_args)
   where
     (ann_fun, ann_args, ticks) = collectAnnArgsTicks tickishFloatable ann_expr
-    (extra_fvs, arg_fvs) = mapAccumL mk_arg_fvs emptyDVarSet ann_args
+    (extra_fvs0, fun_fvs)
+      | gopt Opt_ContextSubstitution dflags
+      , (_, AnnVar _) <- ann_fun = (freeVarsOf ann_fun, emptyDVarSet)
+      | otherwise                = (emptyDVarSet, freeVarsOf ann_fun)
+    (extra_fvs, arg_fvs) = mapAccumL mk_arg_fvs extra_fvs0 ann_args
 
     mk_arg_fvs :: FreeVarSet -> CoreExprWithFVs -> (FreeVarSet, FreeVarSet)
     mk_arg_fvs extra_fvs ann_arg
@@ -203,7 +207,7 @@ fiExpr dflags to_drop ann_expr@(_,AnnApp {})
 
     drop_here : extra_drop : fun_drop : arg_drops
       = sepBindsByDropPoint dflags False True -- Note [Join points]
-          (extra_fvs : freeVarsOf ann_fun : arg_fvs)
+          (extra_fvs : fun_fvs : arg_fvs)
           (freeVarsOfType ann_fun `unionDVarSet`
            mapUnionDVarSet freeVarsOfType ann_args)
           to_drop
