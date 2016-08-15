@@ -881,7 +881,7 @@ decideBindFloat init_env is_bot binding =
                -- float it at all.  It's a bit brutal, but unlifted bindings
                -- aren't expensive either
           || floatTopLvlOnly env && not (isTopLvl dest_lvl)
-          || (not (isTopLvl dest_lvl) && has_unfloatable_join_binding)
+          || (not (isTopLvl dest_lvl && can_float_join_to_top) && has_unfloatable_join_binding)
 
         is_profitable_float =
              (dest_lvl `ltMajLvl` le_ctxt_lvl init_env) -- Escapes a value lambda
@@ -891,6 +891,9 @@ decideBindFloat init_env is_bot binding =
           = case binding of
               AnnNonRec (TB bndr _) _ -> isUnliftedType (idType bndr)
               _                       -> False
+
+        can_float_join_to_top =
+          gopt Opt_AllowJoinsToFloatToTop (le_dflags init_env)
 
         has_unfloatable_join_binding =
           any (\(TB bndr _, rhs) -> isJoinId bndr && isFunction (deTagExpr (deAnnotate rhs))) pairs
