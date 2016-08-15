@@ -19,7 +19,6 @@ import Var
 import Type (Type, typeSize, seqType)
 import Id (idType, isJoinId)
 import CoreSeq (megaSeqIdInfo)
-import DynFlags
 
 data CoreStats = CS { cs_tm :: Int    -- Terms
                     , cs_ty :: Int    -- Types
@@ -30,18 +29,11 @@ data CoreStats = CS { cs_tm :: Int    -- Terms
 
 instance Outputable CoreStats where
  ppr (CS { cs_tm = i1, cs_ty = i2, cs_co = i3, cs_vb = i4, cs_jb = i5 })
-   = sdocWithDynFlags $ \dflags ->
-     braces (sep (punctuate comma ([text "terms:"     <+> intWithCommas i1,
-                                    text "types:"     <+> intWithCommas i2,
-                                    text "coercions:" <+> intWithCommas i3] ++
-                                    join_part dflags)))
-   where
-     join_part dflags
-       | gopt Opt_JoinPoints dflags
-       = [ text "joins:" <+> (intWithCommas i5 <> char '/' <>
-                              intWithCommas (i4 + i5)) ]
-       | otherwise
-       = []
+   = braces (sep [text "terms:"     <+> intWithCommas i1 <> comma,
+                  text "types:"     <+> intWithCommas i2 <> comma,
+                  text "coercions:" <+> intWithCommas i3 <> comma,
+                  text "joins:"     <+> intWithCommas i5 <> char '/' <>
+                                        intWithCommas (i4 + i5) ])
 
 plusCS :: CoreStats -> CoreStats -> CoreStats
 plusCS (CS { cs_tm = p1, cs_ty = q1, cs_co = r1, cs_vb = v1, cs_jb = j1 })
