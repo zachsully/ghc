@@ -23,6 +23,11 @@ test('simplrun010', [extra_run_opts('24 16 8 +RTS -M10m -RTS'),
                   , compile_and_run, [''])
 test('simplrun011', normal, compile_and_run, [''])
 
+test('join002',
+  [stats_num_field('bytes allocated', [(wordsize(64), 2000290792, 0)])],
+  compile_and_run,
+  [''])
+
 # Really we'd like to run T2486 too, to check that its
 # runtime has not gone up, but here I just compile it so that
 # the output of -ddump-rules can be compared

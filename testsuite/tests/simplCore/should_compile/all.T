@@ -32,6 +32,8 @@ test('spec001', when(fast(), skip), compile, [''])
 test('spec002', normal, compile, [''])
 test('spec003', normal, compile, [''])
 
+test('join001', normal, compile, ['-O'])
+
 test('rule1', normal, compile, [''])
 test('rule2', only_ways(['optasm']), compile, ['-dsuppress-uniques'])
 test('T7162', normal, compile, [''])
