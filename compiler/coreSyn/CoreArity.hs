@@ -933,7 +933,7 @@ etaInfoLocalBndr bndr eis
       = app ty eis
     skip_then_app n ty eis
       | Just (arg_bndr, res_ty) <- splitPiTy_maybe ty -- also applies to funcs
-      = mkForAllTy arg_bndr (skip_then_app (n-1) res_ty eis)
+      = mkPiTy arg_bndr (skip_then_app (n-1) res_ty eis)
       | otherwise = pprPanic "etaInfoLocalBndr" (pprBndr LetBind bndr)
 
     app ty []
