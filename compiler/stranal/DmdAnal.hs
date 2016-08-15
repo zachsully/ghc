@@ -267,7 +267,7 @@ dmdAnal' env dmd (Case scrut case_bndr ty alts)
 -- This is used for a non-recursive local let without manifest lambdas.
 -- This is the LetUp rule in the paper “Higher-Order Cardinality Analysis”.
 dmdAnal' env dmd (Let (NonRec id rhs) body)
-  | useLetUp rhs
+  | useLetUp id rhs
   , Nothing <- unpackTrivial rhs
       -- dmdAnalRhsLetDown treats trivial right hand sides specially
       -- so if we have a trival right hand side, fall through to that.
@@ -638,11 +638,13 @@ unpackTrivial _                       = Nothing
 -- down (rhs before body).
 --
 -- We use LetDown if there is a chance to get a useful strictness signature.
--- This is the case when there are manifest value lambdas.
-useLetUp :: CoreExpr -> Bool
-useLetUp (Lam v e) | isTyVar v = useLetUp e
-useLetUp (Lam _ _)             = False
-useLetUp _                     = True
+-- This is the case when there are manifest value lambdas or the binding is a
+-- join point (hence always acts like a function, not a value).
+useLetUp :: Var -> CoreExpr -> Bool
+useLetUp f _ | isId f, isJoinId f = False
+useLetUp f (Lam v e) | isTyVar v  = useLetUp f e
+useLetUp _ (Lam _ _)              = False
+useLetUp _ _                      = True
 
 
 {-
