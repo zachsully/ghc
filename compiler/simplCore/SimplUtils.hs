@@ -394,6 +394,8 @@ applyContToJoinType n cont ty
   = mkPiTy arg_bndr (applyContToJoinType (n-1) cont res_ty)
       -- No need to worry about foralls and scope; see decideSort in CoreJoins
       -- for why not
+  | otherwise
+  = pprPanic "applyContToJoinType" (ppr n <+> ppr ty $$ ppr cont)
 
 -------------------
 countArgs :: SimplCont -> Int
