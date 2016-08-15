@@ -807,7 +807,7 @@ simplEnvForGHCi dflags
   where
     rules_on      = gopt Opt_EnableRewriteRules   dflags
     eta_expand_on = gopt Opt_DoLambdaEtaExpansion dflags
-    context_subst  = gopt Opt_ContextSubstitution dflags
+    context_subst = gopt Opt_JoinPoints           dflags
    -- Do not do any inlining, in case we expose some unboxed
    -- tuple stuff that confuses the bytecode interpreter
 

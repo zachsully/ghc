@@ -1,8 +1,9 @@
 
 ==================== Tidy Core ====================
-Result size of Tidy Core = {terms: 32, types: 13, coercions: 0}
+Result size of Tidy Core
+  = {terms: 32, types: 13, coercions: 0, joins: 0/0}
 
--- RHS size: {terms: 2, types: 0, coercions: 0}
+-- RHS size: {terms: 2, types: 0, coercions: 0, joins: 0/0}
 T3717.$trModule2 :: GHC.Types.TrName
 [GblId,
  Caf=NoCafRefs,
@@ -11,7 +12,7 @@ T3717.$trModule2 :: GHC.Types.TrName
          WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 30 20}]
 T3717.$trModule2 = GHC.Types.TrNameS "main"#
 
--- RHS size: {terms: 2, types: 0, coercions: 0}
+-- RHS size: {terms: 2, types: 0, coercions: 0, joins: 0/0}
 T3717.$trModule1 :: GHC.Types.TrName
 [GblId,
  Caf=NoCafRefs,
@@ -20,7 +21,7 @@ T3717.$trModule1 :: GHC.Types.TrName
          WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 40 20}]
 T3717.$trModule1 = GHC.Types.TrNameS "T3717"#
 
--- RHS size: {terms: 3, types: 0, coercions: 0}
+-- RHS size: {terms: 3, types: 0, coercions: 0, joins: 0/0}
 T3717.$trModule :: GHC.Types.Module
 [GblId,
  Caf=NoCafRefs,
@@ -31,7 +32,7 @@ T3717.$trModule =
   GHC.Types.Module T3717.$trModule2 T3717.$trModule1
 
 Rec {
--- RHS size: {terms: 10, types: 2, coercions: 0}
+-- RHS size: {terms: 10, types: 2, coercions: 0, joins: 0/0}
 T3717.$wfoo [InlPrag=[0], Occ=LoopBreaker]
   :: GHC.Prim.Int# -> GHC.Prim.Int#
 [GblId, Arity=1, Caf=NoCafRefs, Str=<S,1*U>]
@@ -43,7 +44,7 @@ T3717.$wfoo =
     }
 end Rec }
 
--- RHS size: {terms: 10, types: 4, coercions: 0}
+-- RHS size: {terms: 10, types: 4, coercions: 0, joins: 0/0}
 foo [InlPrag=INLINE[0]] :: Int -> Int
 [GblId,
  Arity=1,

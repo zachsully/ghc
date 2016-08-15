@@ -441,8 +441,7 @@ data GeneralFlag
    | Opt_Loopification                  -- See Note [Self-recursive tail calls]
    | Opt_CprAnal
    | Opt_WorkerWrapper
-   | Opt_FloatJoinsOnlyToTop
-   | Opt_ContextSubstitution            -- Copy a join point's context into it
+   | Opt_JoinPoints                     -- Copy a join point's context into it
 
    | Opt_ProtectLastValArg
    | Opt_IgnoreRealWorld
@@ -3494,8 +3493,7 @@ fFlagsDeps = [
   flagSpec "version-macros"                   Opt_VersionMacros,
   flagSpec "worker-wrapper"                   Opt_WorkerWrapper,
   flagSpec "show-warning-groups"              Opt_ShowWarnGroups,
-  flagSpec "float-joins-only-to-top"          Opt_FloatJoinsOnlyToTop,
-  flagSpec "context-substitution"             Opt_ContextSubstitution,
+  flagSpec "join-points"                      Opt_JoinPoints,
   flagSpec "no-LNE"                           Opt_NoLNE,
 
   flagSpec "llf"                              Opt_LLF,
@@ -3745,6 +3743,7 @@ defaultFlags settings
       Opt_GhciHistory,
       Opt_GhciSandbox,
       Opt_HelpfulErrors,
+      Opt_JoinPoints,
       Opt_KeepHiFiles,
       Opt_KeepOFiles,
       Opt_OmitYields,

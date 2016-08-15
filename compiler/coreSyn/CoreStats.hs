@@ -37,7 +37,7 @@ instance Outputable CoreStats where
                                     join_part dflags)))
    where
      join_part dflags
-       | gopt Opt_ContextSubstitution dflags
+       | gopt Opt_JoinPoints dflags
        = [ text "joins:" <+> (intWithCommas i5 <> char '/' <>
                               intWithCommas (i4 + i5)) ]
        | otherwise

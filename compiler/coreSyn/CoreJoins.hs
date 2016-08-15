@@ -24,7 +24,7 @@ import Control.Monad
 
 findJoinsInPgm :: DynFlags -> CoreProgram -> CoreProgram
 findJoinsInPgm dflags pgm
-  | gopt Opt_ContextSubstitution dflags
+  | gopt Opt_JoinPoints dflags
   = map (\bind -> propagateBinderSorts $ initFJ (fjTopBind bind)) pgm
   | otherwise
   = pgm

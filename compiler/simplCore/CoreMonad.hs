@@ -215,8 +215,6 @@ data FloatOutSwitches = FloatOutSwitches {
                                    --            based on arity information.
                                    -- See Note [Floating over-saturated applications]
                                    -- in SetLevels
-  floatJoinsOnlyToTop :: Bool,     -- ^ True <=> preserve join points by not floating
-                                   --            them unless they go to the top
   floatToTopLevelOnly :: Bool,     -- ^ Allow floating to the top level only.
   finalPass_        :: Maybe FinalPassSwitches
   -- ^ Nothing <=> not the final pass, behave like normal

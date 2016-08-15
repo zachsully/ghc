@@ -156,8 +156,7 @@ getCoreToDo dflags
     eta_expand_on = gopt Opt_DoLambdaEtaExpansion         dflags
     ww_on         = gopt Opt_WorkerWrapper                dflags
     static_ptrs   = xopt LangExt.StaticPointers           dflags
-    joins_to_top_only = gopt Opt_FloatJoinsOnlyToTop      dflags
-    context_subst = gopt Opt_ContextSubstitution          dflags
+    join_points   = gopt Opt_JoinPoints                   dflags
 
     maybe_rule_check phase = runMaybe rule_check (CoreDoRuleCheck phase)
 
@@ -170,7 +169,7 @@ getCoreToDo dflags
                           , sm_eta_expand = eta_expand_on
                           , sm_inline     = True
                           , sm_case_case  = True
-                          , sm_context_subst  = context_subst }
+                          , sm_context_subst  = join_points }
 
     simpl_phase phase names iter
       = CoreDoPasses
@@ -239,7 +238,6 @@ getCoreToDo dflags
                                  floatOutLambdas   = Just 0,
                                  floatOutConstants = True,
                                  floatOutOverSatApps = False,
-                                 floatJoinsOnlyToTop = True,
                                  floatToTopLevelOnly = True,
                                  finalPass_          = Nothing },
          CoreDoSimplify max_iter
@@ -271,7 +269,6 @@ getCoreToDo dflags
                                  floatOutLambdas   = Just 0,
                                  floatOutConstants = True,
                                  floatOutOverSatApps = False,
-                                 floatJoinsOnlyToTop = joins_to_top_only,
                                  floatToTopLevelOnly = False,
                                  finalPass_        = Nothing },
                 -- Was: gentleFloatOutSwitches
@@ -325,7 +322,6 @@ getCoreToDo dflags
                                  floatOutLambdas     = floatLamArgs dflags,
                                  floatOutConstants   = True,
                                  floatOutOverSatApps = True,
-                                 floatJoinsOnlyToTop = gopt Opt_FloatJoinsOnlyToTop dflags,
                                  floatToTopLevelOnly = False,
                                  finalPass_        = Nothing},
                 -- nofib/spectral/hartel/wang doubles in speed if you
@@ -365,7 +361,6 @@ getCoreToDo dflags
               { floatOutLambdas             = nonrec
               , floatOutConstants           = False
               , floatOutOverSatApps         = True
-              , floatJoinsOnlyToTop         = joins_to_top_only
               , floatToTopLevelOnly         = False
               , finalPass_                  = Just fps
               }
