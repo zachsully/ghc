@@ -918,31 +918,24 @@ pushCoercion co eis = EtaCo co : eis
 etaInfoLocalBndr :: CoreBndr -> [EtaInfo] -> CoreBndr
 etaInfoLocalBndr bndr eis
   = case isJoinId_maybe bndr of
-      Just arity -> bndr `setIdType`      skip_then_app arity (idType bndr) eis
+      Just arity -> bndr `setIdType`      modifyJoinResTy arity (app eis) ty
                          `setIdArity`     idArity bndr     - n_val_args
                          `setIdCallArity` idCallArity bndr - n_val_args
       Nothing    -> bndr
   where
+    ty = idType bndr
     n_val_args = count is_val_var eis
     is_val_var (EtaVar v) = isId v
     is_val_var _          = False
 
-    -- | Skip n arguments in the type, then apply the given EtaInfos to the
-    -- return type.
-    skip_then_app 0 ty eis
-      = app ty eis
-    skip_then_app n ty eis
-      | Just (arg_bndr, res_ty) <- splitPiTy_maybe ty -- also applies to funcs
-      = mkPiTy arg_bndr (skip_then_app (n-1) res_ty eis)
-      | otherwise = pprPanic "etaInfoLocalBndr" (pprBndr LetBind bndr)
-
-    app ty []
+    -- | Apply the given EtaInfos to the result type of the join point.
+    app [] ty
       = ty
-    app ty (EtaVar v : eis)
-      | isId v    = app (funResultTy ty) eis
-      | otherwise = app (piResultTy ty (mkTyVarTy v)) eis
-    app _ty (EtaCo co : eis)
-      = app (pSnd (coercionKind co)) eis
+    app (EtaVar v : eis) ty
+      | isId v    = app eis (funResultTy ty)
+      | otherwise = app eis (piResultTy ty (mkTyVarTy v))
+    app (EtaCo co : eis) _ty
+      = app eis (pSnd (coercionKind co))
 
 --------------
 etaInfoAbs :: [EtaInfo] -> CoreExpr -> CoreExpr
