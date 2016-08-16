@@ -11,7 +11,8 @@
 -- | Arity and eta expansion
 module CoreArity (
         manifestArity, exprArity, typeArity, exprBotStrictness_maybe,
-        exprEtaExpandArity, findRhsArity, CheapFun, etaExpand
+        exprEtaExpandArity, findRhsArity, CheapFun, etaExpand,
+        etaExpandCountingTypes
     ) where
 
 #include "HsVersions.h"
@@ -24,6 +25,7 @@ import Demand
 import Var
 import VarEnv
 import Id
+import IdInfo   ( JoinArity )
 import Type
 import TyCon    ( initRecTc, checkRecTc )
 import Coercion
@@ -866,14 +868,28 @@ etaExpand :: Arity              -- ^ Result should have this number of value arg
 --
 -- It deals with coerces too, though they are now rare
 -- so perhaps the extra code isn't worth it
-
 etaExpand n orig_expr
+  = etaExpand' n False orig_expr
+
+-- | A version of 'etaExpand' that counts type arguments.
+etaExpandCountingTypes :: JoinArity -- ^ Result should have this number of args
+                       -> CoreExpr  -- ^ Expression to expand
+                       -> CoreExpr
+etaExpandCountingTypes n orig_expr
+  = etaExpand' n True orig_expr
+
+etaExpand' :: Int  -- Number of arguments (possibly counting types)
+           -> Bool -- True <=> type arguments count as arguments
+           -> CoreExpr
+           -> CoreExpr
+etaExpand' n count_ty_args orig_expr
   = go n orig_expr
   where
       -- Strip off existing lambdas and casts
       -- Note [Eta expansion and SCCs]
     go 0 expr = expr
-    go n (Lam v body) | isTyVar v = Lam v (go n     body)
+    go n (Lam v body) | not count_ty_args
+                      , isTyVar v = Lam v (go n     body)
                       | otherwise = Lam v (go (n-1) body)
     go n (Cast expr co)           = Cast (go n expr) co
     go n expr
@@ -881,7 +897,8 @@ etaExpand n orig_expr
         retick $ etaInfoAbs etas (etaInfoApp subst' sexpr etas)
       where
           in_scope = mkInScopeSet (exprFreeVars expr)
-          (in_scope', etas) = mkEtaWW n orig_expr in_scope (exprType expr)
+          orig_ty = exprType expr
+          (in_scope', etas) = mkEtaWW n count_ty_args orig_expr in_scope orig_ty
           subst' = mkEmptySubst in_scope'
 
           -- Find ticks behind type apps.
@@ -1024,17 +1041,20 @@ etaInfoAppRhs subst bndr expr eis
         join_body' = etaInfoApp subst' join_body eis
 
 --------------
-mkEtaWW :: Arity -> CoreExpr -> InScopeSet -> Type
+mkEtaWW :: Int -> Bool -> CoreExpr -> InScopeSet -> Type
         -> (InScopeSet, [EtaInfo])
         -- EtaInfo contains fresh variables,
         --   not free in the incoming CoreExpr
         -- Outgoing InScopeSet includes the EtaInfo vars
         --   and the original free vars
 
-mkEtaWW orig_n orig_expr in_scope orig_ty
+mkEtaWW orig_n count_ty_args orig_expr in_scope orig_ty
   = go orig_n empty_subst orig_ty []
   where
     empty_subst = mkEmptyTCvSubst in_scope
+
+    decrement_for_ty_arg n | count_ty_args = n-1
+                           | otherwise     = n
 
     go n subst ty eis       -- See Note [exprArity invariant]
        | n == 0
@@ -1043,7 +1063,7 @@ mkEtaWW orig_n orig_expr in_scope orig_ty
        | Just (tv,ty') <- splitForAllTy_maybe ty
        , let (subst', tv') = Type.substTyVarBndr subst tv
            -- Avoid free vars of the original expression
-       = go n subst' ty' (EtaVar tv' : eis)
+       = go (decrement_for_ty_arg n) subst' ty' (EtaVar tv' : eis)
 
        | Just (arg_ty, res_ty) <- splitFunTy_maybe ty
        , let (subst', eta_id') = freshEtaId n subst arg_ty
@@ -1068,7 +1088,6 @@ mkEtaWW orig_n orig_expr in_scope orig_ty
         -- playing fast and loose with types (Happy does this a lot).
         -- So we simply decline to eta-expand.  Otherwise we'd end up
         -- with an explicit lambda having a non-function type
-
 
 --------------
 -- Avoiding unnecessary substitution; use short-cutting versions

@@ -5,6 +5,7 @@ module CoreJoins (
 ) where
 
 import BasicTypes
+import CoreArity
 import CoreSyn
 import DynFlags
 import Id
@@ -140,19 +141,21 @@ fjLet rec_join_arities bind body
                        Just _       -> panic "vars_bind"
                        Nothing | isId bndr' -> zapJoinId bndr'
                                | otherwise  -> bndr'
+            rhs''  = case rec_join_arities of
+                       Just [arity] -> etaExpandCountingTypes arity rhs'
+                       Just _       -> panic "vars_bind"
+                       Nothing      -> rhs'
             ext_anal = case rec_join_arities of
                          Just [arity]
+                            | arity == lambdaCount rhs
                            -> bind_anal `combineJoinAnals` unf_anal
                                 `combineJoinAnals`
-                                combineRuleAnals NonRecursive arity rule_anals
-                         Just _
-                           -> panic "vars_bind/2"
-                         Nothing
-                           -> markAllVarsBad (bind_anal `combineJoinAnals` unf_anal)
+                                combineRuleAnals arity rule_anals
+                         _ -> markAllVarsBad (bind_anal `combineJoinAnals` unf_anal)
                                 `combineJoinAnals`
                                 markAllVarsBadInRuleAnals rule_anals
 
-        return (NonRec bndr'' rhs',
+        return (NonRec bndr'' rhs'',
                 emptyJoinAnal, -- analysis doesn't apply to binder itself
                 ext_anal, [binder])
 
@@ -167,7 +170,7 @@ fjLet rec_join_arities bind body
             <- mapAndUnzipM fjRhs rhss
           let
             combine rule_anals rhs
-              = combineRuleAnals Recursive (lambdaCount rhs) rule_anals
+              = combineRuleAnals (lambdaCount rhs) rule_anals
             final_rule_anals = zipWith combine rule_analss rhss
             anal = combineManyJoinAnals (final_rule_anals ++ unf_anals ++ rhs_anals)
             bndrs'' = case rec_join_arities of
@@ -232,11 +235,7 @@ fjUnfolding unf
 Note [Rules]
 ~~~~~~~~~~~~
 
-Right now, we do the obvious thing with rules, which is to treat each rule RHS
-as an alternate RHS for the binder. This is wrong, but should (!) only be wrong
-in the safe direction.
-
-The difficulty is with arity. Suppose we have:
+Things get fiddly with rules. Suppose we have:
 
   let j :: Int -> Int
       j y = 2 * y
@@ -245,7 +244,6 @@ The difficulty is with arity. Suppose we have:
       k x y = x + 2 * y
   in ...
 
-(By "arity" here we mean arity counting type args, as usual with join points.)
 Now suppose that both j and k appear only as saturated tail calls in the body.
 Thus we would like to make them both join points. The rule complicates matters,
 though, as its RHS has an unapplied occurrence of j. *However*, any application
@@ -254,8 +252,10 @@ results in a valid tail call:
 
   k 0 q ==> j q
 
-Detecting this situation seems difficult, however, so for the moment we sadly
-forbid j as a join point.
+What we do is we notice that the rule takes fewer arguments than the join arity
+of its function. We then simply add the difference to all the calls that occur
+in the RHS of the rule. Thus we count j as being called with 1 argument above,
+since k has arity 2 but the rule has only 1 argument.
 
 -}
 
@@ -324,9 +324,6 @@ type BadSet = IdSet
 emptyJoinAnal :: JoinAnal
 emptyJoinAnal = (emptyVarEnv, emptyVarSet)
 
-isEmptyJoinAnal :: JoinAnal -> Bool
-isEmptyJoinAnal (good, bad) = isEmptyVarEnv good && isEmptyVarSet bad
-
 oneGoodId :: Id -> JoinArity -> JoinAnal
 oneGoodId id arity = (unitVarEnv id (id, arity), emptyVarSet)
 
@@ -384,14 +381,13 @@ isAbsent (good, bad) id = not (id `elemVarEnv` good) &&
 
 type RuleAnal = (JoinArity, JoinAnal)
 
-combineRuleAnals :: RecFlag -> JoinArity -> [RuleAnal] -> JoinAnal
-combineRuleAnals is_rec join_arity anals
+combineRuleAnals :: JoinArity -> [RuleAnal] -> JoinAnal
+combineRuleAnals join_arity anals
   = combineManyJoinAnals (map convert anals)
   where
     convert (rule_arity, anal@(good, bad))
       | rule_arity == join_arity = anal
-      | is_rec == Recursive ||
-        rule_arity > join_arity  = markAllVarsBad anal
+      | rule_arity > join_arity  = markAllVarsBad anal
       | otherwise                = (good', bad)
       where
         good' = mapVarEnv adjust_arity good
@@ -497,7 +493,7 @@ decideSort rec_flag bind anal
   where
     decide (bndr, rhs)
       | Just arity <- findGoodId anal bndr
-      , arity == lambdaCount rhs -- TODO loosen restriction (carefully!)
+      , isNonRec rec_flag || arity == lambdaCount rhs
       , good_type arity emptyVarSet (idType bndr)
       = Just arity
       | isId bndr, isAbsent anal bndr
