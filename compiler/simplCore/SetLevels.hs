@@ -881,7 +881,8 @@ decideBindFloat init_env is_bot binding =
                -- float it at all.  It's a bit brutal, but unlifted bindings
                -- aren't expensive either
           || floatTopLvlOnly env && not (isTopLvl dest_lvl)
-          || (not (isTopLvl dest_lvl && can_float_join_to_top) && has_unfloatable_join_binding)
+          || (not (isTopLvl dest_lvl) && has_unfloatable_join_binding)
+               -- Note [When to ruin a join point]
 
         is_profitable_float =
              (dest_lvl `ltMajLvl` le_ctxt_lvl init_env) -- Escapes a value lambda
@@ -892,13 +893,8 @@ decideBindFloat init_env is_bot binding =
               AnnNonRec (TB bndr _) _ -> isUnliftedType (idType bndr)
               _                       -> False
 
-        can_float_join_to_top =
-          gopt Opt_AllowJoinsToFloatToTop (le_dflags init_env)
-
         has_unfloatable_join_binding =
           any (\(TB bndr _, rhs) -> isJoinId bndr && isFunction (deTagExpr (deAnnotate rhs))) pairs
-            -- We're fine with floating a nullary join point - it's no longer a
-            -- join point but it *is* now shared. Hence we consult isFunction.
 
     lateLambdaLift fps
       | all_funs || (fps_floatLNE0 fps && isLNE)
@@ -949,6 +945,24 @@ decideBindFloat init_env is_bot binding =
     isLNE = isJust join_arity
     is_OneShot e = case collectBinders $ deTagExpr $ deAnnotate e of
       (bs,_) -> all (\b -> isId b && isOneShotBndr b) bs
+
+{-
+Note [When to ruin a join point]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Generally, we protect join points zealously. However, there are two situations
+in which it can pay to promote a join point to a function:
+
+1. If the join point has no value arguments, then floating it outward will make
+   it a *thunk*, not a function, so we might get increased sharing.
+2. If we float the join point all the way to the top level, it still won't be
+   allocated, so the cost is much less.
+
+Refusing to lose a join point in either of these cases can be disastrous---for
+instance, allocation in imaginary/x2n1 *triples* because $w$s^ becomes too big
+to inline, which prevents Float In from making a particular binding strictly
+demanded.
+-}
 
 decideLateLambdaFloat ::
   LevelEnv ->

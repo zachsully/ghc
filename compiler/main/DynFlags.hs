@@ -442,8 +442,6 @@ data GeneralFlag
    | Opt_CprAnal
    | Opt_WorkerWrapper
    | Opt_JoinPoints                     -- Copy a join point's context into it
-   | Opt_AllowJoinsToFloatToTop         -- Floating a join point to the top turns it into a regular function,
-                                        -- but maybe it leaves behind something inlinably small
 
    | Opt_ProtectLastValArg
    | Opt_IgnoreRealWorld
@@ -3496,7 +3494,6 @@ fFlagsDeps = [
   flagSpec "worker-wrapper"                   Opt_WorkerWrapper,
   flagSpec "show-warning-groups"              Opt_ShowWarnGroups,
   flagSpec "join-points"                      Opt_JoinPoints,
-  flagSpec "allow-joins-to-float-to-top"      Opt_AllowJoinsToFloatToTop,
   flagSpec "no-LNE"                           Opt_NoLNE,
 
   flagSpec "llf"                              Opt_LLF,
