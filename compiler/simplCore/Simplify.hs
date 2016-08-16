@@ -1677,20 +1677,19 @@ simplRecJoinsE :: SimplEnv
 simplRecJoinsE env pairs body cont
   = do  { let bndrs = map fst pairs
         ; MASSERT(all isJoinId bndrs)
-        ; let bndrs1 = map adjust_bndr_type bndrs
-        ; env1 <- simplRecBndrs env bndrs1
+        ; let cont_dup_res_ty = resultTypeOfDupableCont (getMode env) bndrs cont
+        ; env1 <- simplRecJoinBndrs env cont_dup_res_ty bndrs
                 -- NB: bndrs' don't have unfoldings or rules
                 -- We add them as we go down
-        ; (env2, joins1, cont_dup, cont_nodup) <- prepareLetCont env1 bndrs1 cont
+        ; (env2, joins1, cont_dup, cont_nodup) <- prepareLetCont env1 bndrs cont
+        ; MASSERT2(cont_dup_res_ty `eqType` contResultType cont_dup,
+            ppr cont_dup_res_ty $$ blankLine $$
+            ppr cont $$ blankLine $$
+            ppr cont_dup $$ blankLine $$
+            ppr cont_nodup)
         ; (env3, joins2) <- simplRecJoinBind env2 cont_dup pairs
         ; (env4, expr) <- simplExprF env3 body cont_dup
         ; rebuild env4 (foldrOL Let expr (joins1 `snocOL` joins2)) cont_nodup }
-  where
-    adjust_bndr_type bndr
-      = bndr `setIdType` applyContToJoinType join_arity cont orig_ty
-      where
-        join_arity = idJoinArity bndr
-        orig_ty    = substTy env (idType bndr)
 
 {-
 ************************************************************************
@@ -2758,6 +2757,32 @@ prepareLetCont env bndrs cont
   | not (any isJoinId bndrs)             = return (env, nilOL, cont, mkBoringStop (contResultType cont))
   | not (sm_case_case (getMode env))     = return (env, nilOL, mkBoringStop (contHoleType cont), cont)
   | otherwise                            = mkDupableCont env cont
+
+resultTypeOfDupableCont :: SimplifierMode
+                        -> [InBndr]
+                        -> SimplCont
+                        -> OutType   -- INVARIANT: Result type of dupable cont
+                                     -- returned by prepareLetCont
+-- IMPORTANT: This must be kept in sync with mkDupableCont!
+resultTypeOfDupableCont mode bndrs cont
+  | not (any isJoinId bndrs)   = contResultType cont
+  | not (sm_case_case mode)    = contHoleType   cont
+  | otherwise                  = go cont
+  where
+    go cont | contIsDupable cont = contResultType cont
+    go (Stop {}) = panic "typeOfDupableCont" -- Handled by previous eqn
+    go (CastIt _  cont)     = go cont
+    go cont@(TickIt {})     = contHoleType cont
+    go cont@(StrictBind {}) = contHoleType cont
+    go (StrictArg _ _ cont) = go cont
+    go cont@(ApplyToTy  {}) = go (sc_cont cont)
+    go cont@(ApplyToVal {}) = go (sc_cont cont)
+    go cont@(Select { sc_bndr = case_bndr, sc_alts = [(_, bs, _rhs)] })
+      | all isDeadBinder bs  -- InIds
+        && not (isUnliftedType (idType case_bndr))
+        -- Note [Single-alternative-unlifted]
+      = contHoleType cont
+    go cont@(Select     {}) = go (sc_cont cont)
 
 {-
 Note [Bottom alternatives]
