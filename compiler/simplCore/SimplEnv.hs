@@ -27,7 +27,7 @@ module SimplEnv (
         SimplSR(..), mkContEx, substId, lookupRecBndr, refineFromInScope,
 
         -- * Simplifying 'Id' binders
-        simplNonRecBndr, simplRecBndrs, simplRecJoinBndrs,
+        simplNonRecBndr, simplNonRecJoinBndr, simplRecBndrs, simplRecJoinBndrs,
         simplBinder, simplBinders,
         substTy, substTyVar, getTCvSubst,
         substCo, substCoVar,
@@ -596,6 +596,15 @@ simplNonRecBndr :: SimplEnv -> InBndr -> SimplM (SimplEnv, OutBndr)
 -- A non-recursive let binder
 simplNonRecBndr env id
   = do  { let (env1, id1) = substIdBndr Nothing env id
+        ; seqId id1 `seq` return (env1, id1) }
+
+---------------
+simplNonRecJoinBndr :: SimplEnv -> OutType -> InBndr
+                    -> SimplM (SimplEnv, OutBndr)
+-- A non-recursive let binder for a join point; context being pushed inward may
+-- change the type
+simplNonRecJoinBndr env res_ty id
+  = do  { let (env1, id1) = substIdBndr (Just res_ty) env id
         ; seqId id1 `seq` return (env1, id1) }
 
 ---------------

@@ -1636,11 +1636,8 @@ simplNonRecJoinE env bndr (rhs, rhs_se) body cont
 
            | otherwise
            -> ASSERT( not (isTyVar bndr) )
-              do { let old_type = substTy env (idType bndr)
-                       new_type = applyContToJoinType (idJoinArity bndr) cont
-                                                      old_type
-                       bndr_w_new_type = bndr `setIdType` new_type
-                 ; (env1, bndr1) <- simplNonRecBndr env bndr_w_new_type
+              do { let cont_dup_res_ty = resultTypeOfDupableCont (getMode env) [bndr] cont
+                 ; (env1, bndr1) <- simplNonRecJoinBndr env cont_dup_res_ty bndr
                  ; (env2, bndr2) <- addBndrRules env1 bndr bndr1
                  ; (env3, joins1, cont_dup, cont_nodup) <- prepareLetCont env2 [bndr] cont
                  ; (env4, joins2) <- simplJoinBind env3 NotTopLevel NonRecursive cont_dup bndr bndr2 rhs rhs_se
