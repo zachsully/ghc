@@ -1640,6 +1640,11 @@ simplNonRecJoinE env bndr (rhs, rhs_se) body cont
                  ; (env1, bndr1) <- simplNonRecJoinBndr env cont_dup_res_ty bndr
                  ; (env2, bndr2) <- addBndrRules env1 bndr bndr1
                  ; (env3, joins1, cont_dup, cont_nodup) <- prepareLetCont env2 [bndr] cont
+                 ; MASSERT2(cont_dup_res_ty `eqType` contResultType cont_dup,
+                     ppr cont_dup_res_ty $$ blankLine $$
+                     ppr cont $$ blankLine $$
+                     ppr cont_dup $$ blankLine $$
+                     ppr cont_nodup)
                  ; (env4, joins2) <- simplJoinBind env3 NotTopLevel NonRecursive cont_dup bndr bndr2 rhs rhs_se
                  ; (env5, expr) <- simplExprF env4 body cont_dup
                  ; rebuild env5 (foldrOL Let expr (joins1 `appOL` joins2)) cont_nodup }
@@ -2718,17 +2723,8 @@ prepareCaseCont :: SimplEnv
 
 prepareCaseCont env alts cont
   | not (sm_case_case (getMode env)) = return (env, nilOL, mkBoringStop (contHoleType cont), cont)
-  | not (many_alts alts)             = return (env, nilOL, cont, mkBoringStop (contResultType cont))
+  | not (altsWouldDup alts)          = return (env, nilOL, cont, mkBoringStop (contResultType cont))
   | otherwise                        = mkDupableCont env cont
-  where
-    many_alts :: [InAlt] -> Bool  -- True iff strictly > 1 non-bottom alternative
-    many_alts []  = False         -- See Note [Bottom alternatives]
-    many_alts [_] = False
-    many_alts (alt:alts)
-      | is_bot_alt alt = many_alts alts
-      | otherwise      = not (all is_bot_alt alts)
-
-    is_bot_alt (_,_,rhs) = exprIsBottom rhs
 
 prepareLetCont :: SimplEnv
                -> [InBndr] -> SimplCont
@@ -2755,6 +2751,10 @@ prepareLetCont env bndrs cont
   | not (sm_case_case (getMode env))     = return (env, nilOL, mkBoringStop (contHoleType cont), cont)
   | otherwise                            = mkDupableCont env cont
 
+-- Predict the result type of the dupable cont returned by prepareLetCont (= the
+-- hole type of the non-dupable part). Ugly, but sadly necessary so that we can
+-- know what the new type of a recursive join point will be before we start
+-- simplifying it.
 resultTypeOfDupableCont :: SimplifierMode
                         -> [InBndr]
                         -> SimplCont
@@ -2779,7 +2779,19 @@ resultTypeOfDupableCont mode bndrs cont
         && not (isUnliftedType (idType case_bndr))
         -- Note [Single-alternative-unlifted]
       = contHoleType cont
-    go cont@(Select     {}) = go (sc_cont cont)
+    go (Select { sc_alts = alts, sc_cont = cont })
+      | not (sm_case_case mode) = contHoleType cont
+      | not (altsWouldDup alts) = contResultType cont
+      | otherwise               = go cont
+
+altsWouldDup :: [InAlt] -> Bool -- True iff strictly > 1 non-bottom alternative
+altsWouldDup []  = False        -- See Note [Bottom alternatives]
+altsWouldDup [_] = False
+altsWouldDup (alt:alts)
+  | is_bot_alt alt = altsWouldDup alts
+  | otherwise      = not (all is_bot_alt alts)
+  where
+    is_bot_alt (_,_,rhs) = exprIsBottom rhs
 
 {-
 Note [Bottom alternatives]
