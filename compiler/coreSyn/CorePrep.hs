@@ -395,9 +395,9 @@ cpeBind top_lvl env (NonRec bndr rhs)
   | otherwise
   = ASSERT(not (isTopLevel top_lvl))
     do { (_, bndr1) <- cpCloneBndr env bndr
-       ; let (env1, bndr2, rhs1) = addVoidParamIfNeeded env bndr1 rhs
+       ; let (bndr2, rhs1) = addVoidParamIfNeeded bndr1 rhs
        ; (bndr3, rhs2) <- cpeJoinPair env bndr2 rhs1
-       ; return (extendCorePrepEnv env1 bndr bndr3,
+       ; return (extendCorePrepEnv env bndr bndr3,
                  emptyFloats,
                  Just (Let (NonRec bndr3 rhs2))) }
 
@@ -414,20 +414,16 @@ cpeBind top_lvl env (Rec pairs)
                  Nothing) }
   | otherwise
   = do { (env', bndrs1) <- cpCloneBndrs env bndrs
-       ; let (env'', pairs1) = mapAccumL add_void_param env' (bndrs1 `zip` rhss)
-             (bndrs2, rhss1) = unzip pairs1
-       ; pairs2 <- zipWithM (cpeJoinPair env'') bndrs2 rhss1
+       ; let (bndrs2, rhss1) = unzip (zipWith addVoidParamIfNeeded bndrs1 rhss)
+       ; let rhs_env = extendCorePrepEnvList env' (bndrs `zip` bndrs2)
+       ; pairs1 <- zipWithM (cpeJoinPair rhs_env) bndrs2 rhss1
 
-       ; let bndrs2 = map fst pairs2
-       ; return (extendCorePrepEnvList env'' (bndrs `zip` bndrs2),
+       ; let bndrs3 = map fst pairs1
+       ; return (extendCorePrepEnvList env' (bndrs `zip` bndrs3),
                  emptyFloats,
-                 Just (Let (Rec pairs2))) }
+                 Just (Let (Rec pairs1))) }
   where
     (bndrs, rhss) = unzip pairs
-
-    add_void_param env (bndr, rhs)
-      = case addVoidParamIfNeeded env bndr rhs of
-          (env', bndr', rhs') -> (env', (bndr', rhs'))
 
         -- Flatten all the floats, and the currrent
         -- group into a single giant Rec
@@ -737,7 +733,7 @@ cpeApp env expr
 
         -- Now deal with the function
        ; case head of
-           Just (fn_id, depth) -> do { sat_app <- maybeSaturate env fn_id app depth
+           Just (fn_id, depth) -> do { sat_app <- maybeSaturate fn_id app depth
                                      ; return (floats, sat_app) }
            _other              -> return (floats, app) }
 
@@ -879,8 +875,8 @@ maybeSaturate deals with saturating primops and constructors
 The type is the type of the entire application
 -}
 
-maybeSaturate :: CorePrepEnv -> Id -> CpeApp -> Int -> UniqSM CpeRhs
-maybeSaturate env fn expr n_args
+maybeSaturate :: Id -> CpeApp -> Int -> UniqSM CpeRhs
+maybeSaturate fn expr n_args
   | Just DataToTagOp <- isPrimOpId_maybe fn     -- DataToTag must have an evaluated arg
                                                 -- A gruesome special case
   = saturateDataToTag sat_expr
@@ -888,7 +884,7 @@ maybeSaturate env fn expr n_args
   | hasNoBinding fn        -- There's no binding
   = return sat_expr
 
-  | addingVoidParam env fn
+  | isJoinId fn, n_args == 0
   = return (App expr (Var voidPrimId))
   
   | otherwise
@@ -1399,14 +1395,6 @@ lookupCorePrepEnv cpe id
 getMkIntegerId :: CorePrepEnv -> Id
 getMkIntegerId = cpe_mkIntegerId
 
-markAddingVoidParam :: CorePrepEnv -> Id -> CorePrepEnv
-markAddingVoidParam env id
-  = env { cpe_addingVoidParam = extendVarSet (cpe_addingVoidParam env) id }
-
-addingVoidParam :: CorePrepEnv -> Id -> Bool
-addingVoidParam env id
-  = id `elemVarEnv` cpe_addingVoidParam env
-
 ------------------------------------------------------------------------------
 -- Cloning binders
 -- ---------------------------------------------------------------------------
@@ -1509,17 +1497,15 @@ wrapTicks (Floats flag floats0) expr = (Floats flag floats1, expr')
 
 -- | Ensure that a join point's RHS takes at least one value parameter (as
 -- expected by codegen)
-addVoidParamIfNeeded :: CorePrepEnv
-                     -> CoreBndr      -- Original binder (must be join id)
+addVoidParamIfNeeded :: CoreBndr      -- Original binder (must be join id)
                      -> CoreExpr      -- Original RHS
-                     -> (CorePrepEnv, -- Env with id marked if adding
-                         CoreBndr,    -- New binder, possibly with new type
+                     -> (CoreBndr,    -- New binder, possibly with new type
                          CoreExpr)    -- New RHS
-addVoidParamIfNeeded env bndr expr
+addVoidParamIfNeeded bndr expr
   | all (not . isId) bndrs
-  = (env', bndr', expr')
+  = (bndr', expr')
   | otherwise
-  = (env, bndr, expr)
+  = (bndr, expr)
   where
     (bndrs, body)   = collectBinders expr
     Just join_arity = isJoinId_maybe bndr
@@ -1527,4 +1513,3 @@ addVoidParamIfNeeded env bndr expr
     expr' = mkCoreLams (bndrs ++ [voidArgId]) body
     bndr' = bndr `setIdType` exprType expr'
                  `asJoinId`  join_arity + 1
-    env'  = markAddingVoidParam env bndr'
