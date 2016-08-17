@@ -430,9 +430,10 @@ test('T9203',
 test('T9339',
      [stats_num_field('bytes allocated',
                       [ (wordsize(32),    40046844, 5)
-                      , (wordsize(64),    80050760, 5) ]),
+                      , (wordsize(64),       50728, 5) ]),
                       # w/o fusing last: 320005080
                       # 2014-07-22:       80050760
+                      # 2016-08-17:          50728
       only_ways(['normal'])],
      compile_and_run,
      ['-O2'])
