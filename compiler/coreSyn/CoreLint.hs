@@ -794,7 +794,8 @@ lintCoreApp var args
                   ; checkL (not bad) $ mkJoinOutOfScopeMsg var'
                   ; checkL (isJoinId_maybe var == Just join_arity) $
                       mkJoinBndrOccMismatchMsg var' var
-                  ; checkL (length args == join_arity) $
+                  ; n_ambient_args <- getAmbientArgs
+                  ; checkL (length args + n_ambient_args == join_arity) $
                       mkBadJoinCallMsg var' join_arity (length args) }
             Nothing ->
               do  { checkL (not (isJoinId var)) $
@@ -1256,7 +1257,13 @@ lintCoreRule fun fun_ty (Rule { ru_name = name, ru_bndrs = bndrs
                               , ru_args = args, ru_rhs = rhs })
   = lintBinders bndrs $ \ _ ->
     do { lhs_ty <- foldM lintCoreArg fun_ty args
-       ; rhs_ty <- markAllJoinsBadUnlessJoin fun $ lintCoreExpr rhs
+       ; let n_ambient_args | Just join_arity <- isJoinId_maybe fun
+                            = join_arity - length args
+                            | otherwise
+                            = 0
+       ; rhs_ty <- markAllJoinsBadUnlessJoin fun $
+                   withAmbientArgs n_ambient_args $
+                   lintCoreExpr rhs
        ; ensureEqTys lhs_ty rhs_ty $
          (rule_doc <+> vcat [ text "lhs type:" <+> ppr lhs_ty
                             , text "rhs type:" <+> ppr rhs_ty ])
@@ -1296,6 +1303,27 @@ we'll end up with
    RULE forall x y. f ($gw y) = $gw (x+1)
 This seems sufficiently obscure that there isn't enough payoff to
 try to trim the forall'd binder list.
+
+Note [Ambient args in rules]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A rule for a join point doesn't necessarily match all the join point's
+arguments. Since the join point always occurs in saturated calls, however, this
+is not a problem because the rule's RHS will only be put into contexts that
+supply enough arguments to maintain the saturation invariant. We just have to
+remember when checking the rule's RHS that any join points will actually be
+taking some extra arguments.
+
+CoreLint assumes that all rules for join points have the very simple forms
+created by Specialise and SpecConstr, such as:
+
+  $j @ Int $dEqInt = $s$j
+
+The RHS is just an application, not a case or a lambda or anything more
+interesting. Since all join points are local bindings and the user can only
+declare RULES on globals, it is safe (as of this writing!) to make this
+assumption and just suppose that all jumps (i.e. calls to join points) take
+some n extra arguments.
 -}
 
 {-
@@ -1646,6 +1674,7 @@ data LintEnv
                                      -- both Ids and TyVars
        , le_bad_joins :: IdSet       -- Join points that have left scope
        , le_dynflags :: DynFlags     -- DynamicFlags
+       , le_ambient_args :: Int      -- Number of arguments in context
        }
 
 data LintFlags
@@ -1759,7 +1788,8 @@ initL dflags flags m
       (_, errs) -> errs
   where
     env = LE { le_flags = flags, le_subst = emptyTCvSubst, le_loc = []
-             , le_dynflags = dflags, le_bad_joins = emptyVarSet }
+             , le_dynflags = dflags, le_bad_joins = emptyVarSet
+             , le_ambient_args = 0 }
 
 getLintFlags :: LintM LintFlags
 getLintFlags = LintM $ \ env errs -> (Just (le_flags env), errs)
@@ -1866,6 +1896,15 @@ markAllJoinsBadUnlessJoin :: Var -> LintM a -> LintM a
 markAllJoinsBadUnlessJoin bndr m
   | isJoinId bndr = m
   | otherwise     = markAllJoinsBad m
+
+withAmbientArgs :: Int -> LintM a -> LintM a
+withAmbientArgs n m
+  = LintM $ \ env errs ->
+      unLintM m (env { le_ambient_args = le_ambient_args env + n }) errs
+
+getAmbientArgs :: LintM Int
+getAmbientArgs
+  = LintM $ \ env errs -> (Just (le_ambient_args env), errs)
 
 getTCvSubst :: LintM TCvSubst
 getTCvSubst = LintM (\ env errs -> (Just (le_subst env), errs))
