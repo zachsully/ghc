@@ -104,7 +104,7 @@ import OccName          ( occNameString )
 import Type             ( isUnliftedType, Type, mkLamTypes
                         , tyCoVarsOfTypeDSet )
 import RepType          ( typePrimRep )
-import BasicTypes       ( Arity, RecFlag(..), isNonRec )
+import BasicTypes       ( Arity, RecFlag(..), isNonRec, isRec )
 import UniqSupply
 import Util
 import Outputable
@@ -803,7 +803,7 @@ lvlBind :: LevelEnv
 lvlBind env binding@(AnnNonRec bndr rhs)
   = case decideBindFloat env (exprIsBottom $ deTagExpr $ deAnnotate rhs) binding of
       Nothing -> do
-        { rhs' <- lvlExpr env rhs
+        { rhs' <- lvlRhs env NonRecursive bndr rhs
         ; let  bind_lvl        = incMinorLvl (le_ctxt_lvl env)
                (env', [bndr']) = substAndLvlBndrs NonRecursive env bind_lvl [bndr]
         ; return (NonRec bndr' rhs', env') }
@@ -825,7 +825,7 @@ lvlBind env binding@(AnnRec pairs)
       Nothing -> do -- decided to not float
         { let bind_lvl = incMinorLvl (le_ctxt_lvl env)
               (env', bndrs') = substAndLvlBndrs Recursive env bind_lvl bndrs
-        ; rhss' <- mapM (lvlExpr env') rhss
+        ; rhss' <- Control.Monad.zipWithM (lvlRhs env' Recursive) bndrs rhss
         ; return (Rec (bndrs' `zip` rhss'), env')
         }
 
@@ -847,6 +847,27 @@ lvlBind env binding@(AnnRec pairs)
         }
   where
     (bndrs, rhss) = unzip pairs
+
+-- Only used when NOT floating, since floating will promote the join point to a
+-- function (see Note [When to ruin a join point]).
+lvlRhs :: LevelEnv
+       -> RecFlag
+       -> TaggedBndr BSilt
+       -> CoreExprWithBoth
+       -> LvlM LevelledExpr
+lvlRhs env rec_flag (TB bndr _) expr
+  | Just join_arity <- isJoinId_maybe bndr
+  = do { let (bndrs, body)            = collectNAnnBndrs join_arity expr
+             new_lvl | isRec rec_flag = incMajorLvl (le_ctxt_lvl env)
+                     | otherwise      = incMinorLvl (le_ctxt_lvl env)
+               -- Non-recursive joins are one-shot; recursive joins are not
+             (env1, bndrs1)           = substBndrsSL NonRecursive env bndrs
+             (new_env, new_bndrs)     = lvlBndrs env1 new_lvl bndrs1
+       ; new_body <- lvlExpr new_env body
+       ; return (mkLams new_bndrs new_body) }
+
+lvlRhs env _ _ expr
+  = lvlExpr env expr
 
 decideBindFloat ::
   LevelEnv ->

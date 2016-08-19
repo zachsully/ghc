@@ -69,7 +69,7 @@ module CoreSyn (
         collectAnnArgs, collectAnnArgsTicks,
 
         -- ** Operations on annotations
-        deAnnotate, deAnnotate', deAnnAlt, collectAnnBndrs,
+        deAnnotate, deAnnotate', deAnnAlt, collectAnnBndrs, collectNAnnBndrs,
 
         -- * Orphanhood
         IsOrphan(..), isOrphan, notOrphan, chooseOrphanAnchor,
@@ -1670,7 +1670,7 @@ collectNBinders orig_n orig_expr
   where
     go 0 bs expr      = (reverse bs, expr)
     go n bs (Lam b e) = go (n-1) (b:bs) e
-    go _ bs _         = pprPanic "collectNBinders" $ int orig_n
+    go _ _  _         = pprPanic "collectNBinders" $ int orig_n
 
 -- | Takes a nested application expression and returns the the function
 -- being applied and the arguments to which it is applied
@@ -1826,3 +1826,12 @@ collectAnnBndrs e
   where
     collect bs (_, AnnLam b body) = collect (b:bs) body
     collect bs body               = (reverse bs, body)
+
+-- | As 'collectNBinders' but for 'AnnExpr' rather than 'Expr'
+collectNAnnBndrs :: Int -> AnnExpr bndr annot -> ([bndr], AnnExpr bndr annot)
+collectNAnnBndrs orig_n e
+  = collect orig_n [] e
+  where
+    collect 0 bs body               = (reverse bs, body)
+    collect n bs (_, AnnLam b body) = collect (n-1) (b:bs) body
+    collect _ _  _                  = pprPanic "collectNBinders" $ int orig_n
