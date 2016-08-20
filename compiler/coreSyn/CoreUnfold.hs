@@ -502,15 +502,13 @@ sizeExpr dflags bOMB_OUT_SIZE top_args expr
       | otherwise = size_up e
 
     size_up (Let (NonRec binder rhs) body)
-      = size_up rhs             `addSizeNSD`
-        size_up body            `addSizeN`
-        (if isUnliftedType (idType binder) then 0 else 10)
-                -- For the allocation
-                -- If the binder has an unlifted type there is no allocation
+      = size_up_rhs (binder, rhs) `addSizeNSD`
+        size_up body              `addSizeN`
+        size_up_bndr binder
 
     size_up (Let (Rec pairs) body)
-      = foldr (addSizeNSD . size_up . snd)
-              (size_up body `addSizeN` (10 * length pairs))     -- (length pairs) for the allocation
+      = foldr (addSizeNSD . size_up_rhs)
+              (size_up body `addSizeN` sum (map (size_up_bndr . fst) pairs))
               pairs
 
     size_up (Case e _ _ alts)
@@ -585,6 +583,16 @@ sizeExpr dflags bOMB_OUT_SIZE top_args expr
               | otherwise
                 = False
 
+    size_up_rhs (bndr, rhs)
+      | not cheap_joins
+      , Just join_arity <- isJoinId_maybe bndr
+      , (bndrs, body) <- collectNBinders join_arity rhs
+      , all isTyVar bndrs
+      = lamScrutDiscount dflags (size_up body `addSizeN` 10)
+          -- Pretend there's exactly one Void# argument; see Note [Cheap joins]
+      | otherwise
+      = size_up rhs
+
     ------------
     -- size_up_app is used when there's ONE OR MORE value args
     size_up_app (App fun arg) args voids
@@ -619,6 +627,20 @@ sizeExpr dflags bOMB_OUT_SIZE top_args expr
         -- IMPORATANT: *do* charge 1 for the alternative, else we
         -- find that giant case nests are treated as practically free
         -- A good example is Foreign.C.Error.errrnoToIOError
+
+    ------------
+    size_up_bndr bndr
+      |  isTyVar bndr
+      || isUnliftedType (idType bndr)
+      || isJoinId bndr && cheap_joins
+      = 0
+      | otherwise
+      = 10
+        -- For the allocation
+        -- If the binder has an unlifted type there is no allocation
+        -- Also, join points aren't allocated (see Note [Cheap joins])
+
+    cheap_joins = gopt Opt_CheapJoinPoints dflags
 
     ------------
         -- These addSize things have to be here because
@@ -685,6 +707,13 @@ callSize
  -> Int
 callSize n_val_args voids = 10 * (1 + n_val_args - voids)
 
+-- | The size of a join point invocation
+jumpSize
+ :: Int  -- ^ number of value args
+ -> Int  -- ^ number of value args that are void
+ -> Int
+jumpSize n_val_args voids = 10 * (n_val_args - voids)
+
 funSize :: DynFlags -> [Id] -> Id -> Int -> Int -> ExprSize
 -- Size for functions that are not constructors or primops
 -- Note [Function applications]
@@ -694,9 +723,14 @@ funSize dflags top_args fun n_val_args voids
   | otherwise = SizeIs size arg_discount res_discount
   where
     some_val_args = n_val_args > 0
+    cheap_joins = gopt Opt_CheapJoinPoints dflags
+    is_join = isJoinId fun
 
-    size | some_val_args = callSize n_val_args voids
-         | otherwise     = 0
+    size | cheap_joins, is_join = jumpSize n_val_args voids
+         | not cheap_joins, is_join, not some_val_args
+                                = callSize 1 0 -- Note [Cheap joins]
+         | not some_val_args    = 0
+         | otherwise            = callSize n_val_args voids
         -- The 1+ is for the function itself
         -- Add 1 for each non-trivial arg;
         -- the allocation cost, as in let(rec)
@@ -794,6 +828,34 @@ There's no point in doing so -- any optimisations will see the S#
 through n's unfolding.  Nor will a big size inhibit unfoldings functions
 that mention a literal Integer, because the float-out pass will float
 all those constants to top level.
+
+Note [Cheap joins]
+~~~~~~~~~~~~~~~~~~
+One might hope that knowing which functions are join points would make for
+better inlining decisions, since join points are not allocated and calling them
+is cheaper. Empirically, this does not appear to pan out; the biggest impact is
+a 7.5% increase in allocations in boyer2 due to a mishap stemming from an
+inlining decision that shouldn't be made.
+
+Nonetheless, for further experimentation, the -dcheap-join-points flag is
+available. It sizes join point invocations as smaller by 10 units, and counts
+the let of a join point as free (since they're never allocated).
+
+Having -dno-cheap-join-points on actually has one further effect: It sizes
+things as if -dno-join-points were on. In particular, every
+function-as-join-point created in the pre-join-point regime took at least one
+value parameter, namely a Void# if nothing else. Thus a nullary join point
+invocation
+
+  $j
+
+would previously have beed
+
+  $j void#,
+
+which has size 10. Thus nullary join point invocations have size 10, not 0, when
+-dno-cheap-join-points is on, even though they appear to be bare variables
+(which normally have size 0).
 -}
 
 primOpSize :: PrimOp -> Int -> ExprSize
