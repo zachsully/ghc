@@ -13,6 +13,7 @@ import CoreUtils        ( exprType, exprIsHNF )
 import Var
 import Id
 import IdInfo
+import Type
 import UniqSupply
 import BasicTypes
 import DynFlags
@@ -359,6 +360,7 @@ tryWW dflags fam_envs is_rec fn_id rhs
 
     is_fun    = notNull wrap_dmds
     is_thunk  = not is_fun && not (exprIsHNF rhs) && not (isJoinId fn_id)
+                           && not (isUnliftedType (idType fn_id))
 
 {-
 Note [Zapping DmdEnv after Demand Analyzer]
