@@ -31,6 +31,10 @@ test('join003',
   [stats_num_field('bytes allocated', [(wordsize(64), 2000290792, 0)])],
   compile_and_run,
   [''])
+test('join004',
+  [stats_num_field('bytes allocated', [(wordsize(64), 48146720, 5)])],
+  compile_and_run,
+  [''])
 
 # Really we'd like to run T2486 too, to check that its
 # runtime has not gone up, but here I just compile it so that
