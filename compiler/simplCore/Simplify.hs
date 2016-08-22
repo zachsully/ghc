@@ -215,18 +215,14 @@ tail-called and we want to maintain this invariant, we can do this:
          A -> j 1
          B -> j 2
          C -> f 3]
-    
+
     -->
-  
+
   let <join> j = E[e]
   in case ... of
        A -> j 1
        B -> j 2
        C -> E[f 3]
-
-The flag to enable this is called -fcontext-substitution because, through the
-lens of the sequent calculus (or CPS), this is precisely a substitution for a
-continuation variable ("join point" being a funny spelling of "continuation").
 
 As is evident from the example, there are two components to this behavior:
 
