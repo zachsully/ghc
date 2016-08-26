@@ -787,7 +787,10 @@ lintCoreApp var args
             _ -> return ()
 
         ; checkDeadIdOcc var
+        ; ty   <- applySubstTy (idType var)
         ; var' <- lookupIdInScope var
+        ; let ty' = idType var'
+        ; ensureEqTys ty ty' $ mkBndrOccTypeMismatchMsg var' var ty' ty
         ; case isJoinId_maybe var' of
             Just join_arity ->
               do  { bad <- isBadJoin var'
@@ -2234,6 +2237,14 @@ mkJoinBndrOccMismatchMsg bndr var
                                         _        -> text "not a join id"
       where
         details = idDetails v
+
+mkBndrOccTypeMismatchMsg :: Var -> Var -> OutType -> OutType -> SDoc
+mkBndrOccTypeMismatchMsg bndr var bndr_ty var_ty
+  = vcat [ text "Mismatch in type between binder and occurrence"
+         , text "Var:" <+> ppr bndr
+         , text "Binder type:" <+> ppr bndr_ty
+         , text "Occurrence type:" <+> ppr var_ty
+         , text "  Before subst:" <+> ppr (idType var) ]
 
 pprLeftOrRight :: LeftOrRight -> MsgDoc
 pprLeftOrRight CLeft  = text "left"

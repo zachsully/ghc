@@ -884,7 +884,7 @@ maybeSaturate fn expr n_args
   | hasNoBinding fn        -- There's no binding
   = return sat_expr
 
-  | isJoinId fn, n_args == 0
+  | Just 1 <- isJoinId_maybe fn, n_args == 0 -- Adding void parameter
   = return (App expr (Var voidPrimId))
   
   | otherwise
