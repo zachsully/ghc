@@ -1499,10 +1499,11 @@ cloneLetVars is_rec
           env@(LE { le_subst = subst, le_lvl_env = lvl_env, le_env = id_env })
           dest_lvl vs
   = do { us <- getUniqueSupplyM
-       ; let (subst', vs1) = case is_rec of
-                               NonRecursive -> cloneBndrs      subst us (map unTag vs)
-                               Recursive    -> cloneRecIdBndrs subst us (map unTag vs)
-             vs2  = map zap_demand_info vs1  -- See Note [Zapping the demand info]
+       ; let vs1  = map (zap_demand_info . unTag) vs
+                      -- See Note [Zapping the demand info]
+             (subst', vs2) = case is_rec of
+                               NonRecursive -> cloneBndrs      subst us vs1
+                               Recursive    -> cloneRecIdBndrs subst us vs1
              prs  = vs `zip` vs2
              env' = env { le_lvl_env = addLvls dest_lvl lvl_env vs2
                         , le_subst   = subst'
