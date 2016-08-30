@@ -303,7 +303,9 @@ instance MonadFix FJM where
 withCandidatesFJ :: [Id] -> FJM a -> FJM a
 withCandidatesFJ ids expr
    =    FJM $   \env
-   -> unFJM expr (extendVarSetList env ids)
+   -> unFJM expr (extendVarSetList env (filter is_candidate ids))
+   where
+     is_candidate id = isId id && not (isJoinId id)
 
 withoutCandidatesFJ :: [Id] -> FJM a -> FJM a
 withoutCandidatesFJ ids expr
@@ -492,11 +494,15 @@ decideSort rec_flag bind anal
   = sequence (map decide (flattenBinds [bind]))
   where
     decide (bndr, rhs)
+      | isTyVar bndr
+      = Nothing
+      | Just arity <- isJoinId_maybe bndr
+      = Just arity -- Already a join id (won't be in analysis anyway)
       | Just arity <- findGoodId anal bndr
       , isNonRec rec_flag || arity == lambdaCount rhs
       , good_type arity emptyVarSet (idType bndr)
       = Just arity
-      | isId bndr, isAbsent anal bndr
+      | isAbsent anal bndr
       = isJoinId_maybe bndr -- Dead binder; no need to mess with it
       | otherwise
       = Nothing
