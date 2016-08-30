@@ -920,10 +920,12 @@ instance Outputable EtaInfo where
 
 pushCoercion :: Coercion -> [EtaInfo] -> [EtaInfo]
 pushCoercion co1 (EtaCo co2 : eis)
-  | isReflCo co = eis
+  | redundant   = eis
   | otherwise   = EtaCo co : eis
   where
     co = co1 `mkTransCo` co2
+    redundant = isReflCo co || from_ty `eqType` to_ty
+    Pair from_ty to_ty = coercionKind co
 
 pushCoercion co eis = EtaCo co : eis
 
