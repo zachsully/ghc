@@ -432,14 +432,16 @@ lvlCase env scrut_fvs scrut' case_bndr ty alts
        ; let rhs_env = extendCaseBndrEnv env1 case_bndr scrut'
        ; body' <- lvlMFE True rhs_env body
        ; let alt' = (con, [TB b (StayPut dest_lvl) | b <- bs'], body')
-       ; return (Case scrut' (TB case_bndr' (FloatMe dest_lvl)) ty [alt']) }
+       ; return (Case scrut' (TB case_bndr' (FloatMe dest_lvl)) ty' [alt']) }
 
   | otherwise     -- Stays put
   = do { let (alts_env1, [case_bndr']) = substAndLvlBndrs NonRecursive env incd_lvl [case_bndr]
              alts_env = extendCaseBndrEnv alts_env1 case_bndr scrut'
        ; alts' <- mapM (lvl_alt alts_env) alts
-       ; return (Case scrut' case_bndr' ty alts') }
+       ; return (Case scrut' case_bndr' ty' alts') }
   where
+    ty' = substTy (le_subst env) ty
+
     incd_lvl = incMinorLvl (le_ctxt_lvl env)
     dest_lvl = maxFvLevel (const True) env scrut_fvs
             -- Don't abstact over type variables, hence const True
