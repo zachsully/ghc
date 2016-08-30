@@ -935,11 +935,11 @@ pushCoercion co eis = EtaCo co : eis
 -- change. (Its join arity will not, since eta-expansion does not affect the
 -- *occurrences* of join points.)
 etaInfoLocalBndr :: CoreBndr -> [EtaInfo] -> CoreBndr
-etaInfoLocalBndr bndr eis
+etaInfoLocalBndr bndr eis@top_eis
   = case isJoinId_maybe bndr of
       Just arity -> bndr `setIdType`      modifyJoinResTy arity (app eis) ty
-                         `setIdArity`     idArity bndr     - n_val_args
-                         `setIdCallArity` idCallArity bndr - n_val_args
+                         `setIdArity`     max 0 (idArity bndr     - n_val_args)
+                         `setIdCallArity` max 0 (idCallArity bndr - n_val_args)
       Nothing    -> bndr
   where
     ty = idType bndr
