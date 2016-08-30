@@ -953,8 +953,11 @@ etaInfoLocalBndr bndr eis@top_eis
     app (EtaVar v : eis) ty
       | isId v    = app eis (funResultTy ty)
       | otherwise = app eis (piResultTy ty (mkTyVarTy v))
-    app (EtaCo co : eis) _ty
-      = app eis (pSnd (coercionKind co))
+    app (EtaCo co : eis) ty
+      = ASSERT(from_ty `eqType` ty)
+        app eis to_ty
+      where
+        Pair from_ty to_ty = coercionKind co
 
 --------------
 etaInfoAbs :: [EtaInfo] -> CoreExpr -> CoreExpr
@@ -1012,11 +1015,11 @@ etaInfoApp subst e eis
 --------------
 etaInfoAppBind :: Subst -> CoreBind -> [EtaInfo] -> (Subst, CoreBind)
 etaInfoAppBind subst (NonRec bndr rhs) eis
-  = (subst', NonRec bndr'' rhs')
+  = (subst', NonRec bndr' rhs')
   where
-    (subst', bndr') = substBndr subst bndr
-    rhs'            = etaInfoAppRhs subst' bndr' rhs eis
-    bndr''          = etaInfoLocalBndr bndr' eis
+    bndr_w_new_type = etaInfoLocalBndr bndr eis
+    (subst', bndr') = substBndr subst bndr_w_new_type
+    rhs'            = etaInfoAppRhs subst bndr' rhs eis
 etaInfoAppBind subst (Rec pairs) eis
   = (subst', Rec (bndrs' `zip` rhss'))
   where
@@ -1092,10 +1095,12 @@ mkEtaWW orig_n count_ty_args orig_expr in_scope orig_ty
         -- with an explicit lambda having a non-function type
 
 --------------
--- Avoiding unnecessary substitution; use short-cutting versions
+-- Don't use short-cutting substitution - we may be changing the types of join
+-- points, so applying the in-scope set is necessary
+-- TODO Check if we actually *are* changing any join points' types
 
 subst_expr :: Subst -> CoreExpr -> CoreExpr
-subst_expr = substExprSC (text "CoreArity:substExpr")
+subst_expr = substExpr (text "CoreArity:substExpr")
 
 
 --------------
