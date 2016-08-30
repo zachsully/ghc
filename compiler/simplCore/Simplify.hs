@@ -32,6 +32,7 @@ import CoreMonad        ( Tick(..), SimplifierMode(..) )
 import CoreSyn
 import Demand           ( StrictSig(..), dmdTypeDepth, isStrictDmd )
 import PprCore          ( pprCoreExpr )
+import CoreArity
 import CoreUnfold
 import CoreUtils
 --import PrimOp           ( tagToEnumKey ) -- temporalily commented out. See #8326
@@ -864,15 +865,13 @@ completeJoinBind :: SimplEnv
 --      * by extending the substitution (e.g. let x = y in ...)
 --      * or by returning the bind adding to the floats in the envt
 --
-completeJoinBind env top_lvl is_rec cont old_bndr new_bndr new_rhs
+completeJoinBind env top_lvl is_rec cont old_bndr new_bndr final_rhs
  = ASSERT( isJoinId new_bndr )
    do { let old_info = idInfo old_bndr
             old_unf  = unfoldingInfo old_info
             occ_info = occInfo old_info
 
-        -- Do eta-expansion on the RHS of the binding
-        -- See Note [Eta-expanding at let bindings] in SimplUtils
-      ; (new_arity, final_rhs) <- tryEtaExpandRhs env is_rec new_bndr new_rhs
+      ; let new_arity = exprArity final_rhs -- Note [Don't eta-expand join points]
 
         -- Simplify the unfolding
       ; new_unfolding <- simplLetUnfolding env top_lvl (Just cont) old_bndr final_rhs old_unf
@@ -1021,6 +1020,44 @@ After inlining f at some of its call sites the original binding may
 (for example) be no longer strictly demanded.
 The solution here is a bit ad hoc...
 
+Note [Don't eta-expand join points]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Similarly to CPR (see Note [Don't CPR join points] in WorkWrap), a join point
+stands well to gain from its outer binding's eta-expansion, and eta-expanding a
+join point is fraught with issues like how to deal with a cast:
+
+    let join $j1 :: IO ()
+             $j1 = ...
+             $j2 :: Int -> IO ()
+             $j2 n = if n > 0 then $j1
+                              else ...
+
+    =>
+
+    let join $j1 :: IO ()
+             $j1 = (\eta -> ...)
+                     `cast` N:IO :: State# RealWorld -> (# State# RealWorld, ())
+                                 ~  IO ()
+             $j2 :: Int -> IO ()
+             $j2 n = (\eta -> if n > 0 then $j1
+                                       else ...)
+                     `cast` N:IO :: State# RealWorld -> (# State# RealWorld, ())
+                                 ~  IO ()
+
+The cast here can't be pushed inside the lambda (since it's not casting to a
+function type), so the lambda has to stay, but it can't because it contains a
+reference to a join point. In fact, $j2 can't be eta-expanded at all. Rather than
+try and detect this situation (and whatever other situations crop up!), we don't
+bother; again, any surrounding eta-expansion will improve these join points
+anyway, since an outer cast can *always* be pushed inside. By the time CorePrep
+comes around, the code is very likely to look more like this:
+
+    let join $j1 :: State# RealWorld -> (# State# RealWorld, ())
+             $j1 = (...) eta
+             $j2 :: Int -> State# RealWorld -> (# State# RealWorld, ())
+             $j2 = if n > 0 then $j1
+                            else (...) eta
 
 ************************************************************************
 *                                                                      *
