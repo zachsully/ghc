@@ -24,7 +24,7 @@ import CoreUtils        ( exprIsDupable, exprIsExpandable,
                           exprOkForSideEffects, mkTicks, isJoinBind )
 import CoreFVs
 import CoreJoins
-import Id               ( isJoinId, isOneShotBndr, idType )
+import Id               ( isJoinId, isJoinId_maybe, isOneShotBndr, idType )
 import Var
 import Type             ( isUnliftedType )
 import VarSet
@@ -375,7 +375,7 @@ fiExpr dflags to_drop (_,AnnLet (AnnNonRec id rhs) body)
                   shared_binds                          -- the bindings used both in rhs and body
 
         -- Push rhs_binds into the right hand side of the binding
-    rhs'     = fiExpr dflags rhs_binds rhs
+    rhs'     = fiRhs dflags rhs_binds id rhs
     rhs_fvs' = rhs_fvs `unionDVarSet` floatedBindsFVs rhs_binds `unionDVarSet` rule_fvs
                         -- Don't forget the rule_fvs; the binding mentions them!
 
@@ -415,7 +415,7 @@ fiExpr dflags to_drop (_,AnnLet (AnnRec bindings) body)
             -> [(Id, CoreExpr)]
 
     fi_bind to_drops pairs
-      = [ (binder, fiExpr dflags to_drop rhs)
+      = [ (binder, fiRhs dflags to_drop binder rhs)
         | ((binder, rhs), to_drop) <- zipEqual "fi_bind" pairs to_drops ]
 
 {-
@@ -481,6 +481,14 @@ fiExpr dflags to_drop (_, AnnCase scrut case_bndr ty alts)
                                 -- to get free vars of alt
 
     fi_alt to_drop (con, args, rhs) = (con, args, fiExpr dflags to_drop rhs)
+
+fiRhs :: DynFlags -> FloatInBinds -> CoreBndr -> CoreExprWithFVs -> CoreExpr
+fiRhs dflags to_drop bndr rhs
+  | Just join_arity <- isJoinId_maybe bndr
+  , let (bndrs, body) = collectNAnnBndrs join_arity rhs
+  = mkLams bndrs (fiExpr dflags to_drop body)
+  | otherwise
+  = fiExpr dflags to_drop rhs
 
 okToFloatInside :: [Var] -> Bool
 okToFloatInside bndrs = all ok bndrs
