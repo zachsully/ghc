@@ -573,7 +573,8 @@ isDictId id = isDictTy (idType id)
 -}
 
 asJoinId :: Id -> JoinArity -> JoinId
-asJoinId id arity = ASSERT(isLocalId id)
+asJoinId id arity = WARN(not (isLocalId id),
+                         text "global id being marked as join var:" <+> ppr id)
                     WARN(not (is_vanilla_or_join id),
                          ppr id <+> pprIdDetails (idDetails id))
                     id `setIdDetails` JoinId arity
