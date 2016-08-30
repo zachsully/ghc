@@ -395,9 +395,9 @@ cpeBind top_lvl env (NonRec bndr rhs)
   | otherwise
   = ASSERT(not (isTopLevel top_lvl))
     do { (_, bndr1) <- cpCloneBndr env bndr
-       ; let (bndr2, rhs1) = addVoidParamIfNeeded bndr1 rhs
+       ; let (bndr2, rhs1, changed) = addVoidParamIfNeeded bndr1 rhs
        ; (bndr3, rhs2) <- cpeJoinPair env bndr2 rhs1
-       ; return (extendCorePrepEnv env bndr bndr3,
+       ; return (extendCorePrepEnvAddingVoidParam env bndr bndr3 changed,
                  emptyFloats,
                  Just (Let (NonRec bndr3 rhs2))) }
 
@@ -414,12 +414,12 @@ cpeBind top_lvl env (Rec pairs)
                  Nothing) }
   | otherwise
   = do { (env', bndrs1) <- cpCloneBndrs env bndrs
-       ; let (bndrs2, rhss1) = unzip (zipWith addVoidParamIfNeeded bndrs1 rhss)
-       ; let rhs_env = extendCorePrepEnvList env' (bndrs `zip` bndrs2)
+       ; let (bndrs2, rhss1, changed) = unzip3 (zipWith addVoidParamIfNeeded bndrs1 rhss)
+       ; let rhs_env = extendCorePrepEnvListAddingVoidParam env' (zip3 bndrs bndrs2 changed)
        ; pairs1 <- zipWithM (cpeJoinPair rhs_env) bndrs2 rhss1
 
        ; let bndrs3 = map fst pairs1
-       ; return (extendCorePrepEnvList env' (bndrs `zip` bndrs3),
+       ; return (extendCorePrepEnvListAddingVoidParam env' (zip3 bndrs bndrs3 changed),
                  emptyFloats,
                  Just (Let (Rec pairs1))) }
   where
@@ -733,7 +733,7 @@ cpeApp env expr
 
         -- Now deal with the function
        ; case head of
-           Just (fn_id, depth) -> do { sat_app <- maybeSaturate fn_id app depth
+           Just (fn_id, depth) -> do { sat_app <- maybeSaturate env fn_id app depth
                                      ; return (floats, sat_app) }
            _other              -> return (floats, app) }
 
@@ -875,8 +875,8 @@ maybeSaturate deals with saturating primops and constructors
 The type is the type of the entire application
 -}
 
-maybeSaturate :: Id -> CpeApp -> Int -> UniqSM CpeRhs
-maybeSaturate fn expr n_args
+maybeSaturate :: CorePrepEnv -> Id -> CpeApp -> Int -> UniqSM CpeRhs
+maybeSaturate env fn expr n_args
   | Just DataToTagOp <- isPrimOpId_maybe fn     -- DataToTag must have an evaluated arg
                                                 -- A gruesome special case
   = saturateDataToTag sat_expr
@@ -884,7 +884,7 @@ maybeSaturate fn expr n_args
   | hasNoBinding fn        -- There's no binding
   = return sat_expr
 
-  | Just 1 <- isJoinId_maybe fn, n_args == 0 -- Adding void parameter
+  | addingVoidParam env fn
   = return (App expr (Var voidPrimId))
   
   | otherwise
@@ -1386,6 +1386,28 @@ extendCorePrepEnvList cpe prs
     = cpe { cpe_env = extendVarEnvList (cpe_env cpe)
                         (map (\(id, id') -> (id, Var id')) prs) }
 
+extendCorePrepEnvAddingVoidParam :: CorePrepEnv
+                                 -> Id
+                                 -> Id
+                                 -> Bool
+                                 -> CorePrepEnv
+extendCorePrepEnvAddingVoidParam cpe id id' adding
+    = cpe { cpe_env = extendVarEnv (cpe_env cpe) id (Var id')
+          , cpe_addingVoidParam = avp' }
+    where
+      avp = cpe_addingVoidParam cpe
+      avp' | adding    = extendVarSet avp id'
+           | otherwise = avp
+
+extendCorePrepEnvListAddingVoidParam :: CorePrepEnv
+                                     -> [(Id,Id,Bool)]
+                                     -> CorePrepEnv
+extendCorePrepEnvListAddingVoidParam cpe trs
+    = cpe { cpe_env = extendVarEnvList (cpe_env cpe)
+                        (map (\(id, id', _) -> (id, Var id')) trs)
+          , cpe_addingVoidParam = extendVarSetList (cpe_addingVoidParam cpe)
+                                    [ id' | (_, id', True) <- trs ] }
+
 lookupCorePrepEnv :: CorePrepEnv -> Id -> CoreExpr
 lookupCorePrepEnv cpe id
   = case lookupVarEnv (cpe_env cpe) id of
@@ -1394,6 +1416,9 @@ lookupCorePrepEnv cpe id
 
 getMkIntegerId :: CorePrepEnv -> Id
 getMkIntegerId = cpe_mkIntegerId
+
+addingVoidParam :: CorePrepEnv -> Id -> Bool
+addingVoidParam cpe id = id `elemVarSet` cpe_addingVoidParam cpe
 
 ------------------------------------------------------------------------------
 -- Cloning binders
@@ -1500,12 +1525,13 @@ wrapTicks (Floats flag floats0) expr = (Floats flag floats1, expr')
 addVoidParamIfNeeded :: CoreBndr      -- Original binder (must be join id)
                      -> CoreExpr      -- Original RHS
                      -> (CoreBndr,    -- New binder, possibly with new type
-                         CoreExpr)    -- New RHS
+                         CoreExpr,    -- New RHS
+                         Bool)        -- Changed?
 addVoidParamIfNeeded bndr expr
   | all (not . isId) bndrs
-  = (bndr', expr')
+  = (bndr', expr', True)
   | otherwise
-  = (bndr, expr)
+  = (bndr, expr, False)
   where
     (bndrs, body)   = collectBinders expr
     Just join_arity = isJoinId_maybe bndr
