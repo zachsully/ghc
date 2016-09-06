@@ -825,6 +825,9 @@ and it's convenient to write them all down in one place.
 wildCardName :: Name
 wildCardName = mkSystemVarName wildCardKey (fsLit "wild")
 
+cxtMarkerName :: Name
+cxtMarkerName = mkSystemVarName cxtMarkerKey (fsLit "<cxt>")
+
 runMainIOName :: Name
 runMainIOName = varQual gHC_TOP_HANDLER (fsLit "runMainIO") runMainKey
 
@@ -2196,6 +2199,9 @@ pushCallStackKey  = mkPreludeMiscIdUnique 518
 
 fromStaticPtrClassOpKey :: Unique
 fromStaticPtrClassOpKey = mkPreludeMiscIdUnique 519
+
+cxtMarkerKey :: Unique
+cxtMarkerKey = mkPreludeMiscIdUnique 520
 
 {-
 ************************************************************************

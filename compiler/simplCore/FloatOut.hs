@@ -6,7 +6,7 @@
 ``Long-distance'' floating of bindings towards the top level.
 -}
 
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP, ViewPatterns #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module FloatOut ( floatOutwards ) where
@@ -15,6 +15,7 @@ import CoreSyn
 import CoreUtils
 import MkCore
 import CoreArity        ( etaExpand )
+import CoreCxts
 import CoreMonad        ( FloatOutSwitches(..) )
 
 import DynFlags
@@ -288,6 +289,12 @@ floatExpr (Var v)   = (zeroStats, emptyFloats, Var v)
 floatExpr (Type ty) = (zeroStats, emptyFloats, Type ty)
 floatExpr (Coercion co) = (zeroStats, emptyFloats, Coercion co)
 floatExpr (Lit lit) = (zeroStats, emptyFloats, Lit lit)
+
+floatExpr (Let (NonRec (TB bndr tag) _) expr)
+  | isCxtMarkerId bndr
+  -- Context marker - join points may be floated to here
+  = case tag of StayPut lvl -> floatBody lvl expr
+                _           -> pprPanic "floating a context marker??" (ppr tag)
 
 floatExpr (App e a)
   = case (floatExpr  e) of { (fse, floats_e, e') ->

@@ -11,7 +11,8 @@ module CoreSyn (
         Expr(..), Alt, Bind(..), AltCon(..), Arg,
         Tickish(..), TickishScoping(..), TickishPlacement(..),
         CoreProgram, CoreExpr, CoreAlt, CoreBind, CoreArg, CoreBndr,
-        TaggedExpr, TaggedAlt, TaggedBind, TaggedArg, TaggedBndr(..), deTagExpr,
+        TaggedExpr, TaggedAlt, TaggedBind, TaggedArg, TaggedBndr(..),
+        deTagExpr, deTagBind,
 
         -- ** 'Expr' construction
         mkLets, mkLams,
@@ -69,7 +70,8 @@ module CoreSyn (
         collectAnnArgs, collectAnnArgsTicks,
 
         -- ** Operations on annotations
-        deAnnotate, deAnnotate', deAnnAlt, collectAnnBndrs, collectNAnnBndrs,
+        deAnnotate, deAnnotate', deAnnotateBind, deAnnAlt,
+        collectAnnBndrs, collectNAnnBndrs,
 
         -- * Orphanhood
         IsOrphan(..), isOrphan, notOrphan, chooseOrphanAnchor,
@@ -1797,6 +1799,10 @@ collectAnnArgsTicks tickishOk expr
 deAnnotate :: AnnExpr bndr annot -> Expr bndr
 deAnnotate (_, e) = deAnnotate' e
 
+deAnnotateBind :: AnnBind bndr annot -> Bind bndr
+deAnnotateBind (AnnNonRec var rhs) = NonRec var (deAnnotate rhs)
+deAnnotateBind (AnnRec pairs) = Rec [(v,deAnnotate rhs) | (v,rhs) <- pairs]
+
 deAnnotate' :: AnnExpr' bndr annot -> Expr bndr
 deAnnotate' (AnnType t)           = Type t
 deAnnotate' (AnnCoercion co)      = Coercion co
@@ -1808,10 +1814,7 @@ deAnnotate' (AnnCast e (_,co))    = Cast (deAnnotate e) co
 deAnnotate' (AnnTick tick body)   = Tick tick (deAnnotate body)
 
 deAnnotate' (AnnLet bind body)
-  = Let (deAnnBind bind) (deAnnotate body)
-  where
-    deAnnBind (AnnNonRec var rhs) = NonRec var (deAnnotate rhs)
-    deAnnBind (AnnRec pairs) = Rec [(v,deAnnotate rhs) | (v,rhs) <- pairs]
+  = Let (deAnnotateBind bind) (deAnnotate body)
 
 deAnnotate' (AnnCase scrut v t alts)
   = Case (deAnnotate scrut) v t (map deAnnAlt alts)
