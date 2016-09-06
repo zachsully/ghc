@@ -47,8 +47,9 @@ fjTopBind (Rec pairs)
 
 fjTopPair :: (CoreBndr, CoreExpr) -> FJM (CoreBndr, CoreExpr)
 fjTopPair (bndr, expr)
-  = do (expr', _) <- fjExpr expr
-       return (zapBndrSort bndr, expr') -- can't have top-level join
+  = do (bndr', _, _) <- fjBndr bndr -- find joins in unfolding
+       (expr', _) <- fjExpr expr
+       return (zapBndrSort bndr', expr') -- can't have top-level join
 
 fjExpr :: CoreExpr -> FJM (CoreExpr, JoinAnal)
 fjExpr (Lit l)       = return (Lit l, emptyJoinAnal)
@@ -137,7 +138,7 @@ fjLet rec_join_arities bind body
         (rhs', bind_anal) <- fjRhs rhs
         (bndr', rule_anals, unf_anal) <- fjBndr binder
         let bndr'' = case rec_join_arities of
-                       Just [arity] -> asJoinId binder arity
+                       Just [arity] -> asJoinId bndr' arity
                        Just _       -> panic "vars_bind"
                        Nothing | isId bndr' -> zapJoinId bndr'
                                | otherwise  -> bndr'
