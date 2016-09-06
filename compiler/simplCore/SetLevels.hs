@@ -335,6 +335,11 @@ don't want @lvlExpr@ to turn the scrutinee of the @case@ into an MFE
 
 If there were another lambda in @r@'s rhs, it would get level-2 as well.
 -}
+lvlExpr env (splitAnnCxt -> InNewCxt (TB cid _) expr)
+  = do let env' = enterTailContext env cid
+           lvl' = le_ctxt_lvl env'
+       expr' <- lvlExpr env' expr
+       return (markCxt (TB cid (StayPut lvl')) (idType cid) expr')
 
 lvlExpr env (_, AnnType ty)     = return (Type (substTy (le_subst env) ty))
 lvlExpr env (_, AnnCoercion co) = return (Coercion (substCo (le_subst env) co))
@@ -404,15 +409,7 @@ lvlExpr env expr@(_, AnnLam {})
         -- but not nearly so much now non-recursive newtypes are transparent.
         -- [See SetLevels rev 1.50 for a version with this approach.]
 
-lvlExpr env (_, AnnLet bind expr)
-  | Just cid <- isCxtMarker_maybe (deTagBind (deAnnotateBind bind))
-  = do let env' = enterTailContext env cid
-           lvl' = le_ctxt_lvl env'
-       expr' <- lvlExpr env' expr
-       return (markCxtTagged (StayPut lvl') cid expr')
-
 lvlExpr env (_, AnnLet bind body)
-  -- Not a context marker (see first clause)
   = do { (bind', new_env) <- lvlBind env bind
        ; body' <- lvlExpr new_env body
            -- No point in going via lvlMFE here.  If the binding is alive
@@ -518,12 +515,11 @@ lvlMFE ::  Bool                 -- True <=> strict context [body of case or let]
 -- lvlMFE is just like lvlExpr, except that it might let-bind
 -- the expression, so that it can itself be floated.
 
-lvlMFE strict_ctxt env (_, AnnLet bind expr)
-  | Just cid <- isCxtMarker_maybe (deTagBind (deAnnotateBind bind))
+lvlMFE strict_ctxt env (splitAnnCxt -> InNewCxt (TB cid _) expr)
   = do let env' = enterTailContext env cid
            lvl' = le_ctxt_lvl env'
        expr' <- lvlMFE strict_ctxt env' expr
-       return (markCxtTagged (StayPut lvl') cid expr')
+       return (markCxt (TB cid (StayPut lvl')) (idType cid) expr')
 
 lvlMFE _ env (_, AnnType ty)
   = return (Type (substTy (le_subst env) ty))
@@ -2080,6 +2076,13 @@ ret :: FVUp -> a -> FVM (((DVarSet,FISilt), a), FVUp)
 ret up x = return (((fvu_fvs up,fvu_silt up),x),up)
 
 analyzeFVsM :: FVEnv -> CoreExpr -> FVM (CoreExprWithBoth, FVUp)
+analyzeFVsM env (splitCxt -> InNewCxt cid body)
+  = do (body', up) <- analyzeFVsM env body
+       ret up $ markAnnCxt ann (boringBinder cid) (idType cid) body'
+  where
+    ann = (emptyDVarSet, emptySilt)
+      -- Don't bother annotating a context marker (just a fake let binding)
+
 analyzeFVsM  env (Var v) = ret up $ AnnVar v where
   up = varFVUp v nonTopLevel usage
 
@@ -2226,13 +2229,6 @@ analyzeFVsM env (Let (NonRec binder rhs) body) = do
   let bsilt = CloB $ fvu_floats body_up `wrapFloats` fvu_silt body_up
 
   ret up $ AnnLet (AnnNonRec (TB binder bsilt) rhs2) body2
-
-analyzeFVsM env (splitCxt -> InNewCxt cid body)
-  = do (body', up) <- analyzeFVsM env body
-       ret up $ markCxtTaggedAnn BoringB ann cid body'
-  where
-    ann = (emptyDVarSet, emptySilt)
-      -- Don't bother annotating a context marker (just a fake let binding)
 
 analyzeFVsM env (Let (Rec binds) body) = do
   let binders = map fst binds

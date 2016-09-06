@@ -290,8 +290,7 @@ floatExpr (Type ty) = (zeroStats, emptyFloats, Type ty)
 floatExpr (Coercion co) = (zeroStats, emptyFloats, Coercion co)
 floatExpr (Lit lit) = (zeroStats, emptyFloats, Lit lit)
 
-floatExpr (Let (NonRec (TB bndr tag) _) expr)
-  | isCxtMarkerId bndr
+floatExpr (splitCxt -> InNewCxt (TB _ tag) expr)
   -- Context marker - join points may be floated to here
   = case tag of StayPut lvl -> floatBody lvl expr
                 _           -> pprPanic "floating a context marker??" (ppr tag)

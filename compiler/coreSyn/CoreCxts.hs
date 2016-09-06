@@ -4,20 +4,19 @@ module CoreCxts (
   CxtId,
   ExprWithCxts, BindWithCxts, AltWithCxts,
   CoreExprWithCxts, CoreBindWithCxts, CoreAltWithCxts,
+  AnnExprWithCxts, AnnBindWithCxts, AnnAltWithCxts,
 
   addContextsToPgm, addContextsToTopBind,
-  isCxtMarkerId, isCxtMarker, isCxtMarker_maybe, mkCxtMarkerId,
-  markCxt, markCxtAnn, markCxtTagged, markCxtTaggedAnn,
+  markCxt, markAnnCxt, markCoreCxt, markCoreAnnCxt,
   removeCxts, removeCxtsFromBind,
 
-  CxtSplit(..), splitCxt, ignoreCxt,
+  CxtSplit(..), splitCxt, ignoreCxt, splitAnnCxt, ignoreAnnCxt,
 ) where
 
 import CoreSyn
 import CoreUtils
 import FastString
 import Id
-import Outputable
 import PrelNames  ( cxtMarkerKey, cxtMarkerName )
 import Type
 import UniqSupply
@@ -32,70 +31,62 @@ type CoreExprWithCxts = CoreExpr
 type CoreBindWithCxts = CoreBind
 type CoreAltWithCxts  = CoreAlt
 
+type AnnExprWithCxts b a = AnnExpr b a
+type AnnBindWithCxts b a = AnnBind b a
+type AnnAltWithCxts  b a = AnnAlt  b a
+
 addContextsToPgm :: CoreProgram -> UniqSM [CoreBindWithCxts]
 addContextsToPgm = mapM addContextsToTopBind
 
 addContextsToTopBind :: CoreBind -> UniqSM CoreBindWithCxts
 addContextsToTopBind = addCxtsBind
 
-mkCxtMarkerId :: Type -> Id
-mkCxtMarkerId ty = mkLocalIdOrCoVar cxtMarkerName ty
+-------------------
 
-isCxtMarkerId :: Id -> Bool
-isCxtMarkerId id = idUnique id == cxtMarkerKey
+data CxtSplit bndr a = InNewCxt  bndr a
+                     | InSameCxt a
 
-isCxtMarker :: CoreBindWithCxts -> Bool
-isCxtMarker (NonRec bndr _) = isCxtMarkerId bndr
-isCxtMarker _               = False
+splitCxt :: ExprWithCxts b -> CxtSplit b (ExprWithCxts b)
+splitCxt (Let (NonRec bndr (Var v)) body)
+  | isCxtMarkerId v = InNewCxt bndr body
+splitCxt other      = InSameCxt other
 
-isCxtMarker_maybe :: CoreBindWithCxts -> Maybe CxtId
-isCxtMarker_maybe (NonRec bndr rhs)
-  | isCxtMarkerId bndr
-  = case rhs of Var cid -> Just cid
-                other   -> pprPanic "isCxtMarker_maybe" (ppr other)
-isCxtMarker_maybe _
-  = Nothing
-
-data CxtSplit a = InNewCxt  CxtId a
-                | InSameCxt a
-
-splitCxt :: CoreExprWithCxts -> CxtSplit CoreExprWithCxts
-splitCxt (Let bind body)
-  | Just cid <- isCxtMarker_maybe bind = InNewCxt cid body
-splitCxt other                         = InSameCxt other
-
-ignoreCxt :: CoreExprWithCxts -> CoreExprWithCxts
+ignoreCxt :: ExprWithCxts b -> ExprWithCxts b
 ignoreCxt (splitCxt -> InNewCxt _ body) = body
 ignoreCxt other                         = other
 
-markCxt :: CxtId -> CoreExprWithCxts -> CoreExprWithCxts
-markCxt cid expr = Let (NonRec marker (Var cid)) expr
-  where
-    marker = mkCxtMarkerId (idType cid)
+splitAnnCxt :: AnnExprWithCxts b a -> CxtSplit b (AnnExprWithCxts b a)
+splitAnnCxt (_, AnnLet (AnnNonRec bndr (_, AnnVar v)) body)
+  | isCxtMarkerId v = InNewCxt bndr body
+splitAnnCxt other   = InSameCxt other
 
-markCxtAnn :: a -> CxtId -> AnnExpr CoreBndr a -> AnnExpr' CoreBndr a
-markCxtAnn ann cid expr = AnnLet (AnnNonRec marker (ann, AnnVar cid)) expr
-  where
-    marker = mkCxtMarkerId (idType cid)
+ignoreAnnCxt :: AnnExprWithCxts b a -> AnnExprWithCxts b a
+ignoreAnnCxt (splitAnnCxt -> InNewCxt _ body) = body
+ignoreAnnCxt other                            = other
 
-markCxtTagged :: t -> CxtId -> Expr (TaggedBndr t) -> Expr (TaggedBndr t)
-markCxtTagged tag cid expr = Let (NonRec (TB marker tag) (Var cid)) expr
+markCxt :: b -> Type -> ExprWithCxts b -> ExprWithCxts b
+markCxt cid ty expr = Let (NonRec cid (Var marker)) expr
   where
-    marker = mkCxtMarkerId (idType cid)
+    marker = mkCxtMarkerId ty
 
-markCxtTaggedAnn :: t -> a -> CxtId -> AnnExpr (TaggedBndr t) a
-                                    -> AnnExpr' (TaggedBndr t) a
-markCxtTaggedAnn tag ann cid expr
-  = AnnLet (AnnNonRec (TB marker tag) (ann, AnnVar cid)) expr
+markCoreCxt :: CxtId -> CoreExprWithCxts -> CoreExprWithCxts
+markCoreCxt cid = markCxt cid (idType cid)
+
+markAnnCxt :: a -> b -> Type -> AnnExprWithCxts b a -> AnnExpr' b a
+markAnnCxt ann cid ty expr = AnnLet (AnnNonRec cid (ann, AnnVar marker)) expr
   where
-    marker = mkCxtMarkerId (idType cid)
+    marker = mkCxtMarkerId ty
 
-removeCxts :: CoreExprWithCxts -> CoreExpr
+markCoreAnnCxt :: a -> CxtId -> AnnExprWithCxts CoreBndr a
+               -> AnnExpr' CoreBndr a
+markCoreAnnCxt ann cid = markAnnCxt ann cid (idType cid)
+
+removeCxts :: ExprWithCxts b -> Expr b
+removeCxts (splitCxt -> InNewCxt _ expr)
+                           = removeCxts expr
 removeCxts (App fun arg)   = App (removeCxts fun) (removeCxts arg)
 removeCxts (Lam bndr body) = Lam bndr (removeCxts body)
-removeCxts (Let bind body)
-  | isCxtMarker bind       = removeCxts body
-  | otherwise              = Let (removeCxtsFromBind bind) (removeCxts body)
+removeCxts (Let bind body) = Let (removeCxtsFromBind bind) (removeCxts body)
 removeCxts (Case e b t as) = Case (removeCxts e) b t
                                   [ (con, bndrs, removeCxts rhs)
                                   | (con, bndrs, rhs) <- as ]
@@ -103,12 +94,19 @@ removeCxts (Cast expr co)  = Cast (removeCxts expr) co
 removeCxts (Tick ti expr)  = Tick ti (removeCxts expr)
 removeCxts other           = other
 
-removeCxtsFromBind :: CoreBindWithCxts -> CoreBind
+removeCxtsFromBind :: BindWithCxts b -> Bind b
 removeCxtsFromBind (NonRec bndr rhs) = NonRec bndr (removeCxts rhs)
 removeCxtsFromBind (Rec pairs) = Rec [ (bndr, removeCxts rhs)
                                      | (bndr, rhs) <- pairs ]
 
 --------------------
+
+mkCxtMarkerId :: Type -> Id
+mkCxtMarkerId ty = globaliseId $ mkLocalIdOrCoVar cxtMarkerName ty
+  -- Make it global so that CoreSubst doesn't freak out
+
+isCxtMarkerId :: Id -> Bool
+isCxtMarkerId id = idUnique id == cxtMarkerKey
 
 addCxtsBind :: CoreBind -> UniqSM CoreBindWithCxts
 addCxtsBind bind
@@ -139,7 +137,7 @@ addCxtsNonTail _    (Var v)
 addCxtsNonTail name expr
   = do cid   <- mkSysLocalM name (exprType expr)
        expr' <- addCxtsExpr expr
-       return (markCxt cid expr')
+       return (markCoreCxt cid expr')
 
 addCxtsTail :: CoreExpr -> UniqSM CoreExprWithCxts
 addCxtsTail
