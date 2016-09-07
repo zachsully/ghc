@@ -35,6 +35,8 @@ test('spec003', normal, compile, [''])
 test('join001', normal, compile, ['-O'])
 test('join005', normal, compile, ['-O'])
 
+test('match-let-join', normal, compile, ['-O'])
+
 test('rule1', normal, compile, [''])
 test('rule2', only_ways(['optasm']), compile, ['-dsuppress-uniques'])
 test('T7162', normal, compile, [''])
