@@ -451,10 +451,8 @@ lvlCase env scrut_fvs scrut' case_bndr ty alts
     ty' = substTy (le_subst env) ty
 
     incd_lvl = incMinorLvl (le_ctxt_lvl env)
-    dest_lvl = maxFvLevel (const True) env scrut_fvs use_ceiling
+    dest_lvl = maxFvLevel (const True) env scrut_fvs
             -- Don't abstact over type variables, hence const True
-    use_ceiling = False -- Not floating a join point, so don't worry about the
-                        -- ceiling
 
     lvl_alt alts_env (con, bs, rhs)
       = do { rhs' <- lvlMFE True new_env rhs
@@ -1259,8 +1257,15 @@ destLevel :: LevelEnv -> DVarSet
 destLevel env fvs _is_function is_bot is_join
   | is_bot = tOP_LEVEL  -- Send bottoming bindings to the top
                         -- regardless; see Note [Bottoming floats]
-  | otherwise = maxFvLevel isId env fvs is_join -- Max over Ids only; the tyvars
-                                                -- will be abstracted
+  | is_join, hits_ceiling = join_ceiling
+  | otherwise = max_fv_level
+  where
+    max_fv_level = maxFvLevel isId env fvs -- Max over Ids only; the tyvars
+                                           -- will be abstracted
+
+    hits_ceiling = max_fv_level `ltLvl` join_ceiling &&
+                   not (isTopLvl max_fv_level) -- Note [When to ruin a join point]
+    join_ceiling = joinCeilingLevel env
 
 isFunction :: CoreExpr -> Bool
 isFunction (Lam b e) | isId b = True
@@ -1380,10 +1385,9 @@ enterTailContext le@(LE { le_ctxt_lvl = lvl, le_lvl_env = env }) cid
   where
     lvl' = incMinorLvl lvl
 
-maxFvLevel :: (Var -> Bool) -> LevelEnv -> DVarSet -> Bool -> Level
-maxFvLevel max_me le@(LE { le_lvl_env = lvl_env, le_env = id_env })
-           var_set is_join
-  = foldDVarSet max_in ceil var_set
+maxFvLevel :: (Var -> Bool) -> LevelEnv -> DVarSet -> Level
+maxFvLevel max_me (LE { le_lvl_env = lvl_env, le_env = id_env }) var_set
+  = foldDVarSet max_in tOP_LEVEL var_set
   where
     max_in in_var lvl
        = foldr max_out lvl (case lookupVarEnv id_env in_var of
@@ -1395,10 +1399,6 @@ maxFvLevel max_me le@(LE { le_lvl_env = lvl_env, le_env = id_env })
                                 Just lvl' -> maxLvl lvl' lvl
                                 Nothing   -> lvl
         | otherwise = lvl       -- Ignore some vars depending on max_me
-
-    ceil | is_join
-         = joinCeilingLevel le
-         | otherwise = tOP_LEVEL
 
 lookupVar :: LevelEnv -> Id -> LevelledExpr
 lookupVar le v = case lookupVarEnv (le_env le) v of
