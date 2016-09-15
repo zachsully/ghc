@@ -21,3 +21,8 @@ test('join004',
 
 test('join005', normal, compile, [''])
 test('join006', normal, compile, [''])
+
+test('join007',
+  [stats_num_field('bytes allocated', [(wordsize(64), 50944, 5)])],
+  compile_and_run,
+  [''])
