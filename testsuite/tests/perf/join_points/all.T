@@ -1,11 +1,17 @@
-test('join001', normal, compile, ['-O'])
+# Only compile with optimisation
+def f( name, opts ):
+  opts.only_ways = ['optasm']
+
+setTestOpts(f)
+
+test('join001', normal, compile, [''])
 
 test('join002',
-  [stats_num_field('bytes allocated', [(wordsize(64), 2000290792, 0)])],
+  [stats_num_field('bytes allocated', [(wordsize(64), 2000290792, 5)])],
   compile_and_run,
   [''])
 test('join003',
-  [stats_num_field('bytes allocated', [(wordsize(64), 2000290792, 0)])],
+  [stats_num_field('bytes allocated', [(wordsize(64), 2000290792, 5)])],
   compile_and_run,
   [''])
 test('join004',
@@ -13,5 +19,5 @@ test('join004',
   compile_and_run,
   [''])
 
-test('join005', normal, compile, ['-O'])
-test('join006', normal, compile, ['-O'])
+test('join005', normal, compile, [''])
+test('join006', normal, compile, [''])
