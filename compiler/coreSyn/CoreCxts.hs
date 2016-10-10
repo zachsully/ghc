@@ -13,6 +13,7 @@ module CoreCxts (
   CxtSplit(..), splitCxt, ignoreCxt, splitAnnCxt, ignoreAnnCxt,
 ) where
 
+import Coercion
 import CoreSyn
 import CoreUtils
 import FastString
@@ -47,8 +48,8 @@ data CxtSplit bndr a = InNewCxt  bndr a
                      | InSameCxt a
 
 splitCxt :: ExprWithCxts b -> CxtSplit b (ExprWithCxts b)
-splitCxt (Let (NonRec bndr (Var v)) body)
-  | isCxtMarkerId v = InNewCxt bndr body
+splitCxt (Let (NonRec bndr rhs) body)
+  | isCxtMarker rhs = InNewCxt bndr body
 splitCxt other      = InSameCxt other
 
 ignoreCxt :: ExprWithCxts b -> ExprWithCxts b
@@ -56,30 +57,51 @@ ignoreCxt (splitCxt -> InNewCxt _ body) = body
 ignoreCxt other                         = other
 
 splitAnnCxt :: AnnExprWithCxts b a -> CxtSplit b (AnnExprWithCxts b a)
-splitAnnCxt (_, AnnLet (AnnNonRec bndr (_, AnnVar v)) body)
-  | isCxtMarkerId v = InNewCxt bndr body
-splitAnnCxt other   = InSameCxt other
+splitAnnCxt (_, AnnLet (AnnNonRec bndr rhs) body)
+  | isAnnCxtMarker rhs = InNewCxt bndr body
+splitAnnCxt other      = InSameCxt other
 
 ignoreAnnCxt :: AnnExprWithCxts b a -> AnnExprWithCxts b a
 ignoreAnnCxt (splitAnnCxt -> InNewCxt _ body) = body
 ignoreAnnCxt other                            = other
 
 markCxt :: b -> Type -> ExprWithCxts b -> ExprWithCxts b
-markCxt cid ty expr = Let (NonRec cid (Var marker)) expr
+markCxt cid ty expr = Let (NonRec cid marker) expr
   where
-    marker = mkCxtMarkerId ty
+    marker = mkCxtMarker ty
 
 markCoreCxt :: CxtId -> CoreExprWithCxts -> CoreExprWithCxts
 markCoreCxt cid = markCxt cid (idType cid)
 
+mkCxtMarker :: Type -> ExprWithCxts b
+mkCxtMarker = varToCoreExpr . mkCxtMarkerId
+
+isCxtMarker :: ExprWithCxts b -> Bool
+isCxtMarker (Var v)             = isCxtMarkerId v
+isCxtMarker (Coercion co)
+  | Just v <- getCoVar_maybe co = isCxtMarkerId v
+isCxtMarker _                   = False
+
 markAnnCxt :: a -> b -> Type -> AnnExprWithCxts b a -> AnnExpr' b a
-markAnnCxt ann cid ty expr = AnnLet (AnnNonRec cid (ann, AnnVar marker)) expr
+markAnnCxt ann cid ty expr = AnnLet (AnnNonRec cid (ann, marker)) expr
   where
-    marker = mkCxtMarkerId ty
+    marker = mkAnnCxtMarker ty
 
 markCoreAnnCxt :: a -> CxtId -> AnnExprWithCxts CoreBndr a
                -> AnnExpr' CoreBndr a
 markCoreAnnCxt ann cid = markAnnCxt ann cid (idType cid)
+
+mkAnnCxtMarker :: Type -> AnnExpr' b a
+mkAnnCxtMarker = to_ann_expr . mkCxtMarkerId
+  where
+    to_ann_expr v | isCoVar v = AnnCoercion (mkCoVarCo v)
+                  | otherwise = AnnVar v
+
+isAnnCxtMarker :: AnnExprWithCxts b a -> Bool
+isAnnCxtMarker (_, AnnVar v)    = isCxtMarkerId v
+isAnnCxtMarker (_, AnnCoercion co)
+  | Just v <- getCoVar_maybe co = isCxtMarkerId v
+isAnnCxtMarker _                = False
 
 removeCxts :: ExprWithCxts b -> Expr b
 removeCxts (splitCxt -> InNewCxt _ expr)
@@ -135,7 +157,7 @@ addCxtsNonTail _    (Var v)
   | isJoinId v
   = return (Var v)
 addCxtsNonTail name expr
-  = do cid   <- mkSysLocalM name (exprType expr)
+  = do cid   <- mkSysLocalOrCoVarM name (exprType expr)
        expr' <- addCxtsExpr expr
        return (markCoreCxt cid expr')
 
