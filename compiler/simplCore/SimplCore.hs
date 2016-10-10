@@ -156,8 +156,7 @@ getCoreToDo dflags
     eta_expand_on = gopt Opt_DoLambdaEtaExpansion         dflags
     ww_on         = gopt Opt_WorkerWrapper                dflags
     static_ptrs   = xopt LangExt.StaticPointers           dflags
-    join_points   = gopt Opt_JoinPoints                   dflags
-    early_float_in = do_float_in && join_points
+    early_float_in = do_float_in -- TODO Control by flag?
 
     maybe_rule_check phase = runMaybe rule_check (CoreDoRuleCheck phase)
 
@@ -169,8 +168,7 @@ getCoreToDo dflags
                           , sm_rules      = rules_on
                           , sm_eta_expand = eta_expand_on
                           , sm_inline     = True
-                          , sm_case_case  = True
-                          , sm_context_subst  = join_points }
+                          , sm_case_case  = True }
 
     simpl_phase phase names iter
       = CoreDoPasses
@@ -725,8 +723,7 @@ simplifyPgmIO pass@(CoreDoSimplify max_iterations mode)
                      occurAnalysePgm this_mod active_rule rules
                                      maybeVects maybeVectVars binds
                ; tagged_binds = {-# SCC "FindJoins" #-}
-                     if sm_context_subst mode then findJoinsInPgm dflags occ_binds
-                                              else occ_binds
+                     findJoinsInPgm occ_binds
                } ;
            Err.dumpIfSet_dyn dflags Opt_D_dump_occur_anal "Occurrence analysis"
                      (pprCoreBindings tagged_binds);

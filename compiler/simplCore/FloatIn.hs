@@ -40,7 +40,7 @@ actually float any bindings downwards from the top-level.
 -}
 
 floatInwards :: DynFlags -> CoreProgram -> CoreProgram
-floatInwards dflags = findJoinsInPgm dflags . map fi_top_bind
+floatInwards dflags = findJoinsInPgm . map fi_top_bind
                         -- Note [Look for join points afterward]
   where
     fi_top_bind (NonRec binder rhs)
@@ -193,8 +193,7 @@ fiExpr dflags to_drop ann_expr@(_,AnnApp {})
   where
     (ann_fun, ann_args, ticks) = collectAnnArgsTicks tickishFloatable ann_expr
     (extra_fvs0, fun_fvs)
-      | gopt Opt_JoinPoints dflags
-      , (_, AnnVar _) <- ann_fun = (freeVarsOf ann_fun, emptyDVarSet)
+      | (_, AnnVar _) <- ann_fun = (freeVarsOf ann_fun, emptyDVarSet)
       | otherwise                = (emptyDVarSet, freeVarsOf ann_fun)
     (extra_fvs, arg_fvs) = mapAccumL mk_arg_fvs extra_fvs0 ann_args
 

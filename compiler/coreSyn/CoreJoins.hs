@@ -7,7 +7,6 @@ module CoreJoins (
 import BasicTypes
 import CoreArity
 import CoreSyn
-import DynFlags
 import Id
 import IdInfo
 import Maybes
@@ -23,12 +22,9 @@ import Control.Monad
 
 #include "HsVersions.h"
 
-findJoinsInPgm :: DynFlags -> CoreProgram -> CoreProgram
-findJoinsInPgm dflags pgm
-  | gopt Opt_JoinPoints dflags
+findJoinsInPgm :: CoreProgram -> CoreProgram
+findJoinsInPgm pgm
   = map (\bind -> propagateBinderSorts $ initFJ (fjTopBind bind)) pgm
-  | otherwise
-  = pgm
 
 zapBndrSort :: Var -> Var
 zapBndrSort b | isId b    = zapJoinId b

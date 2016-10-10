@@ -18,7 +18,7 @@ import SimplUtils
 import FamInstEnv       ( FamInstEnv )
 import Literal          ( litIsLifted ) --, mkMachInt ) -- temporalily commented out. See #8326
 import Id
-import MkId             ( seqId, voidPrimId )
+import MkId             ( seqId )
 import MkCore           ( mkImpossibleExpr, castBottomExpr )
 import IdInfo
 import Name             ( Name, mkSystemVarName, isExternalName, getOccFS )
@@ -37,7 +37,7 @@ import CoreUnfold
 import CoreUtils
 --import PrimOp           ( tagToEnumKey ) -- temporalily commented out. See #8326
 import Rules            ( mkRuleInfo, lookupRule, getRules )
-import TysPrim          ( voidPrimTy ) --, intPrimTy ) -- temporalily commented out. See #8326
+--import TysPrim          ( intPrimTy ) -- temporalily commented out. See #8326
 import BasicTypes       ( TopLevelFlag(..), isTopLevel, RecFlag(..) )
 import MonadUtils       ( foldlM, mapAccumLM, liftIO )
 import Maybes           ( orElse )
@@ -2969,18 +2969,15 @@ mkDupableAlt env case_bndr (con, bndrs', rhs') = do
                            -- The case binder is alive but trivial, so why has
                            -- it not been substituted away?
 
-              used_bndrs' | isDeadBinder case_bndr = filter abstract_over bndrs'
-                          | otherwise              = bndrs' ++ [case_bndr_w_unf]
+              final_bndrs' | isDeadBinder case_bndr = filter abstract_over bndrs'
+                           | otherwise              = bndrs' ++ [case_bndr_w_unf]
 
               abstract_over bndr
                   | isTyVar bndr = True -- Abstract over all type variables just in case
                   | otherwise    = not (isDeadBinder bndr)
                         -- The deadness info on the new Ids is preserved by simplBinders
-        ; (final_bndrs', final_args)    -- Note [Join point abstraction]
-                <- if (sm_context_subst (getMode env) || any isId used_bndrs')
-                   then return (used_bndrs', varsToCoreExprs used_bndrs')
-                    else do { rw_id <- newId (fsLit "w") voidPrimTy
-                            ; return ([setOneShotLambda rw_id], [Var voidPrimId]) }
+              final_args    -- Note [Join point abstraction]
+                = varsToCoreExprs final_bndrs'
 
         ; join_bndr <- newId (fsLit "$j") (mkLamTypes final_bndrs' rhs_ty')
                 -- Note [Funky mkLamTypes]
@@ -2997,10 +2994,7 @@ mkDupableAlt env case_bndr (con, bndrs', rhs') = do
                 join_arity = length final_bndrs'
                 join_call  = mkApps (Var join_bndr) final_args
                 join_bndr_w_arity = join_bndr `setIdArity` arity
-                final_join_bndr | sm_context_subst (getMode env)
-                                = asJoinId join_bndr_w_arity join_arity
-                                | otherwise
-                                = join_bndr_w_arity
+                final_join_bndr = asJoinId join_bndr_w_arity join_arity
                 final_join_bind = NonRec final_join_bndr join_rhs
 
         ; env' <- addJoinBind NotTopLevel env final_join_bind
