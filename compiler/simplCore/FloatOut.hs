@@ -20,7 +20,7 @@ import CoreMonad        ( FloatOutSwitches(..) )
 
 import DynFlags
 import ErrUtils         ( dumpIfSet_dyn )
-import Id               ( Id, idArity, isBottomingId )
+import Id               ( Id, idArity, isBottomingId, isJoinId )
 import Var              ( Var )
 import SetLevels
 import UniqSupply       ( UniqSupply )
@@ -29,6 +29,8 @@ import Util
 import Maybes
 import Outputable
 import qualified Data.IntMap as M
+
+import Data.List        ( partition )
 
 #include "HsVersions.h"
 
@@ -336,8 +338,11 @@ floatExpr (Let bind body)
       FloatMe dest_lvl
         -> case (floatBind bind) of { (fsb, bind_floats, bind') ->
            case (floatExpr body) of { (fse, body_floats, body') ->
+           let binds' = split_bind bind'
+               new_bind_floats = foldr plusFloats emptyFloats
+                                   (map (unitLetFloat dest_lvl) binds') in
            ( add_stats fsb fse
-           , bind_floats `plusFloats` unitLetFloat dest_lvl bind'
+           , bind_floats `plusFloats` new_bind_floats
                          `plusFloats` body_floats
            , body') }}
 
@@ -346,12 +351,21 @@ floatExpr (Let bind body)
            case (floatBody bind_lvl body) of { (fse, body_floats, body') ->
            ( add_stats fsb fse
            , bind_floats `plusFloats` body_floats
-           , Let bind' body') }}
+           , foldr Let body' (split_bind bind') ) }}
   where
     bind_spec = case bind of
                  NonRec (TB _ s) _     -> s
                  Rec ((TB _ s, _) : _) -> s
                  Rec []                -> panic "floatExpr:rec"
+    -- HACK: Sometimes floatBind combines joins and non-joins
+    -- TODO: Have floatBind return a list instead
+    split_bind (Rec pairs)
+      | not (null joins), not (null values)
+      = [Rec values, Rec joins]
+      where
+        (joins, values) = partition (isJoinId . fst) pairs
+    split_bind other
+      = [other]
 
 floatExpr (Case scrut (TB case_bndr case_spec) ty alts)
   = case case_spec of
