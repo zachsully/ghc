@@ -156,7 +156,6 @@ getCoreToDo dflags
     eta_expand_on = gopt Opt_DoLambdaEtaExpansion         dflags
     ww_on         = gopt Opt_WorkerWrapper                dflags
     static_ptrs   = xopt LangExt.StaticPointers           dflags
-    early_float_in = do_float_in -- TODO Control by flag?
 
     maybe_rule_check phase = runMaybe rule_check (CoreDoRuleCheck phase)
 
@@ -262,9 +261,6 @@ getCoreToDo dflags
         -- Specialisation is best done before full laziness
         -- so that overloaded functions have all their dictionary lambdas manifest
         runWhen do_specialise CoreDoSpecialising,
-
-        -- Float In finds join points, which we don't want to float out
-        runWhen early_float_in CoreDoFloatInwards,
 
         runWhen full_laziness $
            CoreDoFloatOutwards FloatOutSwitches {
