@@ -114,7 +114,7 @@ module GHC.Base
         module GHC.Types,
         module GHC.Prim,        -- Re-export GHC.Prim and [boot] GHC.Err,
                                 -- to avoid lots of people having to
-        module GHC.Err          -- import it explicitly
+        module GHC.Err,         -- import it explicitly
   )
         where
 
@@ -790,6 +790,26 @@ A few list functions that appear here because they are used here.
 The rest of the prelude list functions are in GHC.List.
 -}
 
+--------------------------------------------------------------------------------
+--                               destroy/unfoldr                              --
+--------------------------------------------------------------------------------
+{-
+  As described in "Shortcut Fusion for Accumulating Parameters & Zip-like
+  Functions", destroy and unfoldr are primitives for map/zip/filter.
+-}
+
+destroy :: (forall a. (a -> Maybe (b,a)) -> a -> c) -> [b] -> c
+destroy g xs = g listpsi xs
+  where listpsi :: [a] -> Maybe (a,[a])
+        listpsi [] = Nothing
+        listpsi (x:xs) = Just (x,xs)
+
+unfoldr :: (b -> Maybe (a,b)) -> b -> [a]
+unfoldr f b = case f b of
+                Nothing -> []
+                Just (a,b') -> a : unfoldr f b'
+
+
 ----------------------------------------------
 --      foldr/build/augment
 ----------------------------------------------
@@ -899,6 +919,12 @@ map :: (a -> b) -> [a] -> [b]
 map _ []     = []
 map f (x:xs) = f x : map f xs
 
+mapDU :: (a -> b) -> [a] -> [b]
+mapDU f xs = destroy (\psi a -> unfoldr (mapDU' psi) a) xs
+  where mapDU' psi xs = case psi xs of
+                          Nothing -> Nothing
+                          Just (x,ys) -> Just (f x, ys)
+
 -- Note eta expanded
 mapFB ::  (elt -> lst -> lst) -> (a -> elt) -> a -> lst -> lst
 {-# INLINE [0] mapFB #-}
@@ -923,10 +949,14 @@ mapFB c f = \x ys -> c (f x) ys
 -- e.g. append, filter, iterate, repeat, etc.
 
 {-# RULES
-"map"       [~1] forall f xs.   map f xs                = build (\c n -> foldr (mapFB c f) n xs)
-"mapList"   [1]  forall f.      foldr (mapFB (:) f) []  = map f
-"mapFB"     forall c f g.       mapFB (mapFB c f) g     = mapFB c (f.g)
-  #-}
+"map"       [~1] forall f xs.   map f xs                = mapDU f xs
+#-}
+
+-- {-# RULES
+-- "map"       [~1] forall f xs.   map f xs                = build (\c n -> foldr (mapFB c f) n xs)
+-- "mapList"   [1]  forall f.      foldr (mapFB (:) f) []  = map f
+-- "mapFB"     forall c f g.       mapDU (mapFB c f) g     = mapFB c (f.g)
+-- #-}
 
 -- See Breitner, Eisenberg, Peyton Jones, and Weirich, "Safe Zero-cost
 -- Coercions for Haskell", section 6.5:

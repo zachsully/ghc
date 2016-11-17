@@ -153,6 +153,15 @@ filter pred (x:xs)
   | pred x         = x : filter pred xs
   | otherwise      = filter pred xs
 
+
+filterDU :: (a -> Bool) -> [a] -> [a]
+filterDU p xs = destroy (\psi a -> unfoldr (filterDU' psi) a) xs
+  where filterDU' psi xs = case psi xs of
+                            Nothing -> Nothing
+                            Just (b,ys) -> if p b
+                                           then Just (b,ys)
+                                           else filterDU' psi ys
+
 {-# NOINLINE [0] filterFB #-}
 filterFB :: (a -> b -> b) -> (a -> Bool) -> a -> b -> b
 filterFB c p x r | p x       = x `c` r
@@ -914,14 +923,32 @@ zip []     _bs    = []
 zip _as    []     = []
 zip (a:as) (b:bs) = (a,b) : zip as bs
 
+zipDU :: [a] -> [b] -> [(a,b)]
+zipDU xs ys =
+  destroy (\psi1 e1 ->
+           destroy (\psi2 e2 ->
+                    unfoldr (zipDU' psi1 psi2) (e1,e2)
+                   ) ys
+          ) xs
+  where zipDU' psi1 psi2 (e1,e2) =
+          case psi1 e1 of
+            Nothing -> Nothing
+            Just (x,xs) ->
+              case psi2 e2 of
+                Nothing -> Nothing
+                Just (y,ys) -> Just ((x,y),(xs,ys))
+
 {-# INLINE [0] zipFB #-}
 zipFB :: ((a, b) -> c -> d) -> a -> b -> c -> d
 zipFB c = \x y r -> (x,y) `c` r
 
 {-# RULES
-"zip"      [~1] forall xs ys. zip xs ys = build (\c n -> foldr2 (zipFB c) n xs ys)
-"zipList"  [1]  foldr2 (zipFB (:)) []   = zip
- #-}
+  "zip"       [~1] zip = zipDU
+#-}
+-- {-# RULES
+-- "zip"      [~1] forall xs ys. zip xs ys = build (\c n -> foldr2 (zipFB c) n xs ys)
+-- "zipList"  [1]  foldr2 (zipFB (:)) []   = zip
+-- #-}
 
 ----------------------------------------------
 -- | 'zip3' takes three lists and returns a list of triples, analogous to
