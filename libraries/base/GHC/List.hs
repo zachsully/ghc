@@ -168,10 +168,14 @@ filterFB c p x r | p x       = x `c` r
                  | otherwise = r
 
 {-# RULES
-"filter"     [~1] forall p xs.  filter p xs = build (\c n -> foldr (filterFB c p) n xs)
-"filterList" [1]  forall p.     foldr (filterFB (:) p) [] = filter p
-"filterFB"        forall c p q. filterFB (filterFB c p) q = filterFB c (\x -> q x && p x)
- #-}
+  "filter"     [~1] forall p xs.  filter p xs = filterDU p xs
+#-}
+
+-- {-# RULES
+-- "filter"     [~1] forall p xs.  filter p xs = build (\c n -> foldr (filterFB c p) n xs)
+-- "filterList" [1]  forall p.     foldr (filterFB (:) p) [] = filter p
+-- "filterFB"        forall c p q. filterFB (filterFB c p) q = filterFB c (\x -> q x && p x)
+-- #-}
 
 -- Note the filterFB rule, which has p and q the "wrong way round" in the RHS.
 --     filterFB (filterFB c p) q a b
@@ -442,10 +446,17 @@ iterateFB :: (a -> b -> b) -> (a -> a) -> a -> b
 iterateFB c f x0 = go x0
   where go x = x `c` go (f x)
 
+iterateDU :: (a -> a) -> a -> [a]
+iterateDU f = unfoldr (\x -> Just (x, f x))
+
 {-# RULES
-"iterate"    [~1] forall f x.   iterate f x = build (\c _n -> iterateFB c f x)
-"iterateFB"  [1]                iterateFB (:) = iterate
- #-}
+  "iterate"    [~1] forall f x. iterate f x = iterateDU f x
+#-}
+
+-- {-# RULES
+-- "iterate"    [~1] forall f x.   iterate f x = build (\c _n -> iterateFB c f x)
+-- "iterateFB"  [1]                iterateFB (:) = iterate
+-- #-}
 
 
 -- | 'repeat' @x@ is an infinite list, with @x@ the value of every element.
