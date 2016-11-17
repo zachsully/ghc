@@ -35,7 +35,7 @@ module GHC.Exts
         isTrue#,
 
         -- * Fusion
-        build, augment,
+        build,-- augment,
 
         -- * Overloaded string literals
         IsString(..),
