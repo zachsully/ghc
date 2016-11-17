@@ -59,8 +59,6 @@ badHead = errorEmptyList "head"
 {-# RULES
 "head/build"    forall (g::forall b.(a->b->b)->b->b) .
                 head (build g) = g (\x _ -> x) badHead
-"head/augment"  forall xs (g::forall b. (a->b->b) -> b -> b) .
-                head (augment g xs) = g (\x _ -> x) (head xs)
  #-}
 
 -- | Decompose a list into its head and tail. If the list is empty,
@@ -162,29 +160,9 @@ filterDU p xs = destroy (\psi a -> unfoldr (filterDU' psi) a) xs
                                            then Just (b,ys)
                                            else filterDU' psi ys
 
-{-# NOINLINE [0] filterFB #-}
-filterFB :: (a -> b -> b) -> (a -> Bool) -> a -> b -> b
-filterFB c p x r | p x       = x `c` r
-                 | otherwise = r
-
 {-# RULES
   "filter"     [~1] forall p xs.  filter p xs = filterDU p xs
 #-}
-
--- {-# RULES
--- "filter"     [~1] forall p xs.  filter p xs = build (\c n -> foldr (filterFB c p) n xs)
--- "filterList" [1]  forall p.     foldr (filterFB (:) p) [] = filter p
--- "filterFB"        forall c p q. filterFB (filterFB c p) q = filterFB c (\x -> q x && p x)
--- #-}
-
--- Note the filterFB rule, which has p and q the "wrong way round" in the RHS.
---     filterFB (filterFB c p) q a b
---   = if q a then filterFB c p a b else b
---   = if q a then (if p a then c a b else b) else b
---   = if q a && p a then c a b else b
---   = filterFB c (\x -> q x && p x) a b
--- I originally wrote (\x -> p x && q x), which is wrong, and actually
--- gave rise to a live bug report.  SLPJ.
 
 
 -- | 'foldl', applied to a binary operator, a starting value (typically
