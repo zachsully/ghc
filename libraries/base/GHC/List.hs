@@ -403,26 +403,13 @@ minimum xs              =  foldl1 min xs
 --
 -- > iterate f x == [x, f x, f (f x), ...]
 
-{-# NOINLINE [1] iterate #-}
 iterate :: (a -> a) -> a -> [a]
 iterate f = unfoldr (\x -> Just (x, f x))
 
 
 -- | 'repeat' @x@ is an infinite list, with @x@ the value of every element.
 repeat :: a -> [a]
-{-# INLINE [0] repeat #-}
--- The pragma just gives the rules more chance to fire
-repeat x = xs where xs = x : xs
-
-{-# INLINE [0] repeatFB #-}     -- ditto
-repeatFB :: (a -> b -> b) -> a -> b
-repeatFB c x = xs where xs = x `c` xs
-
-
-{-# RULES
-"repeat"    [~1] forall x. repeat x = build (\c _n -> repeatFB c x)
-"repeatFB"  [1]  repeatFB (:)       = repeat
- #-}
+repeat x = unfoldr (\a -> Just (x,a)) undefined
 
 -- | 'replicate' @n x@ is a list of length @n@ with @x@ the value of
 -- every element.
@@ -969,7 +956,11 @@ zipWith3 f xs ys zs =
 
 -- | 'unzip' transforms a list of pairs into a list of first components
 -- and a list of second components.
-unzip    :: [(a,b)] -> ([a],[b])
+unzip :: [(a,b)] -> ([a],[b])
+-- unzip xs = destroy (unfoldr . unzipDU) xs
+--   where unzipDU psi xs = case psi xs of
+--                           Nothing -> Nothing
+--                           Just ((a,b),xs) ->
 {-# INLINE unzip #-}
 unzip    =  foldr (\(a,b) ~(as,bs) -> (a:as,b:bs)) ([],[])
 
