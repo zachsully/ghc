@@ -877,7 +877,6 @@ foldr2_left  k _z  x  r (y:ys) = k x y (r ys)
 -- 'zip' is right-lazy:
 --
 -- > zip [] _|_ = []
-{-# NOINLINE [1] zip #-}
 zip :: [a] -> [b] -> [(a,b)]
 zip xs ys =
   destroy (\psi1 e1 ->
@@ -898,11 +897,24 @@ zip xs ys =
 -- | 'zip3' takes three lists and returns a list of triples, analogous to
 -- 'zip'.
 zip3 :: [a] -> [b] -> [c] -> [(a,b,c)]
--- Specification
--- zip3 =  zipWith3 (,,)
-zip3 (a:as) (b:bs) (c:cs) = (a,b,c) : zip3 as bs cs
-zip3 _      _      _      = []
-
+zip3 xs ys zs =
+  destroy (\psi1 e1 ->
+           destroy (\psi2 e2 ->
+                    destroy (\psi3 e3 ->
+                             unfoldr (zip3DU psi1 psi2 psi3) (e1,e2,e3)
+                            ) zs
+                   ) ys
+          ) xs
+  where zip3DU psi1 psi2 psi3 (e1,e2,e3) =
+          case psi1 e1 of
+            Nothing -> Nothing
+            Just (x,xs) ->
+              case psi2 e2 of
+                Nothing -> Nothing
+                Just (y,ys) ->
+                  case psi3 e3 of
+                    Nothing -> Nothing
+                    Just (z,zs) -> Just ((x,y,z),(xs,ys,zs))
 
 -- The zipWith family generalises the zip family by zipping with the
 -- function given as the first argument, instead of a tupling function.
@@ -916,30 +928,44 @@ zip3 _      _      _      = []
 -- 'zipWith' is right-lazy:
 --
 -- > zipWith f [] _|_ = []
-{-# NOINLINE [1] zipWith #-}
-zipWith :: (a->b->c) -> [a]->[b]->[c]
-zipWith _f []     _bs    = []
-zipWith _f _as    []     = []
-zipWith f  (a:as) (b:bs) = f a b : zipWith f as bs
-
--- zipWithFB must have arity 2 since it gets two arguments in the "zipWith"
--- rule; it might not get inlined otherwise
-{-# INLINE [0] zipWithFB #-}
-zipWithFB :: (a -> b -> c) -> (d -> e -> a) -> d -> e -> b -> c
-zipWithFB c f = \x y r -> (x `f` y) `c` r
-
-{-# RULES
-"zipWith"       [~1] forall f xs ys.    zipWith f xs ys = build (\c n -> foldr2 (zipWithFB c f) n xs ys)
-"zipWithList"   [1]  forall f.  foldr2 (zipWithFB (:) f) [] = zipWith f
-  #-}
-
+zipWith :: (a -> b -> c) -> [a] -> [b] -> [c]
+zipWith f xs ys =
+  destroy (\psi1 e1 ->
+           destroy (\psi2 e2 ->
+                    unfoldr (zipDU psi1 psi2) (e1,e2)
+                   ) ys
+          ) xs
+  where zipDU psi1 psi2 (e1,e2) =
+          case psi1 e1 of
+            Nothing -> Nothing
+            Just (x,xs) ->
+              case psi2 e2 of
+                Nothing -> Nothing
+                Just (y,ys) -> Just (f x y,(xs,ys))
+\
 -- | The 'zipWith3' function takes a function which combines three
 -- elements, as well as three lists and returns a list of their point-wise
 -- combination, analogous to 'zipWith'.
-zipWith3                :: (a->b->c->d) -> [a]->[b]->[c]->[d]
-zipWith3 z (a:as) (b:bs) (c:cs)
-                        =  z a b c : zipWith3 z as bs cs
-zipWith3 _ _ _ _        =  []
+zipWith3 :: (a -> b -> c -> d) -> [a] -> [b] -> [c] -> [d]
+zipWith3 f xs ys zs =
+  destroy (\psi1 e1 ->
+           destroy (\psi2 e2 ->
+                    destroy (\psi3 e3 ->
+                             unfoldr (zip3DU psi1 psi2 psi3) (e1,e2,e3)
+                            ) zs
+                   ) ys
+          ) xs
+  where zip3DU psi1 psi2 psi3 (e1,e2,e3) =
+          case psi1 e1 of
+            Nothing -> Nothing
+            Just (x,xs) ->
+              case psi2 e2 of
+                Nothing -> Nothing
+                Just (y,ys) ->
+                  case psi3 e3 of
+                    Nothing -> Nothing
+                    Just (z,zs) -> Just (f x y z,(xs,ys,zs))
+
 
 -- | 'unzip' transforms a list of pairs into a list of first components
 -- and a list of second components.
