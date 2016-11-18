@@ -144,25 +144,13 @@ idLength = id
 --
 -- > filter p xs = [ x | x <- xs, p x]
 
-{-# NOINLINE [1] filter #-}
 filter :: (a -> Bool) -> [a] -> [a]
-filter _pred []    = []
-filter pred (x:xs)
-  | pred x         = x : filter pred xs
-  | otherwise      = filter pred xs
-
-
-filterDU :: (a -> Bool) -> [a] -> [a]
-filterDU p xs = destroy (\psi a -> unfoldr (filterDU' psi) a) xs
-  where filterDU' psi xs = case psi xs of
+filter p xs = destroy (\psi a -> unfoldr (filterDU psi) a) xs
+  where filterDU psi xs = case psi xs of
                             Nothing -> Nothing
                             Just (b,ys) -> if p b
                                            then Just (b,ys)
-                                           else filterDU' psi ys
-
-{-# RULES
-  "filter"     [~1] forall p xs.  filter p xs = filterDU p xs
-#-}
+                                           else filterDU psi ys
 
 
 -- | 'foldl', applied to a binary operator, a starting value (typically
@@ -417,24 +405,7 @@ minimum xs              =  foldl1 min xs
 
 {-# NOINLINE [1] iterate #-}
 iterate :: (a -> a) -> a -> [a]
-iterate f x =  x : iterate f (f x)
-
-{-# NOINLINE [0] iterateFB #-}
-iterateFB :: (a -> b -> b) -> (a -> a) -> a -> b
-iterateFB c f x0 = go x0
-  where go x = x `c` go (f x)
-
-iterateDU :: (a -> a) -> a -> [a]
-iterateDU f = unfoldr (\x -> Just (x, f x))
-
-{-# RULES
-  "iterate"    [~1] forall f x. iterate f x = iterateDU f x
-#-}
-
--- {-# RULES
--- "iterate"    [~1] forall f x.   iterate f x = build (\c _n -> iterateFB c f x)
--- "iterateFB"  [1]                iterateFB (:) = iterate
--- #-}
+iterate f = unfoldr (\x -> Just (x, f x))
 
 
 -- | 'repeat' @x@ is an infinite list, with @x@ the value of every element.
@@ -908,18 +879,13 @@ foldr2_left  k _z  x  r (y:ys) = k x y (r ys)
 -- > zip [] _|_ = []
 {-# NOINLINE [1] zip #-}
 zip :: [a] -> [b] -> [(a,b)]
-zip []     _bs    = []
-zip _as    []     = []
-zip (a:as) (b:bs) = (a,b) : zip as bs
-
-zipDU :: [a] -> [b] -> [(a,b)]
-zipDU xs ys =
+zip xs ys =
   destroy (\psi1 e1 ->
            destroy (\psi2 e2 ->
-                    unfoldr (zipDU' psi1 psi2) (e1,e2)
+                    unfoldr (zipDU psi1 psi2) (e1,e2)
                    ) ys
           ) xs
-  where zipDU' psi1 psi2 (e1,e2) =
+  where zipDU psi1 psi2 (e1,e2) =
           case psi1 e1 of
             Nothing -> Nothing
             Just (x,xs) ->
@@ -927,17 +893,6 @@ zipDU xs ys =
                 Nothing -> Nothing
                 Just (y,ys) -> Just ((x,y),(xs,ys))
 
-{-# INLINE [0] zipFB #-}
-zipFB :: ((a, b) -> c -> d) -> a -> b -> c -> d
-zipFB c = \x y r -> (x,y) `c` r
-
-{-# RULES
-  "zip"       [~1] zip = zipDU
-#-}
--- {-# RULES
--- "zip"      [~1] forall xs ys. zip xs ys = build (\c n -> foldr2 (zipFB c) n xs ys)
--- "zipList"  [1]  foldr2 (zipFB (:)) []   = zip
--- #-}
 
 ----------------------------------------------
 -- | 'zip3' takes three lists and returns a list of triples, analogous to

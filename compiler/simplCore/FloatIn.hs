@@ -357,7 +357,7 @@ fiExpr dflags to_drop (_,AnnLet (AnnNonRec id rhs) body)
               | otherwise                         = rule_fvs
         -- See Note [extra_fvs (1): avoid floating into RHS]
         -- No point in floating in only to float straight out again
-        -- *Can't* float into ok-for-speculation unlifted RHSs
+        -- - *Can't* float into ok-for-speculation unlifted RHSs
         -- But do float into join points
     is_join = isJoinId id
     is_rec  = NonRecursive
