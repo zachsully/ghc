@@ -162,10 +162,12 @@ filter p xs = destroy (\psi a -> unfoldr (filterDU psi) a) xs
 -- The list must be finite.
 
 foldl :: forall a b. (b -> a -> b) -> b -> [a] -> b
-{-# INLINE foldl #-}
-foldl k z0 xs =
-  foldr (\(v::a) (fn::b->b) -> oneShot (\(z::b) -> fn (k z v))) (id :: b -> b) xs z0
-  -- See Note [Left folds via right fold]
+foldl f b xs = destroy (foldlDU b) xs
+  where foldlDU acc psi xs = foldlDU' acc xs
+          where foldlDU' acc xs =
+                  case psi xs of
+                    Nothing -> acc
+                    Just (a,ys) -> (foldlDU' (f acc a) ys)
 
 {-
 Note [Left folds via right fold]
@@ -188,11 +190,19 @@ argumets to foldr, where we know how the arguments are called.
 -- ----------------------------------------------------------------------------
 
 -- | A strict version of 'foldl'.
-foldl'           :: forall a b . (b -> a -> b) -> b -> [a] -> b
-{-# INLINE foldl' #-}
-foldl' k z0 xs =
-  foldr (\(v::a) (fn::b->b) -> oneShot (\(z::b) -> z `seq` fn (k z v))) (id :: b -> b) xs z0
-  -- See Note [Left folds via right fold]
+foldl' :: forall a b . (b -> a -> b) -> b -> [a] -> b
+foldl' f b xs = destroy (foldlDU b) xs
+  where foldlDU acc psi xs = foldlDU' acc xs
+          where foldlDU' acc xs =
+                  case psi xs of
+                    Nothing -> acc
+                    Just (a,ys) ->
+                      let acc' = f acc a
+                      in seq acc' (foldlDU' acc' ys)
+-- {-# INLINE foldl' #-}
+-- foldl' k z0 xs =
+--   foldr (\(v::a) (fn::b->b) -> oneShot (\(z::b) -> z `seq` fn (k z v))) (id :: b -> b) xs z0
+--   -- See Note [Left folds via right fold]
 
 -- | 'foldl1' is a variant of 'foldl' that has no starting value argument,
 -- and thus must be applied to non-empty lists.
@@ -957,10 +967,6 @@ zipWith3 f xs ys zs =
 -- | 'unzip' transforms a list of pairs into a list of first components
 -- and a list of second components.
 unzip :: [(a,b)] -> ([a],[b])
--- unzip xs = destroy (unfoldr . unzipDU) xs
---   where unzipDU psi xs = case psi xs of
---                           Nothing -> Nothing
---                           Just ((a,b),xs) ->
 {-# INLINE unzip #-}
 unzip    =  foldr (\(a,b) ~(as,bs) -> (a:as,b:bs)) ([],[])
 
