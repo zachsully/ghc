@@ -14,6 +14,7 @@ module CoreCxts (
 ) where
 
 import Coercion
+import CoreArity
 import CoreSyn
 import CoreUtils
 import FastString
@@ -139,7 +140,7 @@ addCxtsBind bind
   where
     do_pair (bndr, rhs)
       | Just join_arity <- isJoinId_maybe bndr
-      , let (bndrs, body) = collectNBinders join_arity rhs
+      , let (bndrs, body) = splitJoinPoint join_arity rhs
       = do body' <- addCxtsTail body
            return (bndr, mkLams bndrs body')
       | otherwise

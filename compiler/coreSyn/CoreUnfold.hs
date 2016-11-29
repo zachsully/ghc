@@ -585,8 +585,8 @@ sizeExpr dflags bOMB_OUT_SIZE top_args expr
 
     size_up_rhs (bndr, rhs)
       | not cheap_joins
-      , Just join_arity <- isJoinId_maybe bndr
-      , (bndrs, body) <- collectNBinders join_arity rhs
+      , isJoinId bndr
+      , (bndrs, body) <- collectBinders rhs
       , all isTyVar bndrs
       = lamScrutDiscount dflags (size_up body `addSizeN` 10)
           -- Pretend there's exactly one Void# argument; see Note [Cheap joins]

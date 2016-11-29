@@ -23,8 +23,7 @@ import MkCore
 import CoreUtils        ( exprIsDupable, exprIsExpandable,
                           exprOkForSideEffects, mkTicks, isJoinBind )
 import CoreFVs
-import CoreJoins
-import Id               ( isJoinId, isJoinId_maybe, isOneShotBndr, idType )
+import Id               ( isJoinId, isOneShotBndr, idType )
 import Var
 import Type             ( isUnliftedType )
 import VarSet
@@ -483,9 +482,10 @@ fiExpr dflags to_drop (_, AnnCase scrut case_bndr ty alts)
 
 fiRhs :: DynFlags -> FloatInBinds -> CoreBndr -> CoreExprWithFVs -> CoreExpr
 fiRhs dflags to_drop bndr rhs
-  | Just join_arity <- isJoinId_maybe bndr
-  , let (bndrs, body) = collectNAnnBndrs join_arity rhs
+  | isJoinId bndr
+  , let (bndrs, body) = collectAnnBndrs rhs
   = mkLams bndrs (fiExpr dflags to_drop body)
+      -- Skip lambdas; we already decided whether to float into the join point
   | otherwise
   = fiExpr dflags to_drop rhs
 

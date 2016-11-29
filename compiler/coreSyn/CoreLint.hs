@@ -569,7 +569,7 @@ lintRhs :: Id -> CoreExpr -> LintM OutType
 -- but produce errors otherwise.
 lintRhs bndr rhs
     | Just arity <- isJoinId_maybe bndr
-    = lint_join_lams arity arity rhs
+    = lint_join_lams arity rhs
     | (binders0, rhs') <- collectTyBinders rhs
     , Just (fun, args) <- collectStaticPtrSatArgs rhs'
     = markAllJoinsBad $ flip fix binders0 $ \loopBinders binders -> case binders of
@@ -583,15 +583,16 @@ lintRhs bndr rhs
           fun_ty <- lintCoreExpr fun
           addLoc (AnExpr rhs') $ foldM lintCoreArg fun_ty args
   where
-    lint_join_lams 0 _ rhs
+    lint_join_lams 0 rhs
       = lintCoreExpr rhs
-    lint_join_lams n tot (Lam var expr)
+    lint_join_lams n (Lam var expr)
       = addLoc (LambdaBodyOf var) $
         lintBinder var $ \ var' ->
-        do { body_ty <- lint_join_lams (n-1) tot expr
+        do { body_ty <- lint_join_lams (n-1) expr
            ; return $ mkLamType var' body_ty }
-    lint_join_lams n tot _other
-      = failWithL $ mkBadJoinArityMsg bndr tot (tot-n)
+    lint_join_lams _ rhs
+      = markAllJoinsBad $ lintCoreExpr rhs
+          -- Join point in eta-contracted form; body is not a tail position
 
 -- Rejects applications of the data constructor @StaticPtr@ if it finds any.
 lintRhs _ rhs = markAllJoinsBad $ lintCoreExpr rhs
@@ -2219,13 +2220,6 @@ mkBadTyVarMsg tv
 mkTopJoinMsg :: Var -> SDoc
 mkTopJoinMsg var
   = text "Join point at top level:" <+> ppr var
-
-mkBadJoinArityMsg :: Var -> Int -> Int -> SDoc
-mkBadJoinArityMsg var ar nlams
-  = vcat [ text "Join point has too few lambdas",
-           text "Join var:" <+> ppr var,
-           text "Arity:" <+> ppr ar,
-           text "Number of lambdas:" <+> ppr nlams ]
 
 mkJoinOutOfScopeMsg :: Var -> SDoc
 mkJoinOutOfScopeMsg var

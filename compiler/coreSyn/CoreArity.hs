@@ -12,7 +12,7 @@
 module CoreArity (
         manifestArity, exprArity, typeArity, exprBotStrictness_maybe,
         exprEtaExpandArity, findRhsArity, CheapFun, etaExpand,
-        etaExpandCountingTypes
+        etaExpandCountingTypes, splitJoinPoint
     ) where
 
 #include "HsVersions.h"
@@ -934,7 +934,7 @@ pushCoercion co eis = EtaCo co : eis
 -- change. (Its join arity will not, since eta-expansion does not affect the
 -- *occurrences* of join points.)
 etaInfoLocalBndr :: CoreBndr -> [EtaInfo] -> CoreBndr
-etaInfoLocalBndr bndr eis@top_eis
+etaInfoLocalBndr bndr eis
   = case isJoinId_maybe bndr of
       Just arity -> bndr `setIdType`      modifyJoinResTy arity (app eis) ty
                          `setIdArity`     max 0 (idArity bndr     - n_val_args)
@@ -1101,6 +1101,35 @@ mkEtaWW orig_n count_ty_args orig_expr in_scope orig_ty
 subst_expr :: Subst -> CoreExpr -> CoreExpr
 subst_expr = substExpr (text "CoreArity:substExpr")
 
+
+--------------
+
+-- | Split a join point into its binders and its body, eta-expanding if
+-- necessary.
+splitJoinPoint :: JoinArity -> CoreExpr -> ([CoreBndr], CoreExpr)
+splitJoinPoint join_arity expr
+  = go join_arity [] expr
+  where
+    go 0 rev_bs e         = (reverse rev_bs, e)
+    go n rev_bs (Lam b e) = go (n-1) (b : rev_bs) e
+    go n rev_bs e         = case eta n (exprType e) (init_subst e) [] e of
+                              (bs, e') -> (reverse rev_bs ++ bs, e')
+
+    -- Don't use etaExpand', because that might leave casts in the way. We
+    -- actually need n leading lambdas.
+    eta 0 _  _     rev_bs e
+      = (reverse rev_bs, e)
+    eta n ty subst rev_bs e
+      | Just (tv, res_ty) <- splitForAllTy_maybe ty
+      , let (subst', tv') = Type.substTyVarBndr subst tv
+      = eta (n-1) res_ty subst' (tv' : rev_bs) (e `App` Type (mkTyVarTy tv'))
+      | Just (arg_ty, res_ty) <- splitFunTy_maybe ty
+      , let (subst', b) = freshEtaId n subst arg_ty
+      = eta (n-1) res_ty subst' (b : rev_bs) (e `App` Var b)
+      | otherwise
+      = pprPanic "splitJoinPoint" (int join_arity <+> ppr expr)
+
+    init_subst e = mkEmptyTCvSubst (mkInScopeSet (exprFreeVars e))
 
 --------------
 freshEtaId :: Int -> TCvSubst -> Type -> (TCvSubst, Id)

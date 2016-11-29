@@ -877,7 +877,7 @@ lvlRhs :: LevelEnv
        -> LvlM LevelledExpr
 lvlRhs env rec_flag (TB bndr _) expr
   | Just join_arity <- isJoinId_maybe bndr
-  = do { let (bndrs, body)            = collectNAnnBndrs join_arity expr
+  = do { let (bndrs, body)            = collect_n_bndrs join_arity expr
              new_lvl | isRec rec_flag = incMajorLvl (le_ctxt_lvl env)
                      | otherwise      = incMinorLvl (le_ctxt_lvl env)
                -- Non-recursive joins are one-shot; recursive joins are not
@@ -885,6 +885,16 @@ lvlRhs env rec_flag (TB bndr _) expr
              (new_env, new_bndrs)     = lvlBndrs env1 new_lvl bndrs1
        ; new_body <- lvlExpr new_env body
        ; return (mkLams new_bndrs new_body) }
+  where
+    collect_n_bndrs orig_n e
+      -- This is only safe because CoreCxts eta-expands join points, so we're
+      -- guaranteed to have enough lambdas.
+      = collect orig_n [] e
+      where
+        collect 0 bs body               = (reverse bs, body)
+        collect n bs (_, AnnLam b body) = collect (n-1) (b:bs) body
+        collect _ _  _                  = pprPanic "collect_n_bndrs" $ int orig_n
+
 
 lvlRhs env _ _ expr
   = lvlExpr env expr

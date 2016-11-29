@@ -24,7 +24,7 @@ import CoreSyn
 import CoreFVs
 import CoreUtils        ( exprIsTrivial, isDefaultAlt, isExpandableApp,
                           stripTicksTopE, mkTicks )
-import {-# SOURCE #-} CoreArity ( etaExpandCountingTypes )
+import {-# SOURCE #-} CoreArity ( splitJoinPoint )
 import Id
 import Name( localiseName )
 import BasicTypes
@@ -2116,10 +2116,7 @@ asJoinIdsIfPossible usage lvl rec_flag pairs
       , not (isRec rec_flag && arity /= lambda_count rhs)
           -- Recursive join points can't be partially applied
       , isValidJoinPointType arity (idType bndr)
-      = Just (bndr `asJoinId` arity, etaExpandCountingTypes arity rhs)
-          -- TODO Don't eta-expand join points. This will require other modules
-          -- to handle eta-reduced join points (for instance by not blindly
-          -- using collectNBinders).
+      = Just (bndr `asJoinId` arity, rhs)
       | otherwise
       = Nothing
 
