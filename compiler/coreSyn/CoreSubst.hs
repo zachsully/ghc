@@ -43,8 +43,9 @@ import CoreFVs
 import CoreSeq
 import CoreUtils
 import Literal  ( Literal(MachStr) )
+import MkCore
 import qualified Data.ByteString as BS
-import OccurAnal( occurAnalyseExpr, occurAnalysePgm )
+import OccurAnal( occurAnalyseExpr_WithJoinPoints, occurAnalysePgm )
 
 import qualified Type
 import qualified Coercion
@@ -886,7 +887,10 @@ simpleOptExpr expr
         -- three passes instead of two (occ-anal, and go)
 
 simpleOptExprWith :: Subst -> InExpr -> OutExpr
-simpleOptExprWith subst expr = simple_opt_expr subst (occurAnalyseExpr expr)
+simpleOptExprWith subst expr
+  = simple_opt_expr subst (occurAnalyseExpr_WithJoinPoints expr)
+      -- Okay to look for join points now, since we're about to copy all binders
+      -- to their occurrence sites
 
 ----------------------
 simpleOptPgm :: DynFlags -> Module
@@ -1003,6 +1007,18 @@ simple_app subst (Var v) as
   , isAlwaysActive (idInlineActivation v)
   -- See Note [Unfold compulsory unfoldings in LHSs]
   =  simple_app subst (unfoldingTemplate (idUnfolding v)) as
+  | e@(Lam {}) <- lookupIdSubst (text "simple_app") subst v
+  = let (bndrs, body) = collectBinders e
+        (pairs, extra_bndrs, extra_args) = zip_rem bndrs as
+        body' = foldr Lam body extra_bndrs
+        expr = mkParallelBindings (substInScope subst) pairs body'
+    in
+    foldl App expr extra_args
+  where
+    zip_rem xs [] = ([], xs, [])
+    zip_rem [] ys = ([], [], ys)
+    zip_rem (x:xs) (y:ys) = ((x, y) : xys, xs', ys')
+      where (xys, xs', ys') = zip_rem xs ys
 simple_app subst (Tick t e) as
   -- Okay to do "(Tick t e) x ==> Tick t (e x)"?
   | t `tickishScopesLike` SoftScope

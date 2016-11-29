@@ -40,7 +40,7 @@ actually float any bindings downwards from the top-level.
 -}
 
 floatInwards :: DynFlags -> CoreProgram -> CoreProgram
-floatInwards dflags = findJoinsInPgm . map fi_top_bind
+floatInwards dflags = map fi_top_bind
                         -- Note [Look for join points afterward]
   where
     fi_top_bind (NonRec binder rhs)

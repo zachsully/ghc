@@ -111,6 +111,8 @@ module Type (
         dropRuntimeRepArgs,
         getRuntimeRep, getRuntimeRepFromKind,
 
+        isValidJoinPointType,
+
         -- * Main data types representing Kinds
         Kind,
 
@@ -197,6 +199,8 @@ module Type (
     ) where
 
 #include "HsVersions.h"
+
+import BasicTypes
 
 -- We import the representation and primitive functions from TyCoRep.
 -- Many things are reexported, but not the representation!
@@ -1915,6 +1919,39 @@ isPrimitiveType ty = case splitTyConApp_maybe ty of
                         Just (tc, ty_args) -> ASSERT( ty_args `lengthIs` tyConArity tc )
                                               isPrimTyCon tc
                         _                  -> False
+
+{-
+************************************************************************
+*                                                                      *
+\subsection{Join points}
+*                                                                      *
+************************************************************************
+-}
+
+-- | Determine whether a type could be the type of a join point of given total
+-- arity. A join point cannot be polymorphic in its return type, since given
+--   let <join> j @a @b x y z = e1 in e2,
+-- the types of e1 and e2 must be the same, and a and b are not in scope for e2.
+-- Returns False if the type simply doesn't have enough arguments.
+--
+-- Note that we need to know how many arguments (type *and* value) the putative
+-- join point takes; for instance, if
+--   j :: forall a. a -> Int
+-- then j could be a binary join point returning an Int, but it could *not* be a
+-- unary join point returning a -> Int.
+isValidJoinPointType :: JoinArity -> Type -> Bool
+isValidJoinPointType arity ty
+  = valid_under emptyVarSet arity ty
+  where
+    valid_under tvs arity ty
+      | arity == 0
+      = isEmptyVarSet (tvs `intersectVarSet` tyCoVarsOfType ty)
+      | Just (t, ty') <- splitForAllTy_maybe ty
+      = valid_under (tvs `extendVarSet` t) (arity-1) ty'
+      | Just (_, res_ty) <- splitFunTy_maybe ty
+      = valid_under tvs (arity-1) res_ty
+      | otherwise
+      = False
 
 {-
 ************************************************************************

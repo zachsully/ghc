@@ -253,6 +253,7 @@ coreDumpFlag CoreDesugar              = Just Opt_D_dump_ds
 coreDumpFlag CoreDesugarOpt           = Just Opt_D_dump_ds
 coreDumpFlag CoreTidy                 = Just Opt_D_dump_simpl
 coreDumpFlag CorePrep                 = Just Opt_D_dump_prep
+coreDumpFlag CoreOccurAnal            = Just Opt_D_dump_occur_anal
 
 coreDumpFlag CoreDoPrintCore          = Nothing
 coreDumpFlag (CoreDoRuleCheck {})     = Nothing
@@ -377,7 +378,8 @@ lintCoreBindings dflags pass local_in_scope binds
   where
     flags = LF { lf_check_global_ids = check_globals
                , lf_check_inline_loop_breakers = check_lbs
-               , lf_check_static_ptrs = check_static_ptrs }
+               , lf_check_static_ptrs = check_static_ptrs
+               , lf_check_join_id_occ_mismatch = check_join_occs }
 
     -- See Note [Checking for global Ids]
     check_globals = case pass of
@@ -398,6 +400,11 @@ lintCoreBindings dflags pass local_in_scope binds
                           CoreTidy              -> True
                           CorePrep              -> True
                           _                     -> False
+
+    -- See Note [Checking join id occurrences]
+    check_join_occs = case pass of
+                        CoreOccurAnal -> False
+                        _             -> True
 
     binders = bindersOfBinds binds
     (_, dups) = removeDups compare binders
@@ -795,7 +802,8 @@ lintCoreApp var args
             Just join_arity ->
               do  { bad <- isBadJoin var'
                   ; checkL (not bad) $ mkJoinOutOfScopeMsg var'
-                  ; checkL (isJoinId_maybe var == Just join_arity) $
+                  ; when (lf_check_join_id_occ_mismatch lf) $
+                    checkL (isJoinId_maybe var == Just join_arity) $
                       mkJoinBndrOccMismatchMsg var' var
                   ; n_ambient_args <- getAmbientArgs
                   ; checkL (length args + n_ambient_args == join_arity) $
@@ -1684,12 +1692,14 @@ data LintFlags
   = LF { lf_check_global_ids           :: Bool -- See Note [Checking for global Ids]
        , lf_check_inline_loop_breakers :: Bool -- See Note [Checking for INLINE loop breakers]
        , lf_check_static_ptrs          :: Bool -- See Note [Checking StaticPtrs]
+       , lf_check_join_id_occ_mismatch :: Bool -- See Note [Checking join id occurrences]
     }
 
 defaultLintFlags :: LintFlags
 defaultLintFlags = LF { lf_check_global_ids = False
                       , lf_check_inline_loop_breakers = True
                       , lf_check_static_ptrs = False
+                      , lf_check_join_id_occ_mismatch = True
                       }
 
 newtype LintM a =
@@ -1733,6 +1743,19 @@ expression. The check is enabled only:
   lambda abstractions.  This binding is injected by CorePrep.
 
   Note that GHC.StaticPtr is itself compiled without -XStaticPointers.
+
+Note [Checking join id occurrences]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Generally it is very important that an id be consistently for a value or a join
+point; thus if the binder says it is a join point, each occurrence site must say
+the same (and agree about the arity). However, the occurrence analyser is
+responsible for discovering potential join points among let bindings, and it
+does not update the occurrence sites, since it's usually run just before the
+simplifier anyway, and the simplifier always propagates binders to their
+occurrences. Since we would like to debug the occurrence analyser, we thus drop
+this invariant when linting its output. (Join points must still be correct in
+other ways, for instance in being only tail-called.) 
 
 Note [Type substitution]
 ~~~~~~~~~~~~~~~~~~~~~~~~

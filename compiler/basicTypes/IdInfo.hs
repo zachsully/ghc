@@ -147,9 +147,6 @@ data RecSelParent = RecSelData TyCon | RecSelPatSyn PatSyn deriving Eq
   -- For a data type family, this is the
   -- /instance/ 'TyCon' not the family 'TyCon'
 
--- | The arity of a join point. This counts both type *and* value arguments.
-type JoinArity = Int
-
 instance Outputable RecSelParent where
   ppr p = case p of
             RecSelData ty_con -> ppr ty_con

@@ -63,7 +63,6 @@ import StaticFlags (opt_PprStyle_Debug)
 import Util( filterOut, filterByList )
 import DataCon (SrcStrictness(..), SrcUnpackedness(..))
 import Lexeme (isLexSym)
-import IdInfo (JoinArity)
 
 import Control.Monad
 import System.IO.Unsafe

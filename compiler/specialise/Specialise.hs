@@ -10,7 +10,6 @@ module Specialise ( specProgram, specUnfolding ) where
 #include "HsVersions.h"
 
 import Id
-import IdInfo( JoinArity )
 import TcType hiding( substTy )
 import Type   hiding( substTy, extendTvSubstList )
 import Module( Module, HasModule(..) )

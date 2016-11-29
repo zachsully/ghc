@@ -17,11 +17,10 @@ import CSE              ( cseProgram )
 import Rules            ( mkRuleBase, unionRuleBase,
                           extendRuleBaseList, ruleCheckProgram, addRuleInfo, )
 import PprCore          ( pprCoreBindings, pprCoreExpr )
-import OccurAnal        ( occurAnalysePgm, occurAnalyseExpr )
+import OccurAnal        ( occurAnalysePgm, occurAnalyseExpr_WithJoinPoints )
 import IdInfo
 import CoreStats        ( coreBindsSize, coreBindsStats, exprSize )
 import CoreUtils        ( mkTicks, stripTicksTop )
-import CoreJoins        ( findJoinsInPgm )
 import CoreLint         ( endPass, lintPassResult, dumpPassResult,
                           lintAnnots )
 import Simplify         ( simplTopBinds, simplExpr, simplRules )
@@ -227,6 +226,19 @@ getCoreToDo dflags
                            [simpl_phase 0 ["post-worker-wrapper"] max_iter]
                            ))
 
+    float_in = (CoreDoPasses [ CoreDoFloatInwards
+                             , simpl_phase 0 ["post-float-in"] max_iter ])
+      -- Float In tends to create join points:
+      --   let j x = ... in case j 1 of ...
+      --     =>
+      --   case (let j x = ... in j 1) of ...
+      -- But we have to run the simplifier to detect join points, and the sooner
+      -- we catch a join point, the better. On the other hand, we *want* to run
+      -- the simplifier to move the case into the join point.
+      --
+      -- TODO Check whether this helps often enough to be worth it. We could
+      -- also run simpleOptPgm instead.
+
     core_todo =
      if opt_level == 0 then
        [ vectorisation,
@@ -301,7 +313,7 @@ getCoreToDo dflags
                 -- Don't stop now!
         simpl_phase 0 ["main"] (max max_iter 3),
 
-        runWhen do_float_in CoreDoFloatInwards,
+        runWhen do_float_in float_in,
             -- Run float-inwards immediately before the strictness analyser
             -- Doing so pushes bindings nearer their use site and hence makes
             -- them more likely to be strict. These bindings might only show
@@ -334,7 +346,7 @@ getCoreToDo dflags
                 -- succeed in commoning up things floated out by full laziness.
                 -- CSE used to rely on the no-shadowing invariant, but it doesn't any more
 
-        runWhen do_float_in CoreDoFloatInwards,
+        runWhen do_float_in float_in,
 
         maybe_rule_check (Phase 0),
 
@@ -612,8 +624,8 @@ simplExprGently :: SimplEnv -> CoreExpr -> SimplM CoreExpr
 -- but only if -O is on.
 
 simplExprGently env expr = do
-    expr1 <- simplExpr env (occurAnalyseExpr expr)
-    simplExpr env (occurAnalyseExpr expr1)
+    expr1 <- simplExpr env (occurAnalyseExpr_WithJoinPoints expr)
+    simplExpr env (occurAnalyseExpr_WithJoinPoints expr1)
 
 {-
 ************************************************************************
@@ -718,12 +730,12 @@ simplifyPgmIO pass@(CoreDoSimplify max_iterations mode)
                ; occ_binds = {-# SCC "OccAnal" #-}
                      occurAnalysePgm this_mod active_rule rules
                                      maybeVects maybeVectVars binds
-               ; tagged_binds = {-# SCC "FindJoins" #-}
-                     findJoinsInPgm occ_binds
                } ;
            Err.dumpIfSet_dyn dflags Opt_D_dump_occur_anal "Occurrence analysis"
-                     (pprCoreBindings tagged_binds);
-           lintPassResult hsc_env pass (text "(occurrence analysis)") tagged_binds;
+                     (pprCoreBindings occ_binds);
+           lintPassResult hsc_env CoreOccurAnal
+                          (parens (text "for pass:" <+> ppr pass))
+                          occ_binds;
 
                 -- Get any new rules, and extend the rule base
                 -- See Note [Overall plumbing for rules] in Rules.hs
@@ -741,7 +753,7 @@ simplifyPgmIO pass@(CoreDoSimplify max_iterations mode)
            ((binds1, rules1), counts1) <-
              initSmpl dflags (mkRuleEnv rule_base2 vis_orphs) fam_envs us1 sz $
                do { env1 <- {-# SCC "SimplTopBinds" #-}
-                            simplTopBinds simpl_env tagged_binds
+                            simplTopBinds simpl_env occ_binds
 
                       -- Apply the substitution to rules defined in this module
                       -- for imported Ids.  Eg  RULE map my_f = blah

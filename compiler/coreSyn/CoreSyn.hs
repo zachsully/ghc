@@ -33,7 +33,7 @@ module CoreSyn (
         -- ** Simple 'Expr' access functions and predicates
         bindersOf, bindersOfBinds, rhssOfBind, rhssOfAlts,
         collectBinders, collectTyBinders, collectTyAndValBinders,
-        collectNBinders,
+        collectNBinders, splitJoinPoint,
         collectArgs, collectArgsTicks, flattenBinds,
 
         exprToType, exprToCoercion_maybe,
@@ -1642,6 +1642,10 @@ collectTyAndValBinders :: CoreExpr -> ([TyVar], [Id], CoreExpr)
 -- | Strip off exactly N leading lambdas (type or value). Good for use with
 -- join points.
 collectNBinders        :: Int -> Expr b -> ([b], Expr b)
+-- | Split a join point into its binders (type or value) and its body. TODO
+-- Should also eta-expand on demand, once we start allowing eta-contracted join
+-- points.
+splitJoinPoint         :: JoinArity -> CoreExpr -> ([CoreBndr], CoreExpr)
 
 collectBinders expr
   = go [] expr
@@ -1673,6 +1677,8 @@ collectNBinders orig_n orig_expr
     go 0 bs expr      = (reverse bs, expr)
     go n bs (Lam b e) = go (n-1) (b:bs) e
     go _ _  _         = pprPanic "collectNBinders" $ int orig_n
+
+splitJoinPoint = collectNBinders -- TODO Eta-expand on demand
 
 -- | Takes a nested application expression and returns the the function
 -- being applied and the arguments to which it is applied

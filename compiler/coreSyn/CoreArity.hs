@@ -25,7 +25,6 @@ import Demand
 import Var
 import VarEnv
 import Id
-import IdInfo   ( JoinArity )
 import Type
 import TyCon    ( initRecTc, checkRecTc )
 import Coercion
