@@ -244,12 +244,15 @@ getCoreToDo dflags
        [ vectorisation,
          -- Static forms are moved to the top level with the FloatOut pass.
          -- See Note [Grand plan for static forms].
-         runWhen static_ptrs $ CoreDoFloatOutwards FloatOutSwitches {
-                                 floatOutLambdas   = Just 0,
-                                 floatOutConstants = True,
-                                 floatOutOverSatApps = False,
-                                 floatToTopLevelOnly = True,
-                                 finalPass_          = Nothing },
+         runWhen static_ptrs $ CoreDoPasses [
+                                 simpl_gently, -- Float Out can't handle type lets
+                                 CoreDoFloatOutwards FloatOutSwitches {
+                                   floatOutLambdas   = Just 0,
+                                   floatOutConstants = True,
+                                   floatOutOverSatApps = False,
+                                   floatToTopLevelOnly = True,
+                                   finalPass_          = Nothing }
+                               ],
          CoreDoSimplify max_iter
              (base_mode { sm_phase = Phase 0
                         , sm_names = ["Non-opt simplification"] })

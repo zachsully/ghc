@@ -876,7 +876,8 @@ lvlRhs :: LevelEnv
        -> CoreExprWithBoth
        -> LvlM LevelledExpr
 lvlRhs env rec_flag (TB bndr _) expr
-  | Just join_arity <- isJoinId_maybe bndr
+  | isId bndr
+  , Just join_arity <- isJoinId_maybe bndr
   = do { let (bndrs, body)            = collect_n_bndrs join_arity expr
              new_lvl | isRec rec_flag = incMajorLvl (le_ctxt_lvl env)
                      | otherwise      = incMinorLvl (le_ctxt_lvl env)
