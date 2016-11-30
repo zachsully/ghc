@@ -585,6 +585,7 @@ sizeExpr dflags bOMB_OUT_SIZE top_args expr
 
     size_up_rhs (bndr, rhs)
       | not cheap_joins
+      , isId bndr
       , isJoinId bndr
       , (bndrs, body) <- collectBinders rhs
       , all isTyVar bndrs
