@@ -1208,20 +1208,12 @@ simplJoinRhsF env cont bndr expr
   = pprPanic "simplJoinRhsF" (ppr bndr)
   where
     simpl_join_lams arity
-      | arity > length bndrs
-      = pprPanic "simplRhsF" $ text "not enough lambdas for join point:" <+> ppr bndr $$
-                               text "expected:" <+> int arity <+>
-                               text "found:" <+> int (length bndrs)
-      | otherwise
       = do { (env', join_bndrs') <- simplLamBndrs env join_bndrs
            ; join_body' <- simplExprC env' join_body cont
-           ; let new_join = mkLams join_bndrs' join_body'
-                              -- NOT mkLam; we don't want to eta-reduce
+           ; new_join <- mkLam join_bndrs' join_body' cont
            ; return (env', new_join) }
       where
-        (bndrs, body) = collectBinders expr
-        (join_bndrs, extra_bndrs) = splitAt arity bndrs
-        join_body = foldr Lam body extra_bndrs
+        (join_bndrs, join_body) = splitJoinPoint arity expr
 
 ---------------------------------
 simplType :: SimplEnv -> InType -> SimplM OutType
@@ -1748,11 +1740,11 @@ simplVar env var
 simplIdF :: SimplEnv -> InId -> SimplCont -> SimplM (SimplEnv, OutExpr)
 simplIdF env var cont
   = case substId env var of
-        DoneEx e             -> simplExprF (zapSubstEnv env) e cont'
+        DoneEx e             -> simplExprF (zapSubstEnv env) e (cont_for var)
         ContEx tvs cvs ids e -> simplExprF (setSubstEnv env tvs cvs ids) e cont
                                   -- Don't trim; haven't already simplified
                                   -- the join, so the cont was never copied
-        DoneId var1          -> completeCall env var1 cont'
+        DoneId var1          -> completeCall env var1 (cont_for var1)
                 -- Note [zapSubstEnv]
                 -- The template is already simplified, so don't re-substitute.
                 -- This is VITAL.  Consider
@@ -1763,11 +1755,11 @@ simplIdF env var cont
                 -- Then when we inline y, we must *not* replace x by x' in
                 -- the inlined copy!!
   where
-    cont' | Just arity <- isJoinId_maybe var
-          = trim_cont arity cont
-          | otherwise
-          = cont
-    
+    cont_for var' | Just arity <- isJoinId_maybe var'
+                  = trim_cont arity cont
+                  | otherwise
+                  = cont
+
     -- Drop outer context from join point invocation
     -- Note [Case-of-case and join points]
     trim_cont 0 cont@(Stop {})
