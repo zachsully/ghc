@@ -24,7 +24,6 @@ import CoreSyn
 import CoreFVs
 import CoreUtils        ( exprIsTrivial, isDefaultAlt, isExpandableApp,
                           stripTicksTopE, mkTicks )
-import {-# SOURCE #-} CoreArity ( splitJoinPoint )
 import Id
 import Name( localiseName )
 import BasicTypes
@@ -211,12 +210,8 @@ occAnalNonRecBind env lvl imp_rule_edges binder rhs body_usage
                  lookupVarEnv imp_rule_edges binder
        -- See Note [Preventing loops due to imported functions rules]
 
-    -- Tail calls can happen indirectly from join points (since they're
-    -- necessarily invoked by tail calls) but not from regular functions. Thus
-    -- if the binder isn't a join id (and we're not making it one), drop all
-    -- tail-call info from its RHS.
-    rhs_usage' | isJoinId final_binder = rhs_usage4
-               | otherwise             = dropTailCallInfo rhs_usage4
+    rhs_usage' = adjustRhsUsage (isJoinId_maybe final_binder) NonRecursive
+                                rhs' rhs_usage4
 
 -----------------
 occAnalRecBind :: OccEnv -> TopLevelFlag -> ImpRuleEdges -> [(Var,CoreExpr)]
@@ -759,7 +754,7 @@ makeNode env imp_rule_edges bndr_set (bndr, rhs)
 
     -- Constructing the edges for the main Rec computation
     -- See Note [Forming Rec groups]
-    (rhs_usage1, rhs') = occAnalRecRhs env bndr rhs
+    (rhs_usage1, rhs') = occAnalRecRhs env rhs
     rhs_usage2 = addIdOccs rhs_usage1 all_rule_fvs   -- Note [Rules are extra RHSs]
                                                      -- Note [Rule dependency info]
     rhs_usage3 = case mb_unf_uds of
@@ -816,8 +811,7 @@ occAnalRec lvl (AcyclicSCC (ND { nd_bndr = bndr, nd_rhs = rhs, nd_uds = rhs_uds}
     (final_bndr, rhs')
       = asJoinIdIfPossible body_uds lvl tagged_bndr rhs
           `orElse` (tagged_bndr, rhs)
-    rhs_uds' | not (isJoinId final_bndr) = dropTailCallInfo rhs_uds
-             | otherwise                 = rhs_uds
+    rhs_uds' = adjustRhsUsage (isJoinId_maybe final_bndr) NonRecursive rhs' rhs_uds
 
         -- The Rec case is the interesting one
         -- See Note [Loop breaking]
@@ -839,20 +833,19 @@ occAnalRec lvl (CyclicSCC nodes) (body_uds, binds)
         -- Tag the binders with their occurrence info
     tagged_nodes = map tag_node nodes
     tagged_pairs = [ (nd_bndr nd, nd_rhs nd) | (nd, _, _) <- tagged_nodes ]
-    total_uds    = foldl add_uds body_uds nodes
+    rhs_uds      = foldl add_uds emptyDetails nodes
+    total_uds    = body_uds +++ rhs_uds
     final_nodes  = case asJoinIdsIfPossible total_uds lvl Recursive tagged_pairs of
                      Just pairs' -> [ (nd { nd_bndr = bndr', nd_rhs = rhs' }, k, ks)
                                     | (nd, k, ks) <- tagged_nodes
                                     | (bndr', rhs') <- pairs' ]
                      Nothing    -> tagged_nodes
-    total_uds1   = total_uds `minusDetails` bndr_set
-    is_join_bind = case head final_nodes of (nd, _, _) -> isJoinId (nd_bndr nd)
-    final_uds    | is_join_bind
-                 = ASSERT(and [isJoinId (nd_bndr nd) | (nd,_,_) <- final_nodes])
-                   total_uds1
-                 | otherwise
-                 = dropTailCallInfo total_uds1
+    rhs_uds'     = foldl add_adjusted_uds emptyDetails final_nodes
+    total_uds'   = body_uds +++ rhs_uds'
+    final_uds    = total_uds' `minusDetails` bndr_set
     add_uds usage_so_far (nd, _, _) = usage_so_far +++ nd_uds nd
+    add_adjusted_uds usage_so_far (ND { nd_bndr = bndr', nd_rhs = rhs', nd_uds = uds }, _, _)
+      = usage_so_far +++ adjustRhsUsage (isJoinId_maybe bndr') Recursive rhs' uds
 
     tag_node :: Node Details -> Node Details
     tag_node (details@ND { nd_bndr = bndr }, k, ks)
@@ -1167,11 +1160,11 @@ ToDo: try using the occurrence info for the inline'd binder.
 [June 98, SLPJ]  I've undone this change; I don't understand it.  See notes with loopBreakSCC.
 -}
 
-occAnalRecRhs :: OccEnv -> Id -> CoreExpr    -- Binder and rhs
+occAnalRecRhs :: OccEnv -> CoreExpr    -- Binder and rhs
               -> (UsageDetails, CoreExpr)
               -- Returned usage details covers only the RHS,
               -- and *not* the RULE or INLINE template for the Id
-occAnalRecRhs env bndr rhs = occAnalRhs (rhsCtxt env) Recursive bndr rhs
+occAnalRecRhs env rhs = occAnalRhs (rhsCtxt env) rhs
 
 occAnalNonRecRhs :: OccEnv
                  -> Id -> CoreExpr    -- Binder and rhs
@@ -1180,7 +1173,7 @@ occAnalNonRecRhs :: OccEnv
               -- Returned usage details covers only the RHS,
               -- and *not* the RULE or INLINE template for the Id
 occAnalNonRecRhs env bndr rhs
-  = occAnalRhs rhs_env NonRecursive bndr rhs
+  = occAnalRhs rhs_env rhs
   where
     -- See Note [Cascading inlines]
     env1 | certainly_inline = env
@@ -1201,26 +1194,26 @@ occAnalNonRecRhs env bndr rhs
 
 -- | Not to be called directly; go through occAnalNonRecRhs or occAnalRecRhs
 occAnalRhs :: OccEnv
-           -> RecFlag
-           -> Id
            -> CoreExpr
            -> (UsageDetails, CoreExpr)
-occAnalRhs env rec_flag bndr expr
-  | Just join_arity <- isJoinId_maybe bndr
-  = case splitJoinPoint join_arity expr of { (bndrs, body) ->
-    case occAnal env body of { (usage, body') ->
-    let
-        -- Compare to occAnal of Lam, though bndrs might be empty, so we rely on
-        -- rec_flag to tell us whether the join point is one-shot (= non-recursive)
-        (usage1, bndrs') = tagLamBinders usage bndrs
-        final_usage | isRec rec_flag = markAllInsideLam usage1
-                    | otherwise      = usage1
-    in
-    (final_usage, mkLams bndrs' body') }}
-      -- TODO Once we allow eta-reduced join points, mkLams will cause them to
-      -- be eta-expanded; we should call tryEtaReduce to avoid this.
-  | otherwise
-  = occAnal env expr
+occAnalRhs env expr
+  = -- This is somewhat touchy for finding join points. When analyzing a join
+    -- point, we want to skip the lambdas, since the body of the join point is
+    -- a tail context (i.e. a place where tail calls can occur). But we could be
+    -- looking at something that's not a join point *yet*! Fortunately, we
+    -- needn't worry about this here; at the let, we'll decide and then know
+    -- whether to throw out the tail-call info or not, so for now just leave it
+    -- all there.
+    --
+    -- Thus the game plan is to act largely like occAnal of Lam. However, we
+    -- can't yet decide whether to apply markAllInsideLam, since that depends on
+    -- on whether this is a join point - lambdas get marked iff they're
+    -- one-shot, and a join point is one-shot iff it's non-recursive. So we
+    -- defer that decision to the binding site as well.
+    case occAnalLam env bndrs body of { (usage, bndrs', body') ->
+    (usage, mkLams bndrs' body') }
+  where
+    (bndrs, body) = collectBinders expr
 
 occAnalUnfolding :: OccEnv
                  -> RecFlag
@@ -1237,7 +1230,7 @@ occAnalUnfolding env rec_flag id
         | otherwise
         -> Just $ zapDetails usage
         where
-          (usage, _rhs') | isRec rec_flag = occAnalRecRhs env id rhs
+          (usage, _rhs') | isRec rec_flag = occAnalRecRhs env rhs
                          | otherwise      = occAnalNonRecRhs env id rhs
 
       DFunUnfolding { df_bndrs = bndrs, df_args = args }
@@ -1386,19 +1379,14 @@ occAnal env (Lam x body) | isTyVar x
 -- Then, the simplifier is careful when partially applying lambdas.
 
 occAnal env expr@(Lam _ _)
-  = case occAnal env_body body of { (body_usage, body') ->
+  = case occAnalLam env binders body of { (usage, tagged_binders, body') ->
     let
-        (final_usage, tagged_binders) = tagLamBinders body_usage binders'
-                      -- Use binders' to put one-shot info on the lambdas
-
-        really_final_usage
-          | all isOneShotBndr binders' = dropTailCallInfo final_usage
-          | otherwise = dropTailCallInfo (markAllInsideLam final_usage)
+        expr'       = mkLams tagged_binders body'
+        final_usage = adjustRhsUsage Nothing NonRecursive expr' usage
     in
-    (really_final_usage, mkLams tagged_binders body') }
+    (final_usage, expr') }
   where
     (binders, body)      = collectBinders expr
-    (env_body, binders') = oneShotGroup env binders
 
 occAnal env (Case scrut bndr ty alts)
   = case occ_anal_scrut scrut alts     of { (scrut_usage, scrut') ->
@@ -1572,6 +1560,18 @@ In this example, though, the Simplifier will bring 'a' and 'b' back to
 life, beause it binds 'y' to (a,b) (imagine got inlined and
 scrutinised y).
 -}
+
+occAnalLam :: OccEnv -> [CoreBndr] -> CoreExpr
+           -> (UsageDetails, [CoreBndr], CoreExpr)
+occAnalLam env binders body
+  = case occAnal env_body body of { (body_usage, body') ->
+    let
+        (final_usage, tagged_binders) = tagLamBinders body_usage binders'
+                      -- Use binders' to put one-shot info on the lambdas
+    in
+    (final_usage, tagged_binders, body') }
+  where
+    (env_body, binders') = oneShotGroup env binders
 
 occAnalAlt :: (OccEnv, Maybe (Id, CoreExpr))
            -> CoreAlt
@@ -2045,6 +2045,51 @@ markAllInsideLam :: UsageDetails -> UsageDetails
 markAllInsideLam usage
   = usage { ud_occ_info = mapVarEnv markInsideLam (ud_occ_info usage) }
 
+-- | Apply adjustments from join-point-hood and one-shot-ness to usage details
+-- from a lambda expression or a binding's RHS. Can't be done from occAnalRhs
+-- because it doesn't yet know whether the binding will become a join point.
+--
+-- Tail calls can happen indirectly from join points (since they're necessarily
+-- invoked by tail calls) but not from regular functions. Thus if the binder
+-- isn't a join id (and we're not making it one), we drop all tail-call info
+-- from its RHS. Also drop tail calls if the join point is under- or
+-- oversaturated (since then its body isn't truly in tail position).
+--
+-- If a function or join point is non-one-shot, its free variables get marked as
+-- occurring inside a lambda. A lambda group is one-shot if each of its value
+-- lambdas is one-shot. A free-standing function is one-shot if its lambda group
+-- is one-shot. A binding is one-shot if either
+--
+--   1. It's for a thunk, or
+--   2. It's for a function and its outer lambda group is one-shot, or
+--   3. It's for a non-recursive join point of join arity n, and after its
+--      initial n lambdas, its outer lambda group is one-shot. (Most join points
+--      don't have such extra lambdas, so they're one-shot iff non-recursive.)
+adjustRhsUsage :: Maybe JoinArity -> RecFlag
+               -> CoreExpr -- RHS or expression (with lambdas), AFTER occ anal
+               -> UsageDetails -> UsageDetails
+adjustRhsUsage mb_join_arity rec_flag expr usage
+  = maybe_mark_lam (maybe_drop_tails usage)
+  where
+    (bndrs, _) = collectBinders expr
+
+    maybe_mark_lam ud   | one_shot   = ud
+                        | otherwise  = markAllInsideLam ud
+    maybe_drop_tails ud | exact_join = ud
+                        | otherwise  = dropTailCallInfo ud
+
+    one_shot = case mb_join_arity of
+                 Just join_arity
+                   | isRec rec_flag -> False
+                   | otherwise      -> all_one_shot (drop join_arity bndrs)
+                 Nothing            -> all_one_shot bndrs
+
+    all_one_shot = all (\bndr -> not (isId bndr) || isOneShotBndr bndr)
+
+    exact_join = case mb_join_arity of
+                   Just join_arity -> join_arity == length bndrs
+                   _               -> False
+
 usedIn :: Id -> UsageDetails -> Bool
 v `usedIn` details = isExportedId v || v `elemVarEnv` ud_occ_info details
 
@@ -2105,14 +2150,15 @@ findTailCallInfo usage bndr = ud_tail_calls usage `lookupVarEnv` bndr
 asJoinIdsIfPossible :: UsageDetails -> TopLevelFlag -> RecFlag
                     -> [(CoreBndr, CoreExpr)]
                     -> Maybe [(CoreBndr, CoreExpr)]
-asJoinIdsIfPossible usage lvl rec_flag pairs
+asJoinIdsIfPossible _ TopLevel _ _
+  = Nothing
+asJoinIdsIfPossible usage NotTopLevel rec_flag pairs
   = mapM convert pairs
   where
     convert (bndr, rhs)
       | isJoinId bndr
       = Nothing -- Already a join id (won't be in analysis anyway)
-      | isNotTopLevel lvl
-      , Just arity <- findTailCallInfo usage bndr
+      | Just arity <- findTailCallInfo usage bndr
       , not (isRec rec_flag && arity /= lambda_count rhs)
           -- Recursive join points can't be partially applied
       , isValidJoinPointType arity (idType bndr)
