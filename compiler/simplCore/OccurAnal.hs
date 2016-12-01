@@ -1563,6 +1563,9 @@ scrutinised y).
 
 occAnalLam :: OccEnv -> [CoreBndr] -> CoreExpr
            -> (UsageDetails, [CoreBndr], CoreExpr)
+occAnalLam env [] body
+  = case occAnal env body of (body_usage, body') -> (body_usage, [], body')
+      -- RHS of thunk or nullary join point
 occAnalLam env binders body
   = case occAnal env_body body of { (body_usage, body') ->
     let
