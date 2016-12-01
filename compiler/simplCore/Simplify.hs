@@ -1210,7 +1210,9 @@ simplJoinRhsF env cont bndr expr
     simpl_join_lams arity
       = do { (env', join_bndrs') <- simplLamBndrs env join_bndrs
            ; join_body' <- simplExprC env' join_body cont
-           ; new_join <- mkLam join_bndrs' join_body' cont
+           ; let lam_cont = mkRhsStop (exprType join_body')
+               -- Only purpose of lam_cont is to prevent mkLam from eta-expanding
+           ; new_join <- mkLam join_bndrs' join_body' lam_cont
            ; return (env', new_join) }
       where
         (join_bndrs, join_body) = splitJoinPoint arity expr

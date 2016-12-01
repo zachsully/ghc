@@ -1038,9 +1038,7 @@ etaInfoAppRhs subst bndr expr eis
   where
     do_join_point arity = mkLams join_bndrs' join_body'
       where
-        (bndrs, body) = collectBinders expr
-        (join_bndrs, extra_bndrs) = splitAt arity bndrs
-        join_body = foldr Lam body extra_bndrs
+        (join_bndrs, join_body) = splitJoinPoint arity expr
         (subst', join_bndrs') = substBndrs subst join_bndrs
         join_body' = etaInfoApp subst' join_body eis
 
