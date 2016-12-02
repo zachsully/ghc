@@ -746,8 +746,8 @@ lintCont hdr doc env e orig_cont
                     (go alt_ty k)
                     alts'
     go ty (StrictBind bndr bndrs body se k)
-      = check_ty (text "Strict binder type") ty (idType bndr) $
-        go (substTy se (mkInvForAllTys bndrs (exprType body))) k
+      = check_ty (text "Strict binder type") ty (substTy se (idType bndr)) $
+        go (substTy se (mkLamTypes bndrs (exprType body))) k
     go ty (StrictArg ai _ k)
       | Just (arg_ty, res_ty) <- splitFunTy_maybe (ai_type ai)
       = check_ty (text "Strict arg type") ty arg_ty $
