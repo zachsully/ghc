@@ -1742,11 +1742,11 @@ simplVar env var
 simplIdF :: SimplEnv -> InId -> SimplCont -> SimplM (SimplEnv, OutExpr)
 simplIdF env var cont
   = case substId env var of
-        DoneEx e             -> simplExprF (zapSubstEnv env) e (cont_for var)
+        DoneEx e             -> simplExprF (zapSubstEnv env) e trimmed_cont
         ContEx tvs cvs ids e -> simplExprF (setSubstEnv env tvs cvs ids) e cont
                                   -- Don't trim; haven't already simplified
                                   -- the join, so the cont was never copied
-        DoneId var1          -> completeCall env var1 (cont_for var1)
+        DoneId var1          -> completeCall env var1 trimmed_cont
                 -- Note [zapSubstEnv]
                 -- The template is already simplified, so don't re-substitute.
                 -- This is VITAL.  Consider
@@ -1757,10 +1757,10 @@ simplIdF env var cont
                 -- Then when we inline y, we must *not* replace x by x' in
                 -- the inlined copy!!
   where
-    cont_for var' | Just arity <- isJoinId_maybe var'
-                  = trim_cont arity cont
-                  | otherwise
-                  = cont
+    trimmed_cont | Just arity <- isJoinIdInEnv_maybe env var
+                 = trim_cont arity cont
+                 | otherwise
+                 = cont
 
     -- Drop outer context from join point invocation
     -- Note [Case-of-case and join points]

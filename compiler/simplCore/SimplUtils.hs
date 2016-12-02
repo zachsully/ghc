@@ -650,7 +650,7 @@ interestingArg env e = go env 0 e
     -- n is # value args to which the expression is applied
     go env n (Var v)
        | SimplEnv { seIdSubst = ids, seInScope = in_scope } <- env
-       = case lookupVarEnv ids v of
+       = case snd <$> lookupVarEnv ids v of
            Nothing                     -> go_var n (refineFromInScope in_scope v)
            Just (DoneId v')            -> go_var n (refineFromInScope in_scope v')
            Just (DoneEx e)             -> go (zapSubstEnv env)             n e
