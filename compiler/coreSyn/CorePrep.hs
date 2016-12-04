@@ -885,7 +885,8 @@ maybeSaturate env fn expr n_args
   = return sat_expr
 
   | addingVoidParam env fn
-  = return (App expr (Var voidPrimId))
+  = let (head, args) = collectArgs expr in
+    return $ mkApps head (Var voidPrimId : args)
   
   | otherwise
   = return expr
@@ -1528,14 +1529,19 @@ addVoidParamIfNeeded :: CoreBndr      -- Original binder (must be join id)
                          CoreExpr,    -- New RHS
                          Bool)        -- Changed?
 addVoidParamIfNeeded bndr expr
-  | all (not . isId) bndrs
+  | needs_void_param
   = (bndr', expr', True)
   | otherwise
   = (bndr, expr, False)
   where
-    (bndrs, body)   = collectBinders expr
     Just join_arity = isJoinId_maybe bndr
 
-    expr' = mkCoreLams (bndrs ++ [voidArgId]) body
+    needs_void_param = go join_arity (idType bndr)
+    go 0 _  = True
+    go n ty | isFunTy ty = False
+            | Just (_, res_ty) <- splitForAllTy_maybe ty = go (n-1) res_ty
+            | otherwise = WARN ( True, pprBndr LetBind bndr ) False
+
+    expr' = Lam voidArgId expr
     bndr' = bndr `setIdType` exprType expr'
                  `asJoinId`  join_arity + 1
