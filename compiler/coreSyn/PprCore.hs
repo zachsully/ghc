@@ -171,7 +171,10 @@ ppr_expr add_par expr@(App {})
                              tc        = dataConTyCon dc
                              saturated = val_args `lengthIs` idArity f
 
-                   _ -> parens (hang (ppr f) 2 pp_args)
+                   _ -> parens (hang fun_doc 2 pp_args)
+                   where
+                     fun_doc | isJoinId f = text "jump" <+> ppr f
+                             | otherwise  = ppr f
 
         _ -> parens (hang (pprParendExpr fun) 2 pp_args)
     }
