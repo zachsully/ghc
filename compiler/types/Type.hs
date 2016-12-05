@@ -101,7 +101,7 @@ module Type (
         -- ** Predicates on types
         isTyVarTy, isFunTy, isDictTy, isPredTy, isCoercionTy,
         isCoercionTy_maybe, isCoercionType, isForAllTy,
-        isPiTy,
+        isPiTy, isTauTy, isFamFreeTy,
 
         -- (Lifting and boxity)
         isUnliftedType, isUnboxedTupleType, isUnboxedSumType,
@@ -179,12 +179,12 @@ module Type (
 
         -- * Pretty-printing
         pprType, pprParendType, pprTypeApp, pprTyThingCategory, pprShortTyThing,
-        pprTvBndr, pprTvBndrs, pprForAll, pprForAllImplicit, pprUserForAll,
+        pprTvBndr, pprTvBndrs, pprForAll, pprUserForAll,
         pprSigmaType, ppSuggestExplicitKinds,
         pprTheta, pprThetaArrowTy, pprClassPred,
         pprKind, pprParendKind, pprSourceTyCon,
         TyPrec(..), maybeParen,
-        pprTyVar, pprTcAppTy, pprPrefixApp, pprArrowChain,
+        pprTyVar, pprTyVars, pprTcAppTy, pprPrefixApp, pprArrowChain,
 
         -- * Tidying type related things up for printing
         tidyType,      tidyTypes,
@@ -340,6 +340,8 @@ expandTypeSynonyms :: Type -> Type
 --
 -- 'expandTypeSynonyms' only expands out type synonyms mentioned in the type,
 -- not in the kinds of any TyCon or TyVar mentioned in the type.
+--
+-- Keep this synchronized with 'synonymTyConsOfType'
 expandTypeSynonyms ty
   = go (mkEmptyTCvSubst in_scope) ty
   where
@@ -1276,11 +1278,13 @@ splitForAllTyVarBndrs ty = split ty ty []
 
 -- | Checks whether this is a proper forall (with a named binder)
 isForAllTy :: Type -> Bool
+isForAllTy ty | Just ty' <- coreView ty = isForAllTy ty'
 isForAllTy (ForAllTy {}) = True
 isForAllTy _             = False
 
 -- | Is this a function or forall?
 isPiTy :: Type -> Bool
+isPiTy ty | Just ty' <- coreView ty = isForAllTy ty'
 isPiTy (ForAllTy {}) = True
 isPiTy (FunTy {})    = True
 isPiTy _             = False
@@ -1387,6 +1391,17 @@ partitionInvisibles tc get_ty = go emptyTCvSubst (tyConKind tc)
     go _ _ xs = ([], xs)  -- something is ill-kinded. But this can happen
                           -- when printing errors. Assume everything is visible.
 
+-- @isTauTy@ tests if a type has no foralls
+isTauTy :: Type -> Bool
+isTauTy ty | Just ty' <- coreView ty = isTauTy ty'
+isTauTy (TyVarTy _)           = True
+isTauTy (LitTy {})            = True
+isTauTy (TyConApp tc tys)     = all isTauTy tys && isTauTyCon tc
+isTauTy (AppTy a b)           = isTauTy a && isTauTy b
+isTauTy (FunTy a b)           = isTauTy a && isTauTy b
+isTauTy (ForAllTy {})         = False
+isTauTy (CastTy ty _)         = isTauTy ty
+isTauTy (CoercionTy _)        = False  -- Not sure about this
 
 {-
 %************************************************************************
@@ -1833,6 +1848,18 @@ pprSourceTyCon tycon
   | otherwise
   = ppr tycon
 
+-- @isTauTy@ tests if a type has no foralls
+isFamFreeTy :: Type -> Bool
+isFamFreeTy ty | Just ty' <- coreView ty = isFamFreeTy ty'
+isFamFreeTy (TyVarTy _)       = True
+isFamFreeTy (LitTy {})        = True
+isFamFreeTy (TyConApp tc tys) = all isFamFreeTy tys && isFamFreeTyCon tc
+isFamFreeTy (AppTy a b)       = isFamFreeTy a && isFamFreeTy b
+isFamFreeTy (FunTy a b)       = isFamFreeTy a && isFamFreeTy b
+isFamFreeTy (ForAllTy _ ty)   = isFamFreeTy ty
+isFamFreeTy (CastTy ty _)     = isFamFreeTy ty
+isFamFreeTy (CoercionTy _)    = False  -- Not sure about this
+
 {-
 ************************************************************************
 *                                                                      *
@@ -2191,10 +2218,6 @@ typeLiteralKind l =
   case l of
     NumTyLit _ -> typeNatKind
     StrTyLit _ -> typeSymbolKind
-
--- | Print a tyvar with its kind
-pprTyVar :: TyVar -> SDoc
-pprTyVar tv = ppr tv <+> dcolon <+> ppr (tyVarKind tv)
 
 {-
 %************************************************************************

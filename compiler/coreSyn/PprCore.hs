@@ -381,7 +381,7 @@ pprTypedLetBinder binder
 pprKindedTyVarBndr :: TyVar -> SDoc
 -- Print a type variable binder with its kind (but not if *)
 pprKindedTyVarBndr tyvar
-  = text "@" <+> pprTvBndr tyvar
+  = text "@" <+> pprTyVar tyvar
 
 -- pprIdBndr does *not* print the type
 -- When printing any Id binder in debug mode, we print its inline pragma and one-shot-ness
@@ -487,6 +487,7 @@ instance Outputable UnfoldingSource where
 
 instance Outputable Unfolding where
   ppr NoUnfolding                = text "No unfolding"
+  ppr BootUnfolding              = text "No unfolding (from boot)"
   ppr (OtherCon cs)              = text "OtherCon" <+> ppr cs
   ppr (DFunUnfolding { df_bndrs = bndrs, df_con = con, df_args = args })
        = hang (text "DFun:" <+> ptext (sLit "\\")

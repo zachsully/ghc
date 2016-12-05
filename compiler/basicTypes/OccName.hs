@@ -135,7 +135,6 @@ data NameSpace = VarName        -- Variables, including "real" data constructors
                | TcClsName      -- Type constructors and classes; Haskell has them
                                 -- in the same name space for now.
                deriving( Eq, Ord )
-   {-! derive: Binary !-}
 
 -- Note [Data Constructors]
 -- see also: Note [Data Constructor Naming] in DataCon.hs
@@ -228,6 +227,11 @@ demoteNameSpace TcClsName = Just DataName
 ************************************************************************
 -}
 
+-- | Occurrence Name
+--
+-- In this context that means:
+-- "classified (i.e. as a type name, value name, etc) but not qualified
+-- and not yet resolved"
 data OccName = OccName
     { occNameSpace  :: !NameSpace
     , occNameFS     :: !FastString

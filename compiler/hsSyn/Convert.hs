@@ -339,12 +339,14 @@ cvtDec (TH.RoleAnnotD tc roles)
        ; let roles' = map (noLoc . cvtRole) roles
        ; returnJustL $ Hs.RoleAnnotD (RoleAnnotDecl tc' roles') }
 
-cvtDec (TH.StandaloneDerivD cxt ty)
+cvtDec (TH.StandaloneDerivD ds cxt ty)
   = do { cxt' <- cvtContext cxt
        ; L loc ty'  <- cvtType ty
        ; let inst_ty' = L loc $ HsQualTy { hst_ctxt = cxt', hst_body = L loc ty' }
        ; returnJustL $ DerivD $
-         DerivDecl { deriv_type = mkLHsSigType inst_ty', deriv_overlap_mode = Nothing } }
+         DerivDecl { deriv_strategy = fmap (L loc . cvtDerivStrategy) ds
+                   , deriv_type = mkLHsSigType inst_ty'
+                   , deriv_overlap_mode = Nothing } }
 
 cvtDec (TH.DefaultSigD nm typ)
   = do { nm' <- vNameL nm
@@ -560,12 +562,9 @@ cvt_id_arg (i, str, ty)
                           , cd_fld_type =  ty'
                           , cd_fld_doc = Nothing}) }
 
-cvtDerivs :: TH.Cxt -> CvtM (HsDeriving RdrName)
-cvtDerivs [] = return Nothing
-cvtDerivs cs = fmap (Just . mkSigTypes) (cvtContext cs)
-  where
-    mkSigTypes :: Located (HsContext RdrName) -> Located [LHsSigType RdrName]
-    mkSigTypes = fmap (map mkLHsSigType)
+cvtDerivs :: [TH.DerivClause] -> CvtM (HsDeriving RdrName)
+cvtDerivs cs = do { cs' <- mapM cvtDerivClause cs
+                  ; returnL cs' }
 
 cvt_fundep :: FunDep -> CvtM (Located (Class.FunDep (Located RdrName)))
 cvt_fundep (FunDep xs ys) = do { xs' <- mapM tNameL xs
@@ -756,6 +755,9 @@ cvtl e = wrapL (cvt e)
                                    ; return $ HsApp (mkLHsPar x') y' }
     cvt (AppE x y)            = do { x' <- cvtl x; y' <- cvtl y
                                    ; return $ HsApp x' y' }
+    cvt (AppTypeE e t) = do { e' <- cvtl e
+                            ; t' <- cvtType t
+                            ; return $ HsAppType e' $ mkHsWildCardBndrs t' }
     cvt (LamE ps e)    = do { ps' <- cvtPats ps; e' <- cvtl e
                             ; return $ HsLam (mkMatchGroup FromSource
                                              [mkSimpleMatch LambdaExpr ps' e'])}
@@ -771,6 +773,10 @@ cvtl e = wrapL (cvt e)
     cvt (UnboxedTupE es)      = do { es' <- mapM cvtl es
                                    ; return $ ExplicitTuple
                                            (map (noLoc . Present) es') Unboxed }
+    cvt (UnboxedSumE e alt arity) = do { e' <- cvtl e
+                                       ; unboxedSumChecks alt arity
+                                       ; return $ ExplicitSum
+                                             alt arity e' placeHolderType }
     cvt (CondE x y z)  = do { x' <- cvtl x; y' <- cvtl y; z' <- cvtl z;
                             ; return $ HsIf (Just noSyntaxExpr) x' y' z' }
     cvt (MultiIfE alts)
@@ -1045,6 +1051,10 @@ cvtp (TH.VarP s)       = do { s' <- vName s; return $ Hs.VarPat (noLoc s') }
 cvtp (TupP [p])        = do { p' <- cvtPat p; return $ ParPat p' } -- Note [Dropping constructors]
 cvtp (TupP ps)         = do { ps' <- cvtPats ps; return $ TuplePat ps' Boxed   [] }
 cvtp (UnboxedTupP ps)  = do { ps' <- cvtPats ps; return $ TuplePat ps' Unboxed [] }
+cvtp (UnboxedSumP p alt arity)
+                       = do { p' <- cvtPat p
+                            ; unboxedSumChecks alt arity
+                            ; return $ SumPat p' alt arity placeHolderType }
 cvtp (ConP s ps)       = do { s' <- cNameL s; ps' <- cvtPats ps
                             ; return $ ConPatIn s' (PrefixCon ps') }
 cvtp (InfixP p1 s p2)  = do { s' <- cNameL s; p1' <- cvtPat p1; p2' <- cvtPat p2
@@ -1116,6 +1126,18 @@ cvtContext tys = do { preds' <- mapM cvtPred tys; returnL preds' }
 cvtPred :: TH.Pred -> CvtM (LHsType RdrName)
 cvtPred = cvtType
 
+cvtDerivClause :: TH.DerivClause
+               -> CvtM (LHsDerivingClause RdrName)
+cvtDerivClause (TH.DerivClause ds ctxt)
+  = do { ctxt'@(L loc _) <- fmap (map mkLHsSigType) <$> cvtContext ctxt
+       ; let ds' = fmap (L loc . cvtDerivStrategy) ds
+       ; returnL $ HsDerivingClause ds' ctxt' }
+
+cvtDerivStrategy :: TH.DerivStrategy -> Hs.DerivStrategy
+cvtDerivStrategy TH.Stock    = Hs.DerivStock
+cvtDerivStrategy TH.Anyclass = Hs.DerivAnyclass
+cvtDerivStrategy TH.Newtype  = Hs.DerivNewtype
+
 cvtType :: TH.Type -> CvtM (LHsType RdrName)
 cvtType = cvtTypeKind "type"
 
@@ -1134,12 +1156,20 @@ cvtTypeKind ty_str ty
              -> mk_apps (HsTyVar (noLoc (getRdrName (tupleTyCon Boxed n)))) tys'
            UnboxedTupleT n
              | length tys' == n         -- Saturated
-             -> if n==1 then return (head tys') -- Singleton tuples treated
-                                                -- like nothing (ie just parens)
-                        else returnL (HsTupleTy HsUnboxedTuple tys')
+             -> returnL (HsTupleTy HsUnboxedTuple tys')
              | otherwise
              -> mk_apps (HsTyVar (noLoc (getRdrName (tupleTyCon Unboxed n))))
                         tys'
+           UnboxedSumT n
+             | n < 2
+            -> failWith $
+                   vcat [ text "Illegal sum arity:" <+> text (show n)
+                        , nest 2 $
+                            text "Sums must have an arity of at least 2" ]
+             | length tys' == n -- Saturated
+             -> returnL (HsSumTy tys')
+             | otherwise
+             -> mk_apps (HsTyVar (noLoc (getRdrName (sumTyCon n)))) tys'
            ArrowT
              | [x',y'] <- tys' -> returnL (HsFunTy x' y')
              | otherwise -> mk_apps (HsTyVar (noLoc (getRdrName funTyCon))) tys'
@@ -1349,6 +1379,22 @@ overloadedLit _             = False
 
 cvtFractionalLit :: Rational -> FractionalLit
 cvtFractionalLit r = FL { fl_text = show (fromRational r :: Double), fl_value = r }
+
+-- Checks that are performed when converting unboxed sum expressions and
+-- patterns alike.
+unboxedSumChecks :: TH.SumAlt -> TH.SumArity -> CvtM ()
+unboxedSumChecks alt arity
+    | alt > arity
+    = failWith $ text "Sum alternative"    <+> text (show alt)
+             <+> text "exceeds its arity," <+> text (show arity)
+    | alt <= 0
+    = failWith $ vcat [ text "Illegal sum alternative:" <+> text (show alt)
+                      , nest 2 $ text "Sum alternatives must start from 1" ]
+    | arity < 2
+    = failWith $ vcat [ text "Illegal sum arity:" <+> text (show arity)
+                      , nest 2 $ text "Sums must have an arity of at least 2" ]
+    | otherwise
+    = return ()
 
 --------------------------------------------------------------------
 --      Turning Name back into RdrName

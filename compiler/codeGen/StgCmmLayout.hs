@@ -17,7 +17,7 @@ module StgCmmLayout (
 
         slowCall, directCall,
 
-        mkVirtHeapOffsets, mkVirtConstrOffsets, getHpRelOffset,
+        mkVirtHeapOffsets, mkVirtConstrOffsets, mkVirtConstrSizes, getHpRelOffset,
 
         ArgRep(..), toArgRep, argRepSizeW -- re-exported from StgCmmArgRep
   ) where
@@ -37,6 +37,7 @@ import StgCmmProf (curCCS)
 
 import MkGraph
 import SMRep
+import BlockId
 import Cmm
 import CmmUtils
 import CmmInfo
@@ -68,13 +69,13 @@ import Control.Monad
 --
 -- >    p=x; q=y;
 --
-emitReturn :: [CmmArg] -> FCode ReturnKind
+emitReturn :: [CmmExpr] -> FCode ReturnKind
 emitReturn results
   = do { dflags    <- getDynFlags
        ; sequel    <- getSequel
        ; updfr_off <- getUpdFrameOff
        ; case sequel of
-           Return _ ->
+           Return ->
              do { adjustHpBackwards
                 ; let e = CmmLoad (CmmStackSlot Old updfr_off) (gcWord dflags)
                 ; emit (mkReturn dflags (entryCode dflags e) results updfr_off)
@@ -90,7 +91,7 @@ emitReturn results
 -- using the call/return convention @conv@, passing @args@, and
 -- returning the results to the current sequel.
 --
-emitCall :: (Convention, Convention) -> CmmExpr -> [CmmArg] -> FCode ReturnKind
+emitCall :: (Convention, Convention) -> CmmExpr -> [CmmExpr] -> FCode ReturnKind
 emitCall convs fun args
   = emitCallWithExtraStack convs fun args noExtraStack
 
@@ -101,19 +102,19 @@ emitCall convs fun args
 -- @stack@, and returning the results to the current sequel.
 --
 emitCallWithExtraStack
-   :: (Convention, Convention) -> CmmExpr -> [CmmArg]
-   -> [CmmArg] -> FCode ReturnKind
+   :: (Convention, Convention) -> CmmExpr -> [CmmExpr]
+   -> [CmmExpr] -> FCode ReturnKind
 emitCallWithExtraStack (callConv, retConv) fun args extra_stack
   = do  { dflags <- getDynFlags
         ; adjustHpBackwards
         ; sequel <- getSequel
         ; updfr_off <- getUpdFrameOff
         ; case sequel of
-            Return _ -> do
+            Return -> do
               emit $ mkJumpExtra dflags callConv fun args updfr_off extra_stack
               return AssignedDirectly
             AssignTo res_regs _ -> do
-              k <- newLabelC
+              k <- newBlockId
               let area = Young k
                   (off, _, copyin) = copyInOflow dflags retConv area res_regs []
                   copyout = mkCallReturnsTo dflags fun callConv args k off updfr_off
@@ -187,7 +188,7 @@ slowCall fun stg_args
 
         (r, slow_code) <- getCodeR $ do
            r <- direct_call "slow_call" NativeNodeCall
-                 (mkRtsApFastLabel rts_fun) arity ((P,Just (CmmExprArg fun)):argsreps)
+                 (mkRtsApFastLabel rts_fun) arity ((P,Just fun):argsreps)
            emitComment $ mkFastString ("slow_call for " ++
                                       showSDoc dflags (ppr fun) ++
                                       " with pat " ++ unpackFS rts_fun)
@@ -213,12 +214,12 @@ slowCall fun stg_args
              fast_code <- getCode $
                 emitCall (NativeNodeCall, NativeReturn)
                   (entryCode dflags fun_iptr)
-                  (nonVArgs ((P,Just (CmmExprArg funv)):argsreps))
+                  (nonVArgs ((P,Just funv):argsreps))
 
-             slow_lbl <- newLabelC
-             fast_lbl <- newLabelC
-             is_tagged_lbl <- newLabelC
-             end_lbl <- newLabelC
+             slow_lbl <- newBlockId
+             fast_lbl <- newBlockId
+             is_tagged_lbl <- newBlockId
+             end_lbl <- newBlockId
 
              let correct_arity = cmmEqWord dflags (funInfoArity dflags fun_iptr)
                                                   (mkIntExpr dflags n_args)
@@ -271,7 +272,7 @@ slowCall fun stg_args
 direct_call :: String
             -> Convention     -- e.g. NativeNodeCall or NativeDirectCall
             -> CLabel -> RepArity
-            -> [(ArgRep,Maybe CmmArg)] -> FCode ReturnKind
+            -> [(ArgRep,Maybe CmmExpr)] -> FCode ReturnKind
 direct_call caller call_conv lbl arity args
   | debugIsOn && real_arity > length args  -- Too few args
   = do -- Caller should ensure that there enough args!
@@ -299,11 +300,11 @@ direct_call caller call_conv lbl arity args
 
 
 -- When constructing calls, it is easier to keep the ArgReps and the
--- CmmArgs zipped together.  However, a void argument has no
--- representation, so we need to use Maybe CmmArg (the alternative of
+-- CmmExprs zipped together.  However, a void argument has no
+-- representation, so we need to use Maybe CmmExpr (the alternative of
 -- using zeroCLit or even undefined would work, but would be ugly).
 --
-getArgRepsAmodes :: [StgArg] -> FCode [(ArgRep, Maybe CmmArg)]
+getArgRepsAmodes :: [StgArg] -> FCode [(ArgRep, Maybe CmmExpr)]
 getArgRepsAmodes = mapM getArgRepAmode
   where getArgRepAmode arg
            | V <- rep  = return (V, Nothing)
@@ -311,7 +312,7 @@ getArgRepsAmodes = mapM getArgRepAmode
                             return (rep, Just expr)
            where rep = toArgRep (argPrimRep arg)
 
-nonVArgs :: [(ArgRep, Maybe CmmArg)] -> [CmmArg]
+nonVArgs :: [(ArgRep, Maybe CmmExpr)] -> [CmmExpr]
 nonVArgs [] = []
 nonVArgs ((_,Nothing)  : args) = nonVArgs args
 nonVArgs ((_,Just arg) : args) = arg : nonVArgs args
@@ -354,7 +355,7 @@ just more arguments that we are passing on the stack (cml_args).
 -- | 'slowArgs' takes a list of function arguments and prepares them for
 -- pushing on the stack for "extra" arguments to a function which requires
 -- fewer arguments than we currently have.
-slowArgs :: DynFlags -> [(ArgRep, Maybe CmmArg)] -> [(ArgRep, Maybe CmmArg)]
+slowArgs :: DynFlags -> [(ArgRep, Maybe CmmExpr)] -> [(ArgRep, Maybe CmmExpr)]
 slowArgs _ [] = []
 slowArgs dflags args -- careful: reps contains voids (V), but args does not
   | gopt Opt_SccProfilingOn dflags
@@ -365,8 +366,8 @@ slowArgs dflags args -- careful: reps contains voids (V), but args does not
     (call_args, rest_args)  = splitAt n args
 
     stg_ap_pat = mkCmmRetInfoLabel rtsUnitId arg_pat
-    this_pat   = (N, Just (CmmExprArg (mkLblExpr stg_ap_pat))) : call_args
-    save_cccs  = [(N, Just (CmmExprArg (mkLblExpr save_cccs_lbl))), (N, Just (CmmExprArg curCCS))]
+    this_pat   = (N, Just (mkLblExpr stg_ap_pat)) : call_args
+    save_cccs  = [(N, Just (mkLblExpr save_cccs_lbl)), (N, Just curCCS)]
     save_cccs_lbl = mkCmmRetInfoLabel rtsUnitId (fsLit "stg_restore_cccs")
 
 -------------------------------------------------------------------------
@@ -388,8 +389,8 @@ getHpRelOffset virtual_offset
 
 mkVirtHeapOffsets
   :: DynFlags
-  -> Bool                -- True <=> is a thunk
-  -> [(PrimRep,a)]        -- Things to make offsets for
+  -> Bool                     -- True <=> is a thunk
+  -> [NonVoid (PrimRep,a)]    -- Things to make offsets for
   -> (WordOff,                -- _Total_ number of words allocated
       WordOff,                -- Number of words allocated for *pointers*
       [(NonVoid a, ByteOff)])
@@ -398,14 +399,12 @@ mkVirtHeapOffsets
 -- increasing offset; BUT THIS MAY BE DIFFERENT TO INPUT ORDER
 -- First in list gets lowest offset, which is initial offset + 1.
 --
--- Void arguments are removed, so output list may be shorter than
--- input list
---
 -- mkVirtHeapOffsets always returns boxed things with smaller offsets
 -- than the unboxed things
 
 mkVirtHeapOffsets dflags is_thunk things
-  = ( bytesToWordsRoundUp dflags tot_bytes
+  = ASSERT(not (any (isVoidRep . fst . fromNonVoid) things))
+    ( bytesToWordsRoundUp dflags tot_bytes
     , bytesToWordsRoundUp dflags bytes_of_ptrs
     , ptrs_w_offsets ++ non_ptrs_w_offsets
     )
@@ -414,24 +413,34 @@ mkVirtHeapOffsets dflags is_thunk things
               | otherwise  = fixedHdrSizeW dflags
     hdr_bytes = wordsToBytes dflags hdr_words
 
-    non_void_things    = filterOut (isVoidRep . fst)  things
-    (ptrs, non_ptrs)   = partition (isGcPtrRep . fst) non_void_things
+    (ptrs, non_ptrs) = partition (isGcPtrRep . fst . fromNonVoid) things
 
     (bytes_of_ptrs, ptrs_w_offsets) =
        mapAccumL computeOffset 0 ptrs
     (tot_bytes, non_ptrs_w_offsets) =
        mapAccumL computeOffset bytes_of_ptrs non_ptrs
 
-    computeOffset bytes_so_far (rep, thing)
+    computeOffset bytes_so_far nv_thing
       = (bytes_so_far + wordsToBytes dflags (argRepSizeW dflags (toArgRep rep)),
          (NonVoid thing, hdr_bytes + bytes_so_far))
+           where (rep,thing) = fromNonVoid nv_thing
 
 -- | Just like mkVirtHeapOffsets, but for constructors
 mkVirtConstrOffsets
-  :: DynFlags -> [(PrimRep,a)]
+  :: DynFlags -> [NonVoid (PrimRep, a)]
   -> (WordOff, WordOff, [(NonVoid a, ByteOff)])
 mkVirtConstrOffsets dflags = mkVirtHeapOffsets dflags False
 
+-- | Just like mkVirtConstrOffsets, but used when we don't have the actual
+-- arguments. Useful when e.g. generating info tables; we just need to know
+-- sizes of pointer and non-pointer fields.
+mkVirtConstrSizes :: DynFlags -> [NonVoid PrimRep] -> (WordOff, WordOff)
+mkVirtConstrSizes dflags field_reps
+  = (tot_wds, ptr_wds)
+  where
+    (tot_wds, ptr_wds, _) =
+       mkVirtConstrOffsets dflags
+         (map (\nv_rep -> NonVoid (fromNonVoid nv_rep, ())) field_reps)
 
 -------------------------------------------------------------------------
 --

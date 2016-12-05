@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -fno-warn-warnings-deprecations #-}
 
 module Main (main) where
 
@@ -149,17 +150,15 @@ doCopy directory distDir
     where
       noGhcPrimHook f pd lbi us flags
               = let pd'
-                     | packageName pd == PackageName "ghc-prim" =
-                        case libraries pd of
-                        [lib] ->
+                     | packageName pd == mkPackageName "ghc-prim" =
+                        case library pd of
+                        Just lib ->
                             let ghcPrim = fromJust (simpleParse "GHC.Prim")
                                 ems = filter (ghcPrim /=) (exposedModules lib)
                                 lib' = lib { exposedModules = ems }
-                            in pd { libraries = [lib'] }
-                        [] ->
+                            in pd { library = Just lib' }
+                        Nothing ->
                             error "Expected a library, but none found"
-                        _ ->
-                            error "Expected a single library, but multiple found"
                      | otherwise = pd
                 in f pd' lbi us flags
       modHook relocatableBuild f pd lbi us flags
@@ -229,12 +228,7 @@ doRegister directory distDir ghc ghcpkg topdir
             progs' <- configurePrograms [ghcProgram', ghcPkgProgram'] progs
             instInfos <- dump (hcPkgInfo progs') verbosity GlobalPackageDB
             let installedPkgs' = PackageIndex.fromList instInfos
-            let updateComponentConfig (clbi, deps)
-                    = (updateComponentLocalBuildInfo clbi, deps)
-                updateComponentLocalBuildInfo clbi = clbi -- TODO: remove
-                ccs' = map updateComponentConfig (componentsConfigs lbi)
-                lbi' = lbi {
-                               componentsConfigs = ccs',
+            let lbi' = lbi {
                                installedPkgs = installedPkgs',
                                installDirTemplates = idts,
                                withPrograms = progs'
@@ -254,6 +248,10 @@ updateInstallDirTemplates relocatableBuild myPrefix myLibdir myDocdir idts
                           if relocatableBuild
                           then "$topdir"
                           else myLibdir,
+          dynlibdir = toPathTemplate $
+                          (if relocatableBuild
+                          then "$topdir"
+                          else myLibdir) </> "$libname",
           libsubdir = toPathTemplate "$libname",
           docdir    = toPathTemplate $
                           if relocatableBuild
@@ -318,7 +316,7 @@ generate directory distdir dll0Modules config_args
           do cwd <- getCurrentDirectory
              let ipid = mkUnitId (display (packageId pd))
              let installedPkgInfo = inplaceInstalledPackageInfo cwd distdir
-                                        pd (AbiHash "") lib lbi clbi
+                                        pd (mkAbiHash "") lib lbi clbi
                  final_ipi = mangleIPI directory distdir lbi $ installedPkgInfo {
                                  Installed.installedUnitId = ipid,
                                  Installed.compatPackageKey = display (packageId pd),
@@ -331,7 +329,7 @@ generate directory distdir dll0Modules config_args
           comp = compiler lbi
           libBiModules lib = (libBuildInfo lib, libModules lib)
           exeBiModules exe = (buildInfo exe, ModuleName.main : exeModules exe)
-          biModuless = (map libBiModules $ libraries pd)
+          biModuless = (map libBiModules . maybeToList $ library pd)
                     ++ (map exeBiModules $ executables pd)
           buildableBiModuless = filter isBuildable biModuless
               where isBuildable (bi', _) = buildable bi'
@@ -356,7 +354,7 @@ generate directory distdir dll0Modules config_args
           -- stricter than gnu ld). Thus we remove the ldOptions for
           -- GHC's rts package:
           hackRtsPackage index =
-            case PackageIndex.lookupPackageName index (PackageName "rts") of
+            case PackageIndex.lookupPackageName index (mkPackageName "rts") of
               [(_,[rts])] ->
                  PackageIndex.insert rts{
                      Installed.ldOptions = [],
@@ -401,7 +399,6 @@ generate directory distdir dll0Modules config_args
           mkLibraryRelDir l       = "libraries/" ++ l ++ "/dist-install/build"
           libraryRelDirs = map mkLibraryRelDir transitiveDepNames
       wrappedIncludeDirs <- wrap $ forDeps Installed.includeDirs
-      wrappedLibraryDirs <- wrap libraryDirs
 
       let variablePrefix = directory ++ '_':distdir
           mods      = map display modules
@@ -441,11 +438,9 @@ generate directory distdir dll0Modules config_args
                 variablePrefix ++ "_LD_OPTS = "                        ++ unwords (ldOptions bi),
                 variablePrefix ++ "_DEP_INCLUDE_DIRS_SINGLE_QUOTED = " ++ unwords wrappedIncludeDirs,
                 variablePrefix ++ "_DEP_CC_OPTS = "                    ++ unwords (forDeps Installed.ccOptions),
-                variablePrefix ++ "_DEP_LIB_DIRS_SINGLE_QUOTED = "     ++ unwords wrappedLibraryDirs,
                 variablePrefix ++ "_DEP_LIB_DIRS_SEARCHPATH = "        ++ mkSearchPath libraryDirs,
                 variablePrefix ++ "_DEP_LIB_REL_DIRS = "               ++ unwords libraryRelDirs,
                 variablePrefix ++ "_DEP_LIB_REL_DIRS_SEARCHPATH = "    ++ mkSearchPath libraryRelDirs,
-                variablePrefix ++ "_DEP_EXTRA_LIBS = "                 ++ unwords (forDeps Installed.extraLibraries),
                 variablePrefix ++ "_DEP_LD_OPTS = "                    ++ unwords (forDeps Installed.ldOptions),
                 variablePrefix ++ "_BUILD_GHCI_LIB = "                 ++ boolToYesNo (withGHCiLib lbi),
                 "",

@@ -144,8 +144,7 @@ dsHsBind dflags
   = do  { body_expr <- dsGuarded grhss ty
         ; let body' = mkOptTickBox rhs_tick body_expr
               pat'  = decideBangHood dflags pat
-        ; (force_var,sel_binds) <-
-            mkSelectorBinds var_ticks pat body'
+        ; (force_var,sel_binds) <- mkSelectorBinds var_ticks pat body'
           -- We silently ignore inline pragmas; no makeCorePair
           -- Not so cool, but really doesn't matter
         ; let force_var' = if isBangedLPat pat'
@@ -347,6 +346,14 @@ dsHsBind dflags (AbsBindsSig { abs_tvs = tyvars, abs_ev_vars = dicts
 dsHsBind _ (PatSynBind{}) = panic "dsHsBind: PatSynBind"
 
 
+
+-- | This is where we apply INLINE and INLINABLE pragmas. All we need to
+-- do is to attach the unfolding information to the Id.
+--
+-- Other decisions about whether to inline are made in
+-- `calcUnfoldingGuidance` but the decision about whether to then expose
+-- the unfolding in the interface file is made in `TidyPgm.addExternal`
+-- using this information.
 ------------------------
 makeCorePair :: DynFlags -> Id -> Bool -> Arity -> CoreExpr -> (Id, CoreExpr)
 makeCorePair dflags gbl_id is_default_method dict_arity rhs
@@ -888,7 +895,7 @@ Consider
 After type checking the LHS becomes (foo alpha (C alpha)), where alpha
 is an unbound meta-tyvar.  The zonker in TcHsSyn is careful not to
 turn the free alpha into Any (as it usually does).  Instead it turns it
-into a skolem 'a'.  See TcHsSyn Note [Zonking the LHS of a RULE].
+into a TyVar 'a'.  See TcHsSyn Note [Zonking the LHS of a RULE].
 
 Now we must quantify over that 'a'.  It's /really/ inconvenient to do that
 in the zonker, because the HsExpr data type is very large.  But it's /easy/

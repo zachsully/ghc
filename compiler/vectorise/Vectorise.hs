@@ -70,7 +70,7 @@ vectModule guts@(ModGuts { mg_tcs        = tycons
             cls_vect_decls = [vd | vd@(VectClass _)    <- vect_decls]
 
           -- Vectorise the type environment.  This will add vectorised
-          -- type constructors, their representaions, and the
+          -- type constructors, their representations, and the
           -- conrresponding data constructors.  Moreover, we produce
           -- bindings for dfuns and family instances of the classes
           -- and type families used in the DPH library to represent
@@ -275,7 +275,7 @@ vectTopBind b@(Rec binds)
 -- Add a vectorised binding to an imported top-level variable that has a VECTORISE pragma
 -- in this module.
 --
--- RESTIRCTION: Currently, we cannot use the pragma for mutually recursive definitions.
+-- RESTRICTION: Currently, we cannot use the pragma for mutually recursive definitions.
 --
 vectImpBind :: (Id, CoreExpr) -> VM CoreBind
 vectImpBind (var, expr)
@@ -315,7 +315,7 @@ vectTopBinder var inline expr
                   (text "Inferred type" <+> ppr vdty)
               }
           -- Make the vectorised version of binding's name, and set the unfolding used for inlining
-      ; var' <- liftM (`setIdUnfoldingLazily` unfolding)
+      ; var' <- liftM (`setIdUnfolding` unfolding)
                 $  mkVectId var vty
 
           -- Add the mapping between the plain and vectorised name to the state.

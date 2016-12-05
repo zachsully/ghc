@@ -221,12 +221,16 @@ primop   IntMulMayOfloOp  "mulIntMayOflo#"
 
 primop   IntQuotOp    "quotInt#"    Dyadic
    Int# -> Int# -> Int#
-   {Rounds towards zero.}
+   {Rounds towards zero. The behavior is undefined if the second argument is
+    zero.
+   }
    with can_fail = True
 
 primop   IntRemOp    "remInt#"    Dyadic
    Int# -> Int# -> Int#
-   {Satisfies \texttt{(quotInt\# x y) *\# y +\# (remInt\# x y) == x}.}
+   {Satisfies \texttt{(quotInt\# x y) *\# y +\# (remInt\# x y) == x}. The
+    behavior is undefined if the second argument is zero.
+   }
    with can_fail = True
 
 primop   IntQuotRemOp "quotRemInt#"    GenPrimOp
@@ -2627,6 +2631,11 @@ primop  NewBCOOp "newBCO#" GenPrimOp
 
 primop  UnpackClosureOp "unpackClosure#" GenPrimOp
    a -> (# Addr#, Array# b, ByteArray# #)
+   { {\tt unpackClosure\# closure} copies non-pointers and pointers in the
+     payload of the given closure into two new arrays, and returns a pointer to
+     the first word of the closure's info table, a pointer array for the
+     pointers in the payload, and a non-pointer array for the non-pointers in
+     the payload. }
    with
    out_of_line = True
 

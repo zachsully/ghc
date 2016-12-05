@@ -3370,6 +3370,7 @@ simplUnfolding :: SimplEnv-> TopLevelFlag -> Maybe SimplCont -> InId -> Unfoldin
 simplUnfolding env top_lvl cont_mb id unf
   = case unf of
       NoUnfolding -> return unf
+      BootUnfolding -> return unf
       OtherCon {} -> return unf
 
       DFunUnfolding { df_bndrs = bndrs, df_con = con, df_args = args }
@@ -3432,7 +3433,7 @@ Note [Setting the new unfolding]
   can get into an infinite loop
 
 If there's an stable unfolding on a loop breaker (which happens for
-INLINEABLE), we hang on to the inlining.  It's pretty dodgy, but the
+INLINABLE), we hang on to the inlining.  It's pretty dodgy, but the
 user did say 'INLINE'.  May need to revisit this choice.
 
 ************************************************************************

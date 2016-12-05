@@ -85,7 +85,7 @@ static StgStablePtr getOrSetKey(StoreKey key, StgStablePtr ptr)
 #endif
     }
     return ret;
-}    
+}
 
 StgStablePtr
 getOrSetGHCConcSignalSignalHandlerStore(StgStablePtr ptr)

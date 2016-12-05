@@ -13,14 +13,11 @@ module StgCmmEnv (
         litIdInfo, lneIdInfo, rhsIdInfo, mkRhsInit,
         idInfoToAmode,
 
-        NonVoid(..), unsafe_stripNV, nonVoidIds,
-
         addBindC, addBindsC,
 
         bindArgsToRegs, bindToReg, rebindToReg,
         bindArgToReg, idToReg,
-        getArgAmode, getArgAmode_no_rubbish,
-        getNonVoidArgAmodes, getNonVoidArgAmodes_no_rubbish,
+        getArgAmode, getNonVoidArgAmodes,
         getCgIdInfo,
         maybeLetNoEscape,
     ) where
@@ -37,7 +34,6 @@ import CLabel
 import BlockId
 import CmmExpr
 import CmmUtils
-import Control.Monad
 import DynFlags
 import Id
 import MkGraph
@@ -46,25 +42,6 @@ import Outputable
 import StgSyn
 import UniqFM
 import VarEnv
-
--------------------------------------
---        Non-void types
--------------------------------------
--- We frequently need the invariant that an Id or a an argument
--- is of a non-void type. This type is a witness to the invariant.
-
-newtype NonVoid a = NonVoid a
-  deriving (Eq, Show)
-
--- Use with care; if used inappropriately, it could break invariants.
-unsafe_stripNV :: NonVoid a -> a
-unsafe_stripNV (NonVoid a) = a
-
-instance (Outputable a) => Outputable (NonVoid a) where
-  ppr (NonVoid a) = ppr a
-
-nonVoidIds :: [Id] -> [NonVoid Id]
-nonVoidIds ids = [NonVoid id | id <- ids, not (isVoidRep (idPrimRep id))]
 
 -------------------------------------
 --        Manipulating CgIdInfo
@@ -166,19 +143,11 @@ cgLookupPanic id
 
 
 --------------------
-getArgAmode :: NonVoid StgArg -> FCode CmmArg
-getArgAmode (NonVoid (StgVarArg var))  =
-  do { info  <- getCgIdInfo var; return (CmmExprArg (idInfoToAmode info)) }
-getArgAmode (NonVoid (StgLitArg lit))  = liftM (CmmExprArg . CmmLit) $ cgLit lit
-getArgAmode (NonVoid (StgRubbishArg ty)) = return (CmmRubbishArg ty)
+getArgAmode :: NonVoid StgArg -> FCode CmmExpr
+getArgAmode (NonVoid (StgVarArg var)) = idInfoToAmode <$> getCgIdInfo var
+getArgAmode (NonVoid (StgLitArg lit)) = CmmLit <$> cgLit lit
 
-getArgAmode_no_rubbish :: NonVoid StgArg -> FCode CmmExpr
-getArgAmode_no_rubbish (NonVoid (StgVarArg var))  =
-  do { info  <- getCgIdInfo var; return (idInfoToAmode info) }
-getArgAmode_no_rubbish (NonVoid (StgLitArg lit))  = liftM CmmLit $ cgLit lit
-getArgAmode_no_rubbish arg@(NonVoid (StgRubbishArg _)) = pprPanic "getArgAmode_no_rubbish" (ppr arg)
-
-getNonVoidArgAmodes :: [StgArg] -> FCode [CmmArg]
+getNonVoidArgAmodes :: [StgArg] -> FCode [CmmExpr]
 -- NB: Filters out void args,
 --     so the result list may be shorter than the argument list
 getNonVoidArgAmodes [] = return []
@@ -187,12 +156,6 @@ getNonVoidArgAmodes (arg:args)
   | otherwise = do { amode  <- getArgAmode (NonVoid arg)
                    ; amodes <- getNonVoidArgAmodes args
                    ; return ( amode : amodes ) }
-
--- This version assumes arguments are not rubbish. I think this assumption holds
--- as long as we don't pass unboxed sums to primops and foreign fns.
-getNonVoidArgAmodes_no_rubbish :: [StgArg] -> FCode [CmmExpr]
-getNonVoidArgAmodes_no_rubbish
-  = mapM (getArgAmode_no_rubbish . NonVoid) . filter (not . isVoidRep . argPrimRep)
 
 
 ------------------------------------------------------------------------

@@ -116,7 +116,7 @@ data PersistentLinkerState
         -- The currently-loaded packages; always object code
         -- Held, as usual, in dependency order; though I am not sure if
         -- that is really important
-        pkgs_loaded :: ![UnitId],
+        pkgs_loaded :: ![LinkerUnitId],
 
         -- we need to remember the name of previous temporary DLL/.so
         -- libraries so we can link them (see #10322)
@@ -137,10 +137,10 @@ emptyPLS _ = PersistentLinkerState {
   --
   -- The linker's symbol table is populated with RTS symbols using an
   -- explicit list.  See rts/Linker.c for details.
-  where init_pkgs = [rtsUnitId]
+  where init_pkgs = map toInstalledUnitId [rtsUnitId]
 
 
-extendLoadedPkgs :: [UnitId] -> IO ()
+extendLoadedPkgs :: [InstalledUnitId] -> IO ()
 extendLoadedPkgs pkgs =
   modifyPLS_ $ \s ->
       return s{ pkgs_loaded = pkgs ++ pkgs_loaded s }
@@ -566,7 +566,7 @@ getLinkDeps :: HscEnv -> HomePackageTable
             -> Maybe FilePath                   -- replace object suffices?
             -> SrcSpan                          -- for error messages
             -> [Module]                         -- If you need these
-            -> IO ([Linkable], [UnitId])     -- ... then link these first
+            -> IO ([Linkable], [InstalledUnitId])     -- ... then link these first
 -- Fails with an IO exception if it can't find enough files
 
 getLinkDeps hsc_env hpt pls replace_osuf span mods
@@ -604,13 +604,13 @@ getLinkDeps hsc_env hpt pls replace_osuf span mods
         -- tree recursively.  See bug #936, testcase ghci/prog007.
     follow_deps :: [Module]             -- modules to follow
                 -> UniqDSet ModuleName         -- accum. module dependencies
-                -> UniqDSet UnitId          -- accum. package dependencies
-                -> IO ([ModuleName], [UnitId]) -- result
+                -> UniqDSet InstalledUnitId          -- accum. package dependencies
+                -> IO ([ModuleName], [InstalledUnitId]) -- result
     follow_deps []     acc_mods acc_pkgs
         = return (uniqDSetToList acc_mods, uniqDSetToList acc_pkgs)
     follow_deps (mod:mods) acc_mods acc_pkgs
         = do
-          mb_iface <- initIfaceCheck hsc_env $
+          mb_iface <- initIfaceCheck (text "getLinkDeps") hsc_env $
                         loadInterface msg mod (ImportByUser False)
           iface <- case mb_iface of
                     Maybes.Failed err      -> throwGhcExceptionIO (ProgramError (showSDoc dflags err))
@@ -632,7 +632,7 @@ getLinkDeps hsc_env hpt pls replace_osuf span mods
             acc_pkgs'  = addListToUniqDSet acc_pkgs $ map fst pkg_deps
           --
           if pkg /= this_pkg
-             then follow_deps mods acc_mods (addOneToUniqDSet acc_pkgs' pkg)
+             then follow_deps mods acc_mods (addOneToUniqDSet acc_pkgs' (toInstalledUnitId pkg))
              else follow_deps (map (mkModule this_pkg) boot_deps' ++ mods)
                               acc_mods' acc_pkgs'
         where
@@ -1126,12 +1126,15 @@ showLS (DLL nm)       = "(dynamic) " ++ nm
 showLS (DLLPath nm)   = "(dynamic) " ++ nm
 showLS (Framework nm) = "(framework) " ++ nm
 
+-- TODO: Make this type more precise
+type LinkerUnitId = InstalledUnitId
+
 -- | Link exactly the specified packages, and their dependents (unless of
 -- course they are already linked).  The dependents are linked
 -- automatically, and it doesn't matter what order you specify the input
 -- packages.
 --
-linkPackages :: HscEnv -> [UnitId] -> IO ()
+linkPackages :: HscEnv -> [LinkerUnitId] -> IO ()
 -- NOTE: in fact, since each module tracks all the packages it depends on,
 --       we don't really need to use the package-config dependencies.
 --
@@ -1147,7 +1150,7 @@ linkPackages hsc_env new_pkgs = do
   modifyPLS_ $ \pls -> do
     linkPackages' hsc_env new_pkgs pls
 
-linkPackages' :: HscEnv -> [UnitId] -> PersistentLinkerState
+linkPackages' :: HscEnv -> [LinkerUnitId] -> PersistentLinkerState
              -> IO PersistentLinkerState
 linkPackages' hsc_env new_pks pls = do
     pkgs' <- link (pkgs_loaded pls) new_pks
@@ -1155,7 +1158,7 @@ linkPackages' hsc_env new_pks pls = do
   where
      dflags = hsc_dflags hsc_env
 
-     link :: [UnitId] -> [UnitId] -> IO [UnitId]
+     link :: [LinkerUnitId] -> [LinkerUnitId] -> IO [LinkerUnitId]
      link pkgs new_pkgs =
          foldM link_one pkgs new_pkgs
 
@@ -1163,7 +1166,7 @@ linkPackages' hsc_env new_pks pls = do
         | new_pkg `elem` pkgs   -- Already linked
         = return pkgs
 
-        | Just pkg_cfg <- lookupPackage dflags new_pkg
+        | Just pkg_cfg <- lookupInstalledPackage dflags new_pkg
         = do {  -- Link dependents first
                pkgs' <- link pkgs (depends pkg_cfg)
                 -- Now link the package itself
@@ -1171,7 +1174,7 @@ linkPackages' hsc_env new_pks pls = do
              ; return (new_pkg : pkgs') }
 
         | otherwise
-        = throwGhcExceptionIO (CmdLineError ("unknown package: " ++ unitIdString new_pkg))
+        = throwGhcExceptionIO (CmdLineError ("unknown package: " ++ unpackFS (installedUnitIdFS new_pkg)))
 
 
 linkPackage :: HscEnv -> PackageConfig -> IO ()
@@ -1179,7 +1182,8 @@ linkPackage hsc_env pkg
    = do
         let dflags    = hsc_dflags hsc_env
             platform  = targetPlatform dflags
-            dirs      = Packages.libraryDirs pkg
+            dirs | interpreterDynamic dflags = Packages.libraryDynDirs pkg
+                 | otherwise                 = Packages.libraryDirs pkg
 
         let hs_libs   =  Packages.hsLibraries pkg
             -- The FFI GHCi import lib isn't needed as
@@ -1277,7 +1281,8 @@ loadFrameworks hsc_env platform pkg
 -- If it isn't present, we assume that addDLL in the RTS can find it,
 -- which generally means that it should be a dynamic library in the
 -- standard system search path.
-
+-- For GHCi we tend to prefer dynamic libraries over static ones as
+-- they are easier to load and manage, have less overhead.
 locateLib :: HscEnv -> Bool -> [FilePath] -> String -> IO LibrarySpec
 locateLib hsc_env is_hs dirs lib
   | not is_hs
@@ -1286,16 +1291,16 @@ locateLib hsc_env is_hs dirs lib
     --   then  look in library-dirs for a static library (libfoo.a)
     --   then look in library-dirs and inplace GCC for a dynamic library (libfoo.so)
     --   then  check for system dynamic libraries (e.g. kernel32.dll on windows)
-    --   then  try "gcc --print-file-name" to search gcc's search path
     --   then  try looking for import libraries on Windows (.dll.a, .lib)
+    --   then  try "gcc --print-file-name" to search gcc's search path
     --   then  look in library-dirs and inplace GCC for a static library (libfoo.a)
     --       for a dynamic library (#5289)
     --   otherwise, assume loadDLL can find it
     --
   = findDll     `orElse`
     findSysDll  `orElse`
-    tryGcc      `orElse`
     tryImpLib   `orElse`
+    tryGcc      `orElse`
     findArchive `orElse`
     assumeDll
 
@@ -1344,7 +1349,7 @@ locateLib hsc_env is_hs dirs lib
                      in liftM2 (<|>) local linked
      findHSDll     = liftM (fmap DLLPath) $ findFile dirs hs_dyn_lib_file
      findDll       = liftM (fmap DLLPath) $ findFile dirs dyn_lib_file
-     findSysDll    = fmap (fmap $ DLL . takeFileName) $ findSystemLibrary hsc_env so_name
+     findSysDll    = fmap (fmap $ DLL . dropExtension . takeFileName) $ findSystemLibrary hsc_env so_name
      tryGcc        = let short = liftM (fmap DLLPath) $ searchForLibUsingGcc dflags so_name     dirs
                          full  = liftM (fmap DLLPath) $ searchForLibUsingGcc dflags lib_so_name dirs
                      in liftM2 (<|>) short full

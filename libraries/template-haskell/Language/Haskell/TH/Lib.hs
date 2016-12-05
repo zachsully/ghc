@@ -30,6 +30,7 @@ type TypeQ               = Q Type
 type TyLitQ              = Q TyLit
 type CxtQ                = Q Cxt
 type PredQ               = Q Pred
+type DerivClauseQ        = Q DerivClause
 type MatchQ              = Q Match
 type ClauseQ             = Q Clause
 type BodyQ               = Q Body
@@ -80,12 +81,19 @@ rationalL   = RationalL
 
 litP :: Lit -> PatQ
 litP l = return (LitP l)
+
 varP :: Name -> PatQ
 varP v = return (VarP v)
+
 tupP :: [PatQ] -> PatQ
 tupP ps = do { ps1 <- sequence ps; return (TupP ps1)}
+
 unboxedTupP :: [PatQ] -> PatQ
 unboxedTupP ps = do { ps1 <- sequence ps; return (UnboxedTupP ps1)}
+
+unboxedSumP :: PatQ -> SumAlt -> SumArity -> PatQ
+unboxedSumP p alt arity = do { p1 <- p; return (UnboxedSumP p1 alt arity) }
+
 conP :: Name -> [PatQ] -> PatQ
 conP n ps = do ps' <- sequence ps
                return (ConP n ps')
@@ -225,6 +233,9 @@ litE c = return (LitE c)
 appE :: ExpQ -> ExpQ -> ExpQ
 appE x y = do { a <- x; b <- y; return (AppE a b)}
 
+appTypeE :: ExpQ -> TypeQ -> ExpQ
+appTypeE x t = do { a <- x; s <- t; return (AppTypeE a s) }
+
 parensE :: ExpQ -> ExpQ
 parensE x = do { x' <- x; return (ParensE x') }
 
@@ -265,6 +276,9 @@ tupE es = do { es1 <- sequence es; return (TupE es1)}
 
 unboxedTupE :: [ExpQ] -> ExpQ
 unboxedTupE es = do { es1 <- sequence es; return (UnboxedTupE es1)}
+
+unboxedSumE :: ExpQ -> SumAlt -> SumArity -> ExpQ
+unboxedSumE e alt arity = do { e1 <- e; return (UnboxedSumE e1 alt arity) }
 
 condE :: ExpQ -> ExpQ -> ExpQ -> ExpQ
 condE x y z =  do { a <- x; b <- y; c <- z; return (CondE a b c)}
@@ -347,20 +361,22 @@ funD nm cs =
 tySynD :: Name -> [TyVarBndr] -> TypeQ -> DecQ
 tySynD tc tvs rhs = do { rhs1 <- rhs; return (TySynD tc tvs rhs1) }
 
-dataD :: CxtQ -> Name -> [TyVarBndr] -> Maybe Kind -> [ConQ] -> CxtQ -> DecQ
+dataD :: CxtQ -> Name -> [TyVarBndr] -> Maybe Kind -> [ConQ] -> [DerivClauseQ]
+      -> DecQ
 dataD ctxt tc tvs ksig cons derivs =
   do
     ctxt1 <- ctxt
     cons1 <- sequence cons
-    derivs1 <- derivs
+    derivs1 <- sequence derivs
     return (DataD ctxt1 tc tvs ksig cons1 derivs1)
 
-newtypeD :: CxtQ -> Name -> [TyVarBndr] -> Maybe Kind -> ConQ -> CxtQ -> DecQ
+newtypeD :: CxtQ -> Name -> [TyVarBndr] -> Maybe Kind -> ConQ -> [DerivClauseQ]
+         -> DecQ
 newtypeD ctxt tc tvs ksig con derivs =
   do
     ctxt1 <- ctxt
     con1 <- con
-    derivs1 <- derivs
+    derivs1 <- sequence derivs
     return (NewtypeD ctxt1 tc tvs ksig con1 derivs1)
 
 classD :: CxtQ -> Name -> [TyVarBndr] -> [FunDep] -> [DecQ] -> DecQ
@@ -439,22 +455,24 @@ pragAnnD target expr
 pragLineD :: Int -> String -> DecQ
 pragLineD line file = return $ PragmaD $ LineP line file
 
-dataInstD :: CxtQ -> Name -> [TypeQ] -> Maybe Kind -> [ConQ] -> CxtQ -> DecQ
+dataInstD :: CxtQ -> Name -> [TypeQ] -> Maybe Kind -> [ConQ] -> [DerivClauseQ]
+          -> DecQ
 dataInstD ctxt tc tys ksig cons derivs =
   do
     ctxt1 <- ctxt
     tys1  <- sequence tys
     cons1 <- sequence cons
-    derivs1 <- derivs
+    derivs1 <- sequence derivs
     return (DataInstD ctxt1 tc tys1 ksig cons1 derivs1)
 
-newtypeInstD :: CxtQ -> Name -> [TypeQ] -> Maybe Kind -> ConQ -> CxtQ -> DecQ
+newtypeInstD :: CxtQ -> Name -> [TypeQ] -> Maybe Kind -> ConQ -> [DerivClauseQ]
+             -> DecQ
 newtypeInstD ctxt tc tys ksig con derivs =
   do
     ctxt1 <- ctxt
     tys1  <- sequence tys
     con1  <- con
-    derivs1 <- derivs
+    derivs1 <- sequence derivs
     return (NewtypeInstD ctxt1 tc tys1 ksig con1 derivs1)
 
 tySynInstD :: Name -> TySynEqnQ -> DecQ
@@ -521,11 +539,14 @@ roleAnnotD :: Name -> [Role] -> DecQ
 roleAnnotD name roles = return $ RoleAnnotD name roles
 
 standaloneDerivD :: CxtQ -> TypeQ -> DecQ
-standaloneDerivD ctxtq tyq =
+standaloneDerivD = standaloneDerivWithStrategyD Nothing
+
+standaloneDerivWithStrategyD :: Maybe DerivStrategy -> CxtQ -> TypeQ -> DecQ
+standaloneDerivWithStrategyD ds ctxtq tyq =
   do
     ctxt <- ctxtq
     ty   <- tyq
-    return $ StandaloneDerivD ctxt ty
+    return $ StandaloneDerivD ds ctxt ty
 
 defaultSigD :: Name -> TypeQ -> DecQ
 defaultSigD n tyq =
@@ -556,6 +577,10 @@ tySynEqn lhs rhs =
 
 cxt :: [PredQ] -> CxtQ
 cxt = sequence
+
+derivClause :: Maybe DerivStrategy -> [PredQ] -> DerivClauseQ
+derivClause ds p = do p' <- cxt p
+                      return $ DerivClause ds p'
 
 normalC :: Name -> [BangTypeQ] -> ConQ
 normalC con strtys = liftM (NormalC con) $ sequence strtys
@@ -626,6 +651,9 @@ tupleT i = return (TupleT i)
 
 unboxedTupleT :: Int -> TypeQ
 unboxedTupleT i = return (UnboxedTupleT i)
+
+unboxedSumT :: SumArity -> TypeQ
+unboxedSumT arity = return (UnboxedSumT arity)
 
 sigT :: TypeQ -> Kind -> TypeQ
 sigT t k

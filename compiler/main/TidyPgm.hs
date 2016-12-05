@@ -44,6 +44,7 @@ import BasicTypes
 import Name hiding (varName)
 import NameSet
 import NameEnv
+import NameCache
 import Avail
 import IfaceEnv
 import TcEnv
@@ -184,8 +185,9 @@ mkBootTypeEnv exports ids tcs fam_insts
         -- Do make sure that we keep Ids that are already Global.
         -- When typechecking an .hs-boot file, the Ids come through as
         -- GlobalIds.
-    final_ids = [ if isLocalId id then globaliseAndTidyId id
-                                  else id
+    final_ids = [ (if isLocalId id then globaliseAndTidyId id
+                                   else id)
+                        `setIdUnfolding` BootUnfolding
                 | id <- ids
                 , keep_it id ]
 
@@ -953,7 +955,7 @@ findExternalRules omit_prags binds imp_id_rules unfold_env
         -- local binder (on LHS or RHS) that we have now discarded.
         -- (NB: ruleFreeVars only includes LocalIds)
         --
-        -- LHS: we have alrady filtered out rules that mention internal Ids
+        -- LHS: we have already filtered out rules that mention internal Ids
         --     on LHS but that isn't enough because we might have by now
         --     discarded a binding with an external Id. (How?
         --     chooseExternalIds is a bit conservative.)

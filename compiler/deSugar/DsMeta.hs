@@ -455,11 +455,13 @@ repClsInstD (ClsInstDecl { cid_poly_ty = ty, cid_binds = binds
    (tvs, cxt, inst_ty) = splitLHsInstDeclTy ty
 
 repStandaloneDerivD :: LDerivDecl Name -> DsM (SrcSpan, Core TH.DecQ)
-repStandaloneDerivD (L loc (DerivDecl { deriv_type = ty }))
+repStandaloneDerivD (L loc (DerivDecl { deriv_strategy = strat
+                                      , deriv_type     = ty }))
   = do { dec <- addSimpleTyVarBinds tvs $
                 do { cxt'     <- repLContext cxt
+                   ; strat'   <- repDerivStrategy strat
                    ; inst_ty' <- repLTy inst_ty
-                   ; repDeriv cxt' inst_ty' }
+                   ; repDeriv strat' cxt' inst_ty' }
        ; return (loc, dec) }
   where
     (tvs, cxt, inst_ty) = splitLHsInstDeclTy ty
@@ -668,22 +670,22 @@ repBangTy ty = do
             _ -> (NoSrcUnpack, NoSrcStrict, ty)
 
 -------------------------------------------------------
---                      Deriving clause
+--                      Deriving clauses
 -------------------------------------------------------
 
-repDerivs :: HsDeriving Name -> DsM (Core TH.CxtQ)
-repDerivs deriv = do
-    let clauses = case deriv of
-                    Nothing         -> []
-                    Just (L _ ctxt) -> ctxt
-    tys <- repList typeQTyConName
-                   (rep_deriv . hsSigType)
-                   clauses
-           :: DsM (Core [TH.PredQ])
-    repCtxt tys
+repDerivs :: HsDeriving Name -> DsM (Core [TH.DerivClauseQ])
+repDerivs (L _ clauses) = repList derivClauseQTyConName repDerivClause clauses
+
+repDerivClause :: LHsDerivingClause Name
+               -> DsM (Core TH.DerivClauseQ)
+repDerivClause (L _ (HsDerivingClause { deriv_clause_strategy = dcs
+                                      , deriv_clause_tys      = L _ dct }))
+  = do MkC dcs' <- repDerivStrategy dcs
+       MkC dct' <- repList typeQTyConName (rep_deriv_ty . hsSigType) dct
+       rep2 derivClauseName [dcs',dct']
   where
-    rep_deriv :: LHsType Name -> DsM (Core TH.TypeQ)
-    rep_deriv (L _ ty) = repTy ty
+    rep_deriv_ty :: LHsType Name -> DsM (Core TH.TypeQ)
+    rep_deriv_ty (L _ ty) = repTy ty
 
 -------------------------------------------------------
 --   Signatures in a class decl, or a group of bindings
@@ -977,6 +979,9 @@ repTy (HsTupleTy HsUnboxedTuple tys) = do
 repTy (HsTupleTy _ tys)     = do tys1 <- repLTys tys
                                  tcon <- repTupleTyCon (length tys)
                                  repTapps tcon tys1
+repTy (HsSumTy tys)         = do tys1 <- repLTys tys
+                                 tcon <- repUnboxedSumTyCon (length tys)
+                                 repTapps tcon tys1
 repTy (HsOpTy ty1 n ty2)    = repLTy ((nlHsTyVar (unLoc n) `nlHsAppTy` ty1)
                                    `nlHsAppTy` ty2)
 repTy (HsParTy t)           = repLTy t
@@ -1121,6 +1126,9 @@ repE (HsLamCase (MG { mg_alts = L _ ms }))
                         ; core_ms <- coreList matchQTyConName ms'
                         ; repLamCase core_ms }
 repE (HsApp x y)   = do {a <- repLE x; b <- repLE y; repApp a b}
+repE (HsAppType e t) = do { a <- repLE e
+                          ; s <- repLTy (hswc_body t)
+                          ; repAppType a s }
 
 repE (OpApp e1 op _ e2) =
   do { arg1 <- repLE e1;
@@ -1175,6 +1183,10 @@ repE e@(ExplicitTuple es boxed)
   | isBoxed boxed  = do { xs <- repLEs [e | L _ (Present e) <- es]; repTup xs }
   | otherwise      = do { xs <- repLEs [e | L _ (Present e) <- es]
                         ; repUnboxedTup xs }
+
+repE (ExplicitSum alt arity e _)
+ = do { e1 <- repLE e
+      ; repUnboxedSum e1 alt arity }
 
 repE (RecordCon { rcon_con_name = c, rcon_flds = flds })
  = do { x <- lookupLOcc c;
@@ -1380,7 +1392,7 @@ repBinds (HsValBinds decs)
         ; return (ss, core_list) }
 
 rep_val_binds :: HsValBinds Name -> DsM [(SrcSpan, Core TH.DecQ)]
--- Assumes: all the binders of the binding are alrady in the meta-env
+-- Assumes: all the binders of the binding are already in the meta-env
 rep_val_binds (ValBindsOut binds sigs)
  = do { core1 <- rep_binds' (unionManyBags (map snd binds))
       ; core2 <- rep_sigs' sigs
@@ -1396,7 +1408,7 @@ rep_binds' :: LHsBinds Name -> DsM [(SrcSpan, Core TH.DecQ)]
 rep_binds' = mapM rep_bind . bagToList
 
 rep_bind :: LHsBind Name -> DsM (SrcSpan, Core TH.DecQ)
--- Assumes: all the binders of the binding are alrady in the meta-env
+-- Assumes: all the binders of the binding are already in the meta-env
 
 -- Note GHC treats declarations of a variable (not a pattern)
 -- e.g.  x = g 5 as a Fun MonoBinds. This is indicated by a single match
@@ -1584,6 +1596,7 @@ repP (ListPat ps ty1 (Just (_,e))) = do { p <- repP (ListPat ps ty1 Nothing); e'
 repP (TuplePat ps boxed _)
   | isBoxed boxed       = do { qs <- repLPs ps; repPtup qs }
   | otherwise           = do { qs <- repLPs ps; repPunboxedTup qs }
+repP (SumPat p alt arity _) = do { p1 <- repLP p; repPunboxedSum p1 alt arity }
 repP (ConPatIn dc details)
  = do { con_str <- lookupLOcc dc
       ; case details of
@@ -1603,14 +1616,9 @@ repP (ConPatIn dc details)
 repP (NPat (L _ l) Nothing _ _) = do { a <- repOverloadedLiteral l; repPlit a }
 repP (ViewPat e p _) = do { e' <- repLE e; p' <- repLP p; repPview e' p' }
 repP p@(NPat _ (Just _) _ _) = notHandled "Negative overloaded patterns" (ppr p)
-repP p@(SigPatIn {})  = notHandled "Type signatures in patterns" (ppr p)
-        -- The problem is to do with scoped type variables.
-        -- To implement them, we have to implement the scoping rules
-        -- here in DsMeta, and I don't want to do that today!
-        --       do { p' <- repLP p; t' <- repLTy t; repPsig p' t' }
-        --      repPsig :: Core TH.PatQ -> Core TH.TypeQ -> DsM (Core TH.PatQ)
-        --      repPsig (MkC p) (MkC t) = rep2 sigPName [p, t]
-
+repP (SigPatIn p t) = do { p' <- repLP p
+                         ; t' <- repLTy (hsSigWcType t)
+                         ; repPsig p' t' }
 repP (SplicePat splice) = repSplice splice
 
 repP other = notHandled "Exotic pattern" (ppr other)
@@ -1793,6 +1801,14 @@ repPtup (MkC ps) = rep2 tupPName [ps]
 repPunboxedTup :: Core [TH.PatQ] -> DsM (Core TH.PatQ)
 repPunboxedTup (MkC ps) = rep2 unboxedTupPName [ps]
 
+repPunboxedSum :: Core TH.PatQ -> TH.SumAlt -> TH.SumArity -> DsM (Core TH.PatQ)
+-- Note: not Core TH.SumAlt or Core TH.SumArity; it's easier to be direct here
+repPunboxedSum (MkC p) alt arity
+ = do { dflags <- getDynFlags
+      ; rep2 unboxedSumPName [ p
+                             , mkIntExprInt dflags alt
+                             , mkIntExprInt dflags arity ] }
+
 repPcon   :: Core TH.Name -> Core [TH.PatQ] -> DsM (Core TH.PatQ)
 repPcon (MkC s) (MkC ps) = rep2 conPName [s, ps]
 
@@ -1820,6 +1836,9 @@ repPlist (MkC ps) = rep2 listPName [ps]
 repPview :: Core TH.ExpQ -> Core TH.PatQ -> DsM (Core TH.PatQ)
 repPview (MkC e) (MkC p) = rep2 viewPName [e,p]
 
+repPsig :: Core TH.PatQ -> Core TH.TypeQ -> DsM (Core TH.PatQ)
+repPsig (MkC p) (MkC t) = rep2 sigPName [p, t]
+
 --------------- Expressions -----------------
 repVarOrCon :: Name -> Core TH.Name -> DsM (Core TH.ExpQ)
 repVarOrCon vc str | isDataOcc (nameOccName vc) = repCon str
@@ -1837,6 +1856,9 @@ repLit (MkC c) = rep2 litEName [c]
 repApp :: Core TH.ExpQ -> Core TH.ExpQ -> DsM (Core TH.ExpQ)
 repApp (MkC x) (MkC y) = rep2 appEName [x,y]
 
+repAppType :: Core TH.ExpQ -> Core TH.TypeQ -> DsM (Core TH.ExpQ)
+repAppType (MkC x) (MkC y) = rep2 appTypeEName [x,y]
+
 repLam :: Core [TH.PatQ] -> Core TH.ExpQ -> DsM (Core TH.ExpQ)
 repLam (MkC ps) (MkC e) = rep2 lamEName [ps, e]
 
@@ -1848,6 +1870,14 @@ repTup (MkC es) = rep2 tupEName [es]
 
 repUnboxedTup :: Core [TH.ExpQ] -> DsM (Core TH.ExpQ)
 repUnboxedTup (MkC es) = rep2 unboxedTupEName [es]
+
+repUnboxedSum :: Core TH.ExpQ -> TH.SumAlt -> TH.SumArity -> DsM (Core TH.ExpQ)
+-- Note: not Core TH.SumAlt or Core TH.SumArity; it's easier to be direct here
+repUnboxedSum (MkC e) alt arity
+ = do { dflags <- getDynFlags
+      ; rep2 unboxedSumEName [ e
+                             , mkIntExprInt dflags alt
+                             , mkIntExprInt dflags arity ] }
 
 repCond :: Core TH.ExpQ -> Core TH.ExpQ -> Core TH.ExpQ -> DsM (Core TH.ExpQ)
 repCond (MkC x) (MkC y) (MkC z) = rep2 condEName [x,y,z]
@@ -1952,7 +1982,7 @@ repFun (MkC nm) (MkC b) = rep2 funDName [nm, b]
 
 repData :: Core TH.CxtQ -> Core TH.Name -> Core [TH.TyVarBndr]
         -> Maybe (Core [TH.TypeQ]) -> Core (Maybe TH.Kind)
-        -> Core [TH.ConQ] -> Core TH.CxtQ -> DsM (Core TH.DecQ)
+        -> Core [TH.ConQ] -> Core [TH.DerivClauseQ] -> DsM (Core TH.DecQ)
 repData (MkC cxt) (MkC nm) (MkC tvs) Nothing (MkC ksig) (MkC cons) (MkC derivs)
   = rep2 dataDName [cxt, nm, tvs, ksig, cons, derivs]
 repData (MkC cxt) (MkC nm) (MkC _) (Just (MkC tys)) (MkC ksig) (MkC cons)
@@ -1961,7 +1991,7 @@ repData (MkC cxt) (MkC nm) (MkC _) (Just (MkC tys)) (MkC ksig) (MkC cons)
 
 repNewtype :: Core TH.CxtQ -> Core TH.Name -> Core [TH.TyVarBndr]
            -> Maybe (Core [TH.TypeQ]) -> Core (Maybe TH.Kind)
-           -> Core TH.ConQ -> Core TH.CxtQ -> DsM (Core TH.DecQ)
+           -> Core TH.ConQ -> Core [TH.DerivClauseQ] -> DsM (Core TH.DecQ)
 repNewtype (MkC cxt) (MkC nm) (MkC tvs) Nothing (MkC ksig) (MkC con)
            (MkC derivs)
   = rep2 newtypeDName [cxt, nm, tvs, ksig, con, derivs]
@@ -1978,6 +2008,20 @@ repInst :: Core (Maybe TH.Overlap) ->
            Core TH.CxtQ -> Core TH.TypeQ -> Core [TH.DecQ] -> DsM (Core TH.DecQ)
 repInst (MkC o) (MkC cxt) (MkC ty) (MkC ds) = rep2 instanceWithOverlapDName
                                                               [o, cxt, ty, ds]
+
+repDerivStrategy :: Maybe (Located DerivStrategy)
+                 -> DsM (Core (Maybe TH.DerivStrategy))
+repDerivStrategy mds =
+  case mds of
+    Nothing -> nothing
+    Just (L _ ds) ->
+      case ds of
+        DerivStock    -> just =<< dataCon stockDataConName
+        DerivAnyclass -> just =<< dataCon anyclassDataConName
+        DerivNewtype  -> just =<< dataCon newtypeDataConName
+  where
+  nothing = coreNothing derivStrategyTyConName
+  just    = coreJust    derivStrategyTyConName
 
 repOverlap :: Maybe OverlapMode -> DsM (Core (Maybe TH.Overlap))
 repOverlap mb =
@@ -2001,8 +2045,11 @@ repClass :: Core TH.CxtQ -> Core TH.Name -> Core [TH.TyVarBndr]
 repClass (MkC cxt) (MkC cls) (MkC tvs) (MkC fds) (MkC ds)
   = rep2 classDName [cxt, cls, tvs, fds, ds]
 
-repDeriv :: Core TH.CxtQ -> Core TH.TypeQ -> DsM (Core TH.DecQ)
-repDeriv (MkC cxt) (MkC ty) = rep2 standaloneDerivDName [cxt, ty]
+repDeriv :: Core (Maybe TH.DerivStrategy)
+         -> Core TH.CxtQ -> Core TH.TypeQ
+         -> DsM (Core TH.DecQ)
+repDeriv (MkC ds) (MkC cxt) (MkC ty)
+  = rep2 standaloneDerivWithStrategyDName [ds, cxt, ty]
 
 repPragInl :: Core TH.Name -> Core TH.Inline -> Core TH.RuleMatch
            -> Core TH.Phases -> DsM (Core TH.DecQ)
@@ -2184,6 +2231,11 @@ repUnboxedTupleTyCon :: Int -> DsM (Core TH.TypeQ)
 -- Note: not Core Int; it's easier to be direct here
 repUnboxedTupleTyCon i = do dflags <- getDynFlags
                             rep2 unboxedTupleTName [mkIntExprInt dflags i]
+
+repUnboxedSumTyCon :: TH.SumArity -> DsM (Core TH.TypeQ)
+-- Note: not Core TH.SumArity; it's easier to be direct here
+repUnboxedSumTyCon arity = do dflags <- getDynFlags
+                              rep2 unboxedSumTName [mkIntExprInt dflags arity]
 
 repArrowTyCon :: DsM (Core TH.TypeQ)
 repArrowTyCon = rep2 arrowTName []

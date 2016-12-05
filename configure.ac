@@ -410,20 +410,20 @@ dnl ** Building a cross compiler?
 dnl --------------------------------------------------------------
 CrossCompiling=NO
 # If 'host' and 'target' differ, then this means we are building a cross-compiler.
-if test "$target" != "$host" ; then
+if test "$TargetPlatform" != "$HostPlatform" ; then
     CrossCompiling=YES
     cross_compiling=yes   # This tells configure that it can accept just 'target',
                           # otherwise you get
                           #   configure: error: cannot run C compiled programs.
                           #   If you meant to cross compile, use `--host'.
 fi
-if test "$build" != "$host" ; then
+if test "$BuildPlatform" != "$HostPlatform" ; then
    AC_MSG_ERROR([
 You've selected:
 
-  BUILD:  $build   (the architecture we're building on)
-  HOST:   $host    (the architecture the compiler we're building will execute on)
-  TARGET: $target  (the architecture the compiler we're building will produce code for)
+  BUILD:  $BuildPlatform   (the architecture we're building on)
+  HOST:   $HostPlatform    (the architecture the compiler we're building will execute on)
+  TARGET: $TargetPlatform  (the architecture the compiler we're building will produce code for)
 
 BUILD must equal HOST; that is, we do not support building GHC itself
 with a cross-compiler.  To cross-compile GHC itself, set TARGET: stage
@@ -437,6 +437,10 @@ then
 else
   CrossCompilePrefix=""
 fi
+# Despite its similarity in name to TargetPlatform, TargetPlatformFull is used
+# in calls to subproject configure scripts and thus must be set to the autoconf
+# triple, not the normalized GHC triple that TargetPlatform is set to.
+# It may be better to just do away with the GHC triples all together.
 TargetPlatformFull="${target}"
 AC_SUBST(CrossCompiling)
 AC_SUBST(CrossCompilePrefix)
@@ -483,6 +487,32 @@ AC_SUBST([LdCmd])
 dnl ** Which nm to use?
 dnl --------------------------------------------------------------
 FP_ARG_WITH_PATH_GNU_PROG([NM], [nm], [nm])
+
+if test "$TargetOS_CPP" = "darwin"
+then
+    AC_MSG_CHECKING(whether nm program is broken)
+    # Some versions of XCode ship a broken version of `nm`. Detect and work
+    # around this issue. See : https://ghc.haskell.org/trac/ghc/ticket/11744
+    nmver=$(${NM} --version | grep version | sed 's/ //g')
+    case "$nmver" in
+        LLVMversion7.3.0|LLVMversion7.3.1)
+            AC_MSG_RESULT(yes)
+            echo "The detected nm program is broken."
+            echo
+            echo "See: https://ghc.haskell.org/trac/ghc/ticket/11744"
+            echo
+            echo "Try re-running configure with:"
+            echo
+            echo '   ./configure --with-nm=$(xcrun --find nm-classic)'
+            echo
+            exit 1
+            ;;
+        *)
+            AC_MSG_RESULT(no)
+            ;;
+        esac
+fi
+
 NmCmd="$NM"
 AC_SUBST([NmCmd])
 
@@ -521,7 +551,7 @@ esac
 # tools we are looking for. In the past, GHC supported a number of
 # versions of LLVM simultaneously, but that stopped working around
 # 3.5/3.6 release of LLVM.
-LlvmVersion=3.8
+LlvmVersion=3.9
 AC_SUBST([LlvmVersion])
 sUPPORTED_LLVM_VERSION=$(echo \($LlvmVersion\) | sed 's/\./,/')
 AC_DEFINE_UNQUOTED([sUPPORTED_LLVM_VERSION], ${sUPPORTED_LLVM_VERSION}, [The supported LLVM version number])
@@ -544,73 +574,6 @@ dnl --------------------------------------------------------------
 
 
 dnl --------------------------------------------------------------
-dnl * General configuration checks
-dnl --------------------------------------------------------------
-
-dnl ** Bug 9439: Some GHC 7.8 releases had broken LLVM code generator.
-dnl Unfortunately we don't know whether the user is going to request a
-dnl build with the LLVM backend as this is only given in build.mk.
-dnl
-dnl Instead, we try to do as much work as possible here, checking
-dnl whether -fllvm is the stage 0 compiler's default. If so we
-dnl fail. If not, we check whether -fllvm is affected explicitly and
-dnl if so set a flag. The build system will later check this flag
-dnl after the desired build flags are known.
-
-dnl This problem is further complicated by the fact that the llvm
-dnl version used by the bootstrap compiler may be different from the
-dnl version we arre trying to compile GHC against. Therefore, we need
-dnl to find the boostrap compiler's `settings` file then check to see
-dnl if the `opt` and `llc` command strings are non-empty and if these
-dnl programs exist. Only if they exist to we test for bug #9439.
-
-FIND_GHC_BOOTSTRAP_PROG([BootstrapLlcCmd], [${WithGhc}], "LLVM llc command")
-FIND_GHC_BOOTSTRAP_PROG([BootstrapOptCmd], [${WithGhc}], "LLVM opt command")
-
-if test -n "$BootstrapLlcCmd" && test -n "$BootstrapOptCmd"
-then
-    AC_MSG_CHECKING(whether bootstrap compiler is affected by bug 9439)
-    echo "main = putStrLn \"%function\"" > conftestghc.hs
-
-    # Check whether LLVM backend is default for this platform
-    "${WithGhc}" -pgmlc="${BootstrapLlcCmd}" -pgmlo="${BootstrapOptCmd}" conftestghc.hs 2>&1 >/dev/null
-    res=`./conftestghc`
-    if test "x$res" = "x%object"
-    then
-        AC_MSG_RESULT(yes)
-        echo "Buggy bootstrap compiler"
-        echo ""
-        echo "The stage 0 compiler $WithGhc is affected by GHC Bug \#9439"
-        echo "and therefore will miscompile the LLVM backend if -fllvm is"
-        echo "used."
-        echo
-        echo "Please use another bootstrap compiler"
-        exit 1
-    fi
-
-    # -fllvm is not the default, but set a flag so the Makefile can check
-    # -for it in the build flags later on
-    "${WithGhc}" -fforce-recomp -pgmlc="${BootstrapLlcCmd}" -pgmlo="${BootstrapOptCmd}" -fllvm conftestghc.hs 2>&1 >/dev/null
-    if test $? = 0
-    then
-        res=`./conftestghc`
-        if test "x$res" = "x%object"
-        then
-            AC_MSG_RESULT(yes)
-            GHC_LLVM_AFFECTED_BY_9439=1
-        elif test "x$res" = "x%function"
-        then
-            AC_MSG_RESULT(no)
-            GHC_LLVM_AFFECTED_BY_9439=0
-        else
-            AC_MSG_WARN(unexpected output $res)
-        fi
-    else
-        AC_MSG_RESULT(failed to compile, assuming no)
-    fi
-fi
-AC_SUBST([GHC_LLVM_AFFECTED_BY_9439])
-
 dnl ** Can the unix package be built?
 dnl --------------------------------------------------------------
 
@@ -649,6 +612,9 @@ dnl     If gcc, make sure it's at least 3.0
 dnl
 FP_GCC_VERSION
 
+dnl ** See whether gcc supports -no-pie
+FP_GCC_SUPPORTS_NO_PIE
+
 dnl ** look to see if we have a C compiler using an llvm back end.
 dnl
 FP_CC_LLVM_BACKEND
@@ -667,18 +633,27 @@ FPTOOLS_SET_C_LD_FLAGS([target],[CONF_CC_OPTS_STAGE2],[CONF_GCC_LINKER_OPTS_STAG
 
 FP_GCC_EXTRA_FLAGS
 
+# See rules/distdir-way-opts.mk for details.
+# Flags passed to the C compiler
 AC_SUBST(CONF_CC_OPTS_STAGE0)
 AC_SUBST(CONF_CC_OPTS_STAGE1)
 AC_SUBST(CONF_CC_OPTS_STAGE2)
+# Flags passed to the C compiler when we ask it to link
 AC_SUBST(CONF_GCC_LINKER_OPTS_STAGE0)
 AC_SUBST(CONF_GCC_LINKER_OPTS_STAGE1)
 AC_SUBST(CONF_GCC_LINKER_OPTS_STAGE2)
+# Flags passed to the linker when we ask it to link
 AC_SUBST(CONF_LD_LINKER_OPTS_STAGE0)
 AC_SUBST(CONF_LD_LINKER_OPTS_STAGE1)
 AC_SUBST(CONF_LD_LINKER_OPTS_STAGE2)
+# Flags passed to the C preprocessor
 AC_SUBST(CONF_CPP_OPTS_STAGE0)
 AC_SUBST(CONF_CPP_OPTS_STAGE1)
 AC_SUBST(CONF_CPP_OPTS_STAGE2)
+# Flags passed to the Haskell compiler
+AC_SUBST(CONF_HC_OPTS_STAGE0)
+AC_SUBST(CONF_HC_OPTS_STAGE1)
+AC_SUBST(CONF_HC_OPTS_STAGE2)
 
 dnl ** Set up the variables for the platform in the settings file.
 dnl May need to use gcc to find platform details.
@@ -1111,7 +1086,7 @@ AC_CHECK_HEADERS([numa.h numaif.h])
 if test "$ac_cv_header_numa_h$ac_cv_header_numaif_h" = "yesyes" ; then
     AC_CHECK_LIB(numa, numa_available,HaveLibNuma=1)
 fi
-AC_DEFINE_UNQUOTED([USE_LIBNUMA], [$HaveLibNuma], [Define to 1 if you have libnuma])
+AC_DEFINE_UNQUOTED([HAVE_LIBNUMA], [$HaveLibNuma], [Define to 1 if you have libnuma])
 
 dnl ** Documentation
 dnl --------------------------------------------------------------
@@ -1212,6 +1187,7 @@ echo ["\
    Using $CompilerName       : $CC
       which is version       : $GccVersion
    Building a cross compiler : $CrossCompiling
+   Unregisterised            : $Unregisterised
    hs-cpp       : $HaskellCPPCmd
    hs-cpp-flags : $HaskellCPPArgs
    ld           : $LdCmd

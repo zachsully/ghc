@@ -88,7 +88,7 @@ import MkCore           ( sortQuantVars )
 import SMRep            ( WordOff )
 import StgCmmArgRep     ( ArgRep(P), argRepSizeW, toArgRep )
 import StgCmmLayout     ( mkVirtHeapOffsets )
-import StgCmmClosure    ( idPrimRep, addIdReps )
+import StgCmmClosure    ( idPrimRep, addIdReps, nonVoidIds )
 
 import qualified TidyPgm
 
@@ -104,6 +104,7 @@ import Name             ( getOccName, mkSystemVarName )
 import OccName          ( occNameString )
 import Type             ( isUnliftedType, Type, mkLamTypes
                         , tyCoVarsOfTypeDSet )
+import Kind             ( isLevityPolymorphic, typeKind )
 import RepType          ( typePrimRep )
 import BasicTypes       ( Arity, RecFlag(..), isNonRec, isRec )
 import UniqSupply
@@ -547,6 +548,9 @@ lvlMFE strict_ctxt env ann_expr
          -- Can't let-bind it; see Note [Unlifted MFEs]
          -- This includes coercions, which we don't want to float anyway
          -- NB: no need to substitute cos isUnliftedType doesn't change
+  || isLevityPolymorphic (typeKind (exprType (deTagExpr expr)))
+         -- We can't let-bind levity polymorphic expressions
+         -- See Note [Levity polymorphism invariants] in CoreSyn
   || notWorthFloating ann_expr abs_vars
   || not float_me
   =     -- Don't float it out
@@ -1174,7 +1178,7 @@ wouldIncreaseAllocation env isLNE abs_ids_set pairs (FISilt _ scope_fiis scope_s
       closuresSize = sum $ flip map pairs $ \(_,FISilt _ fiis _) ->
         let (words, _, _) =
               StgCmmLayout.mkVirtHeapOffsets dflags isUpdateable $
-              StgCmmClosure.addIdReps $
+              StgCmmClosure.addIdReps $ StgCmmClosure.nonVoidIds $
               filter (`elemDVarSet` abs_ids_set) $
               dVarEnvElts $ expandFloatedIds env $ -- NB In versus Out ids
               mapDVarEnv fii_var fiis
@@ -1541,7 +1545,8 @@ newLvlVar lvld_rhs is_bot join_arity_maybe
     rhs_ty = exprType de_tagged_rhs
     mk_id uniq
       -- See Note [Grand plan for static forms] in SimplCore.
-      | isJust (collectStaticPtrSatArgs lvld_rhs)
+      | isJust $ collectStaticPtrSatArgs $ snd $ collectTyBinders $
+                                                   deTagExpr lvld_rhs
       = mkExportedVanillaId (mkSystemVarName uniq (mkFastString "static_ptr"))
                             rhs_ty
       | otherwise

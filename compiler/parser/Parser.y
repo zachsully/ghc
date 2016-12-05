@@ -22,7 +22,7 @@
 --       buffer = stringToStringBuffer str
 --       parseState = mkPState flags buffer location
 -- @
-module Parser (parseModule, parseImport, parseStatement,
+module Parser (parseModule, parseSignature, parseImport, parseStatement, parseBackpack,
                parseDeclaration, parseExpression, parsePattern,
                parseTypeSignature,
                parseStmt, parseIdentifier,
@@ -41,6 +41,8 @@ import HsSyn
 -- compiler/main
 import HscTypes         ( IsBootInterface, WarningTxt(..) )
 import DynFlags
+import BkpSyn
+import PackageConfig
 
 -- compiler/utils
 import OrdList
@@ -88,7 +90,7 @@ import qualified GHC.LanguageExtensions as LangExt
 
 %expect 36 -- shift/reduce conflicts
 
-{- Last updated: 9 Jan 2016
+{- Last updated: 3 Aug 2016
 
 If you modify this parser and add a conflict, please update this comment.
 You can learn more about the conflicts by passing 'happy' the -i flag:
@@ -119,7 +121,7 @@ follows. Shift parses as if the 'module' keyword follows.
 
 -------------------------------------------------------------------------------
 
-state 46 contains 2 shift/reduce conflicts.
+state 48 contains 2 shift/reduce conflicts.
 
     *** strict_mark -> unpackedness .
         strict_mark -> unpackedness . strictness
@@ -128,7 +130,7 @@ state 46 contains 2 shift/reduce conflicts.
 
 -------------------------------------------------------------------------------
 
-state 50 contains 1 shift/reduce conflict.
+state 52 contains 1 shift/reduce conflict.
 
         context -> btype .
     *** type -> btype .
@@ -138,7 +140,7 @@ state 50 contains 1 shift/reduce conflict.
 
 -------------------------------------------------------------------------------
 
-state 51 contains 9 shift/reduce conflicts.
+state 53 contains 9 shift/reduce conflicts.
 
     *** btype -> tyapps .
         tyapps -> tyapps . tyapp
@@ -147,7 +149,7 @@ state 51 contains 9 shift/reduce conflicts.
 
 -------------------------------------------------------------------------------
 
-state 132 contains 14 shift/reduce conflicts.
+state 134 contains 14 shift/reduce conflicts.
 
         exp -> infixexp . '::' sigtype
         exp -> infixexp . '-<' exp
@@ -172,7 +174,7 @@ Shift parses as (per longest-parse rule):
 
 -------------------------------------------------------------------------------
 
-state 295 contains 1 shift/reduce conflicts.
+state 299 contains 1 shift/reduce conflicts.
 
         rule -> STRING . rule_activation rule_forall infixexp '=' exp
 
@@ -190,7 +192,7 @@ a rule instructing how to rewrite the expression '[0] f'.
 
 -------------------------------------------------------------------------------
 
-state 304 contains 1 shift/reduce conflict.
+state 309 contains 1 shift/reduce conflict.
 
     *** type -> btype .
         type -> btype . '->' ctype
@@ -201,7 +203,7 @@ Same as state 50 but without contexts.
 
 -------------------------------------------------------------------------------
 
-state 340 contains 1 shift/reduce conflicts.
+state 348 contains 1 shift/reduce conflicts.
 
         tup_exprs -> commas . tup_tail
         sysdcon_nolist -> '(' commas . ')'
@@ -216,7 +218,7 @@ if -XTupleSections is not specified.
 
 -------------------------------------------------------------------------------
 
-state 391 contains 1 shift/reduce conflicts.
+state 402 contains 1 shift/reduce conflicts.
 
         tup_exprs -> commas . tup_tail
         sysdcon_nolist -> '(#' commas . '#)'
@@ -228,7 +230,7 @@ Same as State 324 for unboxed tuples.
 
 -------------------------------------------------------------------------------
 
-state 465 contains 1 shift/reduce conflict.
+state 477 contains 1 shift/reduce conflict.
 
         oqtycon -> '(' qtyconsym . ')'
     *** qtyconop -> qtyconsym .
@@ -239,7 +241,7 @@ TODO: Why?
 
 -------------------------------------------------------------------------------
 
-state 639 contains 1 shift/reduce conflicts.
+state 658 contains 1 shift/reduce conflicts.
 
     *** aexp2 -> ipvar .
         dbind -> ipvar . '=' exp
@@ -254,7 +256,7 @@ sensible meaning, namely the lhs of an implicit binding.
 
 -------------------------------------------------------------------------------
 
-state 707 contains 1 shift/reduce conflicts.
+state 731 contains 1 shift/reduce conflicts.
 
         rule -> STRING rule_activation . rule_forall infixexp '=' exp
 
@@ -271,7 +273,7 @@ doesn't include 'forall'.
 
 -------------------------------------------------------------------------------
 
-state 933 contains 1 shift/reduce conflicts.
+state 963 contains 1 shift/reduce conflicts.
 
         transformqual -> 'then' 'group' . 'using' exp
         transformqual -> 'then' 'group' . 'by' exp 'using' exp
@@ -281,7 +283,7 @@ state 933 contains 1 shift/reduce conflicts.
 
 -------------------------------------------------------------------------------
 
-state 1269 contains 1 shift/reduce conflict.
+state 1303 contains 1 shift/reduce conflict.
 
     *** atype -> tyvar .
         tv_bndr -> '(' tyvar . '::' kind ')'
@@ -368,8 +370,14 @@ output it generates.
  'using'    { L _ ITusing }     -- for list transform extension
  'pattern'      { L _ ITpattern } -- for pattern synonyms
  'static'       { L _ ITstatic }  -- for static pointers extension
+ 'stock'        { L _ ITstock }    -- for DerivingStrategies extension
+ 'anyclass'     { L _ ITanyclass } -- for DerivingStrategies extension
 
- '{-# INLINE'             { L _ (ITinline_prag _ _ _) }
+ 'unit'         { L _ ITunit }
+ 'signature'    { L _ ITsignature }
+ 'dependency'   { L _ ITdependency }
+
+ '{-# INLINE'             { L _ (ITinline_prag _ _ _) } -- INLINE or INLINABLE
  '{-# SPECIALISE'         { L _ (ITspec_prag _) }
  '{-# SPECIALISE_INLINE'  { L _ (ITspec_inline_prag _ _) }
  '{-# SOURCE'             { L _ (ITsource_prag _) }
@@ -485,6 +493,7 @@ TH_QQUASIQUOTE  { L _ (ITqQuasiQuote _) }
 
 -- Exported parsers
 %name parseModule module
+%name parseSignature signature
 %name parseImport importdecl
 %name parseStatement stmt
 %name parseDeclaration topdecl
@@ -494,6 +503,7 @@ TH_QQUASIQUOTE  { L _ (ITqQuasiQuote _) }
 %name parseStmt   maybe_stmt
 %name parseIdentifier  identifier
 %name parseType ctype
+%name parseBackpack backpack
 %partial parseHeader header
 %%
 
@@ -508,6 +518,92 @@ identifier :: { Located RdrName }
                                [mj AnnOpenP $1,mu AnnRarrow $2,mj AnnCloseP $3] }
 
 -----------------------------------------------------------------------------
+-- Backpack stuff
+
+backpack :: { [LHsUnit PackageName] }
+         : implicit_top units close { fromOL $2 }
+         | '{' units '}'            { fromOL $2 }
+
+units :: { OrdList (LHsUnit PackageName) }
+         : units ';' unit { $1 `appOL` unitOL $3 }
+         | units ';'      { $1 }
+         | unit           { unitOL $1 }
+
+unit :: { LHsUnit PackageName }
+        : 'unit' pkgname 'where' unitbody
+            { sL1 $1 $ HsUnit { hsunitName = $2
+                              , hsunitBody = fromOL $4 } }
+
+unitid :: { LHsUnitId PackageName }
+        : pkgname                  { sL1 $1 $ HsUnitId $1 [] }
+        | pkgname '[' msubsts ']'  { sLL $1 $> $ HsUnitId $1 (fromOL $3) }
+
+msubsts :: { OrdList (LHsModuleSubst PackageName) }
+        : msubsts ',' msubst { $1 `appOL` unitOL $3 }
+        | msubsts ','        { $1 }
+        | msubst             { unitOL $1 }
+
+msubst :: { LHsModuleSubst PackageName }
+        : modid '=' moduleid { sLL $1 $> $ ($1, $3) }
+        | modid VARSYM modid VARSYM { sLL $1 $> $ ($1, sLL $2 $> $ HsModuleVar $3) }
+
+moduleid :: { LHsModuleId PackageName }
+          : VARSYM modid VARSYM { sLL $1 $> $ HsModuleVar $2 }
+          | unitid ':' modid    { sLL $1 $> $ HsModuleId $1 $3 }
+
+pkgname :: { Located PackageName }
+        : STRING     { sL1 $1 $ PackageName (getSTRING $1) }
+        | litpkgname { sL1 $1 $ PackageName (unLoc $1) }
+
+litpkgname_segment :: { Located FastString }
+        : VARID  { sL1 $1 $ getVARID $1 }
+        | CONID  { sL1 $1 $ getCONID $1 }
+        | special_id { $1 }
+
+litpkgname :: { Located FastString }
+        : litpkgname_segment { $1 }
+        -- a bit of a hack, means p - b is parsed same as p-b, enough for now.
+        | litpkgname_segment '-' litpkgname  { sLL $1 $> $ appendFS (unLoc $1) (consFS '-' (unLoc $3)) }
+
+mayberns :: { Maybe [LRenaming] }
+        : {- empty -} { Nothing }
+        | '(' rns ')' { Just (fromOL $2) }
+
+rns :: { OrdList LRenaming }
+        : rns ',' rn { $1 `appOL` unitOL $3 }
+        | rns ','    { $1 }
+        | rn         { unitOL $1 }
+
+rn :: { LRenaming }
+        : modid 'as' modid { sLL $1 $> $ Renaming $1 (Just $3) }
+        | modid            { sL1 $1    $ Renaming $1 Nothing }
+
+unitbody :: { OrdList (LHsUnitDecl PackageName) }
+        : '{'     unitdecls '}'   { $2 }
+        | vocurly unitdecls close { $2 }
+
+unitdecls :: { OrdList (LHsUnitDecl PackageName) }
+        : unitdecls ';' unitdecl { $1 `appOL` unitOL $3 }
+        | unitdecls ';'         { $1 }
+        | unitdecl              { unitOL $1 }
+
+unitdecl :: { LHsUnitDecl PackageName }
+        : maybedocheader 'module' modid maybemodwarning maybeexports 'where' body
+             -- XXX not accurate
+             { sL1 $2 $ DeclD ModuleD $3 (Just (sL1 $2 (HsModule (Just $3) $5 (fst $ snd $7) (snd $ snd $7) $4 $1))) }
+        | maybedocheader 'signature' modid maybemodwarning maybeexports 'where' body
+             { sL1 $2 $ DeclD SignatureD $3 (Just (sL1 $2 (HsModule (Just $3) $5 (fst $ snd $7) (snd $ snd $7) $4 $1))) }
+        -- NB: MUST have maybedocheader here, otherwise shift-reduce conflict
+        -- will prevent us from parsing both forms.
+        | maybedocheader 'module' modid
+             { sL1 $2 $ DeclD ModuleD $3 Nothing }
+        | maybedocheader 'signature' modid
+             { sL1 $2 $ DeclD SignatureD $3 Nothing }
+        | 'dependency' unitid mayberns
+             { sL1 $1 $ IncludeD (IncludeDecl { idUnitId = $2
+                                              , idModRenaming = $3 }) }
+
+-----------------------------------------------------------------------------
 -- Module Header
 
 -- The place for module deprecation is really too restrictive, but if it
@@ -516,6 +612,14 @@ identifier :: { Located RdrName }
 -- introduction of a new pragma DEPRECATED_MODULE, but this is not very nice,
 -- either, and DEPRECATED is only expected to be used by people who really
 -- know what they are doing. :-)
+
+signature :: { Located (HsModule RdrName) }
+       : maybedocheader 'signature' modid maybemodwarning maybeexports 'where' body
+             {% fileSrcSpan >>= \ loc ->
+                ams (L loc (HsModule (Just $3) $5 (fst $ snd $7)
+                              (snd $ snd $7) $4 $1)
+                    )
+                    ([mj AnnModule $2, mj AnnWhere $6] ++ fst $7) }
 
 module :: { Located (HsModule RdrName) }
        : maybedocheader 'module' modid maybemodwarning maybeexports 'where' body
@@ -535,7 +639,10 @@ maybedocheader :: { Maybe LHsDocString }
         | {- empty -}             { Nothing }
 
 missing_module_keyword :: { () }
-        : {- empty -}                           {% pushCurrentContext }
+        : {- empty -}                           {% pushModuleContext }
+
+implicit_top :: { () }
+        : {- empty -}                           {% pushModuleContext }
 
 maybemodwarning :: { Maybe (Located WarningTxt) }
     : '{-# DEPRECATED' strings '#-}'
@@ -580,6 +687,10 @@ cvtopdecls :: { [LHsDecl RdrName] }
 
 header  :: { Located (HsModule RdrName) }
         : maybedocheader 'module' modid maybemodwarning maybeexports 'where' header_body
+                {% fileSrcSpan >>= \ loc ->
+                   ams (L loc (HsModule (Just $3) $5 $7 [] $4 $1
+                          )) [mj AnnModule $2,mj AnnWhere $6] }
+        | maybedocheader 'signature' modid maybemodwarning maybeexports 'where' header_body
                 {% fileSrcSpan >>= \ loc ->
                    ams (L loc (HsModule (Just $3) $5 $7 [] $4 $1
                           )) [mj AnnModule $2,mj AnnWhere $6] }
@@ -736,9 +847,9 @@ optqualified :: { ([AddAnn],Bool) }
         : 'qualified'                           { ([mj AnnQualified $1],True)  }
         | {- empty -}                           { ([],False) }
 
-maybeas :: { ([AddAnn],Located (Maybe ModuleName)) }
-        : 'as' modid                           { ([mj AnnAs $1,mj AnnVal $2]
-                                                 ,sLL $1 $> (Just (unLoc $2))) }
+maybeas :: { ([AddAnn],Located (Maybe (Located ModuleName))) }
+        : 'as' modid                           { ([mj AnnAs $1]
+                                                 ,sLL $1 $> (Just $2)) }
         | {- empty -}                          { ([],noLoc Nothing) }
 
 maybeimpspec :: { Located (Maybe (Bool, Located [LIE RdrName])) }
@@ -870,10 +981,10 @@ ty_decl :: { LTyClDecl RdrName }
                            ++ (fst $ unLoc $5) ++ (fst $ unLoc $6)) }
 
           -- ordinary data type or newtype declaration
-        | data_or_newtype capi_ctype tycl_hdr constrs deriving
+        | data_or_newtype capi_ctype tycl_hdr constrs maybe_derivings
                 {% amms (mkTyData (comb4 $1 $3 $4 $5) (snd $ unLoc $1) $2 $3
                            Nothing (reverse (snd $ unLoc $4))
-                                   (unLoc $5))
+                                   (fmap reverse $5))
                                    -- We need the location on tycl_hdr in case
                                    -- constrs and deriving are both empty
                         ((fst $ unLoc $1):(fst $ unLoc $4)) }
@@ -881,9 +992,10 @@ ty_decl :: { LTyClDecl RdrName }
           -- ordinary GADT declaration
         | data_or_newtype capi_ctype tycl_hdr opt_kind_sig
                  gadt_constrlist
-                 deriving
+                 maybe_derivings
             {% amms (mkTyData (comb4 $1 $3 $5 $6) (snd $ unLoc $1) $2 $3
-                            (snd $ unLoc $4) (snd $ unLoc $5) (unLoc $6) )
+                            (snd $ unLoc $4) (snd $ unLoc $5)
+                            (fmap reverse $6) )
                                    -- We need the location on tycl_hdr in case
                                    -- constrs and deriving are both empty
                     ((fst $ unLoc $1):(fst $ unLoc $4)++(fst $ unLoc $5)) }
@@ -912,18 +1024,20 @@ inst_decl :: { LInstDecl RdrName }
                     (mj AnnType $1:mj AnnInstance $2:(fst $ unLoc $3)) }
 
           -- data/newtype instance declaration
-        | data_or_newtype 'instance' capi_ctype tycl_hdr constrs deriving
+        | data_or_newtype 'instance' capi_ctype tycl_hdr constrs
+                          maybe_derivings
             {% amms (mkDataFamInst (comb4 $1 $4 $5 $6) (snd $ unLoc $1) $3 $4
                                       Nothing (reverse (snd  $ unLoc $5))
-                                              (unLoc $6))
+                                              (fmap reverse $6))
                     ((fst $ unLoc $1):mj AnnInstance $2:(fst $ unLoc $5)) }
 
           -- GADT instance declaration
         | data_or_newtype 'instance' capi_ctype tycl_hdr opt_kind_sig
                  gadt_constrlist
-                 deriving
+                 maybe_derivings
             {% amms (mkDataFamInst (comb4 $1 $4 $6 $7) (snd $ unLoc $1) $3 $4
-                                   (snd $ unLoc $5) (snd $ unLoc $6) (unLoc $7))
+                                   (snd $ unLoc $5) (snd $ unLoc $6)
+                                   (fmap reverse $7))
                     ((fst $ unLoc $1):mj AnnInstance $2
                        :(fst $ unLoc $5)++(fst $ unLoc $6)) }
 
@@ -938,6 +1052,14 @@ overlap_pragma :: { Maybe (Located OverlapMode) }
                                        [mo $1,mc $2] }
   | {- empty -}                 { Nothing }
 
+deriv_strategy :: { Maybe (Located DerivStrategy) }
+  : 'stock'                     {% ajs (Just (sL1 $1 DerivStock))
+                                       [mj AnnStock $1] }
+  | 'anyclass'                  {% ajs (Just (sL1 $1 DerivAnyclass))
+                                       [mj AnnAnyclass $1] }
+  | 'newtype'                   {% ajs (Just (sL1 $1 DerivNewtype))
+                                       [mj AnnNewtype $1] }
+  | {- empty -}                 { Nothing }
 
 -- Injective type families
 
@@ -1048,18 +1170,19 @@ at_decl_inst :: { LInstDecl RdrName }
                         (mj AnnType $1:(fst $ unLoc $2)) }
 
         -- data/newtype instance declaration
-        | data_or_newtype capi_ctype tycl_hdr constrs deriving
+        | data_or_newtype capi_ctype tycl_hdr constrs maybe_derivings
                {% amms (mkDataFamInst (comb4 $1 $3 $4 $5) (snd $ unLoc $1) $2 $3
                                     Nothing (reverse (snd $ unLoc $4))
-                                            (unLoc $5))
+                                            (fmap reverse $5))
                        ((fst $ unLoc $1):(fst $ unLoc $4)) }
 
         -- GADT instance declaration
         | data_or_newtype capi_ctype tycl_hdr opt_kind_sig
                  gadt_constrlist
-                 deriving
+                 maybe_derivings
                 {% amms (mkDataFamInst (comb4 $1 $3 $5 $6) (snd $ unLoc $1) $2
-                                $3 (snd $ unLoc $4) (snd $ unLoc $5) (unLoc $6))
+                                $3 (snd $ unLoc $4) (snd $ unLoc $5)
+                                (fmap reverse $6))
                         ((fst $ unLoc $1):(fst $ unLoc $4)++(fst $ unLoc $5)) }
 
 data_or_newtype :: { Located (AddAnn, NewOrData) }
@@ -1120,11 +1243,11 @@ capi_ctype : '{-# CTYPE' STRING STRING '#-}'
 
 -- Glasgow extension: stand-alone deriving declarations
 stand_alone_deriving :: { LDerivDecl RdrName }
-  : 'deriving' 'instance' overlap_pragma inst_type
-                         {% do { let { err = text "in the stand-alone deriving instance"
-                                             <> colon <+> quotes (ppr $4) }
-                               ; ams (sLL $1 (hsSigType $>) (DerivDecl $4 $3))
-                                     [mj AnnDeriving $1, mj AnnInstance $2] } }
+  : 'deriving' deriv_strategy 'instance' overlap_pragma inst_type
+                {% do { let { err = text "in the stand-alone deriving instance"
+                                    <> colon <+> quotes (ppr $5) }
+                      ; ams (sLL $1 (hsSigType $>) (DerivDecl $5 $2 $4))
+                            [mj AnnDeriving $1, mj AnnInstance $3] } }
 
 -----------------------------------------------------------------------------
 -- Role annotations
@@ -1929,22 +2052,34 @@ fielddecl :: { LConDeclField RdrName }
                       (ConDeclField (reverse (map (\ln@(L l n) -> L l $ FieldOcc ln PlaceHolder) (unLoc $2))) $4 ($1 `mplus` $5)))
                    [mu AnnDcolon $3] }
 
+-- Reversed!
+maybe_derivings :: { HsDeriving RdrName }
+        : {- empty -}             { noLoc [] }
+        | derivings               { $1 }
+
+-- A list of one or more deriving clauses at the end of a datatype
+derivings :: { HsDeriving RdrName }
+        : derivings deriving      { sLL $1 $> $ $2 : unLoc $1 }
+        | deriving                { sLL $1 $> [$1] }
+
 -- The outer Located is just to allow the caller to
 -- know the rightmost extremity of the 'deriving' clause
-deriving :: { Located (HsDeriving RdrName) }
-        : {- empty -}             { noLoc Nothing }
-        | 'deriving' qtycondoc    {% let { full_loc = comb2 $1 $> }
-                                      in ams (L full_loc $ Just $ L full_loc $
-                                                 [mkLHsSigType $2])
-                                             [mj AnnDeriving $1] }
+deriving :: { LHsDerivingClause RdrName }
+        : 'deriving' deriv_strategy qtycondoc
+              {% let { full_loc = comb2 $1 $> }
+                 in ams (L full_loc $ HsDerivingClause $2 $ L full_loc
+                            [mkLHsSigType $3])
+                        [mj AnnDeriving $1] }
 
-        | 'deriving' '(' ')'      {% let { full_loc = comb2 $1 $> }
-                                     in ams (L full_loc $ Just $ L full_loc [])
-                                            [mj AnnDeriving $1,mop $2,mcp $3] }
+        | 'deriving' deriv_strategy '(' ')'
+              {% let { full_loc = comb2 $1 $> }
+                 in ams (L full_loc $ HsDerivingClause $2 $ L full_loc [])
+                        [mj AnnDeriving $1,mop $3,mcp $4] }
 
-        | 'deriving' '(' deriv_types ')'  {% let { full_loc = comb2 $1 $> }
-                                             in ams (L full_loc $ Just $ L full_loc $3)
-                                                    [mj AnnDeriving $1,mop $2,mcp $4] }
+        | 'deriving' deriv_strategy '(' deriv_types ')'
+              {% let { full_loc = comb2 $1 $> }
+                 in ams (L full_loc $ HsDerivingClause $2 $ L full_loc $4)
+                        [mj AnnDeriving $1,mop $3,mcp $5] }
              -- Glasgow extension: allow partial
              -- applications in derivings
 
@@ -2058,6 +2193,7 @@ sigdecl :: { LHsDecl RdrName }
 
         | pattern_synonym_sig   { sLL $1 $> . SigD . unLoc $ $1 }
 
+        -- This rule is for both INLINE and INLINABLE pragmas
         | '{-# INLINE' activation qvar '#-}'
                 {% ams ((sLL $1 $> $ SigD (InlineSig $3
                             (mkInlinePragma (getINLINE_PRAGs $1) (getINLINE $1)
@@ -2602,20 +2738,12 @@ gdpats :: { Located [LGRHS RdrName (LHsExpr RdrName)] }
         : gdpats gdpat                  { sLL $1 $> ($2 : unLoc $1) }
         | gdpat                         { sL1 $1 [$1] }
 
--- optional semi-colons between the guards of a MultiWayIf, because we use
--- layout here, but we don't need (or want) the semicolon as a separator (#7783).
-gdpatssemi :: { Located [LGRHS RdrName (LHsExpr RdrName)] }
-        : gdpatssemi gdpat optSemi  {% ams (sL (comb2 $1 $2) ($2 : unLoc $1))
-                                           (map (\l -> mj AnnSemi l) $ fst $3) }
-        | gdpat optSemi             {% ams (sL1 $1 [$1])
-                                           (map (\l -> mj AnnSemi l) $ fst $2) }
-
 -- layout for MultiWayIf doesn't begin with an open brace, because it's hard to
 -- generate the open brace in addition to the vertical bar in the lexer, and
 -- we don't need it.
 ifgdpats :: { Located ([AddAnn],[LGRHS RdrName (LHsExpr RdrName)]) }
-         : '{' gdpatssemi '}'             { sLL $1 $> ([moc $1,mcc $3],unLoc $2)  }
-         |     gdpatssemi close           { sL1 $1 ([],unLoc $1) }
+         : '{' gdpats '}'                 { sLL $1 $> ([moc $1,mcc $3],unLoc $2)  }
+         |     gdpats close               { sL1 $1 ([],unLoc $1) }
 
 gdpat   :: { LGRHS RdrName (LHsExpr RdrName) }
         : '|' guardquals '->' exp
@@ -3021,8 +3149,8 @@ qvarid :: { Located RdrName }
         | QVARID              { sL1 $1 $! mkQual varName (getQVARID $1) }
 
 -- Note that 'role' and 'family' get lexed separately regardless of
--- the use of extensions. However, because they are listed here, this
--- is OK and they can be used as normal varids.
+-- the use of extensions. However, because they are listed here,
+-- this is OK and they can be used as normal varids.
 -- See Note [Lexing type pseudo-keywords] in Lexer.x
 varid :: { Located RdrName }
         : VARID            { sL1 $1 $! mkUnqual varName (getVARID $1) }
@@ -3056,8 +3184,8 @@ varsym_no_minus :: { Located RdrName } -- varsym not including '-'
 
 -- These special_ids are treated as keywords in various places,
 -- but as ordinary ids elsewhere.   'special_id' collects all these
--- except 'unsafe', 'interruptible', 'forall', 'family', and 'role',
--- whose treatment differs depending on context
+-- except 'unsafe', 'interruptible', 'forall', 'family', 'role', 'stock', and
+-- 'anyclass', whose treatment differs depending on context
 special_id :: { Located FastString }
 special_id
         : 'as'                  { sL1 $1 (fsLit "as") }
@@ -3072,6 +3200,11 @@ special_id
         | 'prim'                { sL1 $1 (fsLit "prim") }
         | 'javascript'          { sL1 $1 (fsLit "javascript") }
         | 'group'               { sL1 $1 (fsLit "group") }
+        | 'stock'               { sL1 $1 (fsLit "stock") }
+        | 'anyclass'            { sL1 $1 (fsLit "anyclass") }
+        | 'unit'                { sL1 $1 (fsLit "unit") }
+        | 'dependency'          { sL1 $1 (fsLit "dependency") }
+        | 'signature'           { sL1 $1 (fsLit "signature") }
 
 special_sym :: { Located FastString }
 special_sym : '!'       {% ams (sL1 $1 (fsLit "!")) [mj AnnBang $1] }

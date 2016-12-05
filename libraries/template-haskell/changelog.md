@@ -1,12 +1,20 @@
 # Changelog for [`template-haskell` package](http://hackage.haskell.org/package/template-haskell)
 
-## next *TBA*
+## 2.12.0.0 *TBA*
+
   * Bundled with GHC *TBA*
 
   * Add support for pattern synonyms. This introduces one new constructor to
     `Info` (`PatSynI`), two new constructors to `Dec` (`PatSynD` and
     `PatSynSigD`), and two new data types (`PatSynDir` and `PatSynArgs`),
     among other changes. (#8761)
+
+  * Add support for unboxed sums. (#12478)
+
+  * Add support for visible type applications. (#12530)
+
+  * Add support for attaching deriving strategies to `deriving` statements
+    (#10598)
 
 ## 2.11.0.0  *May 2016*
 

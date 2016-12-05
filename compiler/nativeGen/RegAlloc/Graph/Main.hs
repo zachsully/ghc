@@ -16,13 +16,14 @@ import TargetReg
 import RegClass
 import Reg
 
-import UniqSupply
-import UniqSet
-import UniqFM
 import Bag
+import DynFlags
 import Outputable
 import Platform
-import DynFlags
+import UniqFM
+import UniqSet
+import UniqSupply
+import Util (seqList)
 
 import Data.List
 import Data.Maybe
@@ -221,7 +222,7 @@ regAlloc_spin dflags spinCount triv regsFree slotsFree debug_codeGraphs code
                                 else []
 
                 -- Ensure all the statistics are evaluated, to avoid space leaks.
-                seqList statList `seq` return ()
+                seqList statList (return ())
 
                 return  ( code_final
                         , statList
@@ -268,7 +269,7 @@ regAlloc_spin dflags spinCount triv regsFree slotsFree debug_codeGraphs code
                                 else []
 
                 -- Ensure all the statistics are evaluated, to avoid space leaks.
-                seqList statList `seq` return ()
+                seqList statList (return ())
 
                 regAlloc_spin dflags (spinCount + 1) triv regsFree slotsFree'
                         statList
@@ -359,6 +360,9 @@ graphAddCoalesce (r1, r2) graph
         , RegReal _             <- r2
         = graph
 
+        | otherwise
+        = panic "graphAddCoalesce"
+
 
 -- | Patch registers in code using the reg -> reg mapping in this graph.
 patchRegsFromGraph
@@ -447,11 +451,3 @@ seqRealRegList rs
  = case rs of
         []              -> ()
         (r : rs)        -> seqRealReg r `seq` seqRealRegList rs
-
-seqList :: [a] -> ()
-seqList ls
- = case ls of
-        []              -> ()
-        (r : rs)        -> r `seq` seqList rs
-
-

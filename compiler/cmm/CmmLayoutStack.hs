@@ -32,7 +32,6 @@ import Control.Monad.Fix
 import Data.Array as Array
 import Data.Bits
 import Data.List (nub)
-import Control.Monad (liftM)
 
 import Prelude hiding ((<*>))
 
@@ -190,11 +189,11 @@ instance Outputable StackMap where
 cmmLayoutStack :: DynFlags -> ProcPointSet -> ByteOff -> CmmGraph
                -> UniqSM (CmmGraph, BlockEnv StackMap)
 cmmLayoutStack dflags procpoints entry_args
-               graph0@(CmmGraph { g_entry = entry })
+               graph@(CmmGraph { g_entry = entry })
   = do
     -- We need liveness info. Dead assignments are removed later
     -- by the sinking pass.
-    let (graph, liveness) = (graph0, cmmLocalLiveness dflags graph0)
+    let liveness = cmmLocalLiveness dflags graph
         blocks = postorderDfs graph
 
     (final_stackmaps, _final_high_sp, new_blocks) <-
@@ -526,7 +525,7 @@ makeFixupBlock :: DynFlags -> ByteOff -> Label -> StackMap
 makeFixupBlock dflags sp0 l stack tscope assigs
   | null assigs && sp0 == sm_sp stack = return (l, [])
   | otherwise = do
-    tmp_lbl <- liftM mkBlockId $ getUniqueM
+    tmp_lbl <- newBlockId
     let sp_off = sp0 - sm_sp stack
         block = blockJoin (CmmEntry tmp_lbl tscope)
                           (maybeAddSpAdj dflags sp_off (blockFromList assigs))
@@ -1032,7 +1031,7 @@ lowerSafeForeignCall dflags block
 
         (_, regs, copyout) =
              copyOutOflow dflags NativeReturn Jump (Young succ)
-                            (map (CmmExprArg . CmmReg . CmmLocal) res)
+                            (map (CmmReg . CmmLocal) res)
                             ret_off []
 
         -- NB. after resumeThread returns, the top-of-stack probably contains

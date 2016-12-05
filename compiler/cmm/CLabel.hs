@@ -20,10 +20,8 @@ module CLabel (
         mkEntryLabel,
         mkSlowEntryLabel,
         mkConEntryLabel,
-        mkStaticConEntryLabel,
         mkRednCountsLabel,
         mkConInfoTableLabel,
-        mkStaticInfoTableLabel,
         mkLargeSRTLabel,
         mkApEntryLabel,
         mkApInfoTableLabel,
@@ -33,9 +31,7 @@ module CLabel (
         mkLocalInfoTableLabel,
         mkLocalEntryLabel,
         mkLocalConEntryLabel,
-        mkLocalStaticConEntryLabel,
         mkLocalConInfoTableLabel,
-        mkLocalStaticInfoTableLabel,
         mkLocalClosureTableLabel,
 
         mkReturnPtLabel,
@@ -66,7 +62,6 @@ module CLabel (
         mkSMAP_DIRTY_infoLabel,
         mkEMPTY_MVAR_infoLabel,
         mkArrWords_infoLabel,
-        mkRUBBISH_ENTRY_infoLabel,
 
         mkTopTickyCtrLabel,
         mkCAFBlackHoleInfoTableLabel,
@@ -391,8 +386,6 @@ data IdLabelInfo
 
   | ConEntry            -- ^ Constructor entry point
   | ConInfoTable        -- ^ Corresponding info table
-  | StaticConEntry      -- ^ Static constructor entry point
-  | StaticInfoTable     -- ^ Corresponding info table
 
   | ClosureTable        -- ^ Table of closures for Enum tycons
 
@@ -480,25 +473,17 @@ mkEntryLabel                :: Name -> CafInfo -> CLabel
 mkClosureTableLabel         :: Name -> CafInfo -> CLabel
 mkLocalConInfoTableLabel    :: CafInfo -> Name -> CLabel
 mkLocalConEntryLabel        :: CafInfo -> Name -> CLabel
-mkLocalStaticInfoTableLabel :: CafInfo -> Name -> CLabel
-mkLocalStaticConEntryLabel  :: CafInfo -> Name -> CLabel
 mkConInfoTableLabel         :: Name -> CafInfo -> CLabel
-mkStaticInfoTableLabel      :: Name -> CafInfo -> CLabel
 mkClosureLabel name         c     = IdLabel name c Closure
 mkInfoTableLabel name       c     = IdLabel name c InfoTable
 mkEntryLabel name           c     = IdLabel name c Entry
 mkClosureTableLabel name    c     = IdLabel name c ClosureTable
 mkLocalConInfoTableLabel    c con = IdLabel con c ConInfoTable
 mkLocalConEntryLabel        c con = IdLabel con c ConEntry
-mkLocalStaticInfoTableLabel c con = IdLabel con c StaticInfoTable
-mkLocalStaticConEntryLabel  c con = IdLabel con c StaticConEntry
 mkConInfoTableLabel name    c     = IdLabel name c ConInfoTable
-mkStaticInfoTableLabel name c     = IdLabel name c StaticInfoTable
 
 mkConEntryLabel       :: Name -> CafInfo -> CLabel
-mkStaticConEntryLabel :: Name -> CafInfo -> CLabel
 mkConEntryLabel name        c     = IdLabel name c ConEntry
-mkStaticConEntryLabel name  c     = IdLabel name c StaticConEntry
 
 -- Constructing Cmm Labels
 mkDirty_MUT_VAR_Label, mkSplitMarkerLabel, mkUpdInfoLabel,
@@ -507,7 +492,7 @@ mkDirty_MUT_VAR_Label, mkSplitMarkerLabel, mkUpdInfoLabel,
     mkEMPTY_MVAR_infoLabel, mkTopTickyCtrLabel,
     mkCAFBlackHoleInfoTableLabel, mkCAFBlackHoleEntryLabel,
     mkArrWords_infoLabel, mkSMAP_FROZEN_infoLabel, mkSMAP_FROZEN0_infoLabel,
-    mkSMAP_DIRTY_infoLabel, mkRUBBISH_ENTRY_infoLabel :: CLabel
+    mkSMAP_DIRTY_infoLabel :: CLabel
 mkDirty_MUT_VAR_Label           = mkForeignLabel (fsLit "dirty_MUT_VAR") Nothing ForeignLabelInExternalPackage IsFunction
 mkSplitMarkerLabel              = CmmLabel rtsUnitId (fsLit "__stg_split_marker")    CmmCode
 mkUpdInfoLabel                  = CmmLabel rtsUnitId (fsLit "stg_upd_frame")         CmmInfo
@@ -525,7 +510,6 @@ mkArrWords_infoLabel            = CmmLabel rtsUnitId (fsLit "stg_ARR_WORDS")    
 mkSMAP_FROZEN_infoLabel         = CmmLabel rtsUnitId (fsLit "stg_SMALL_MUT_ARR_PTRS_FROZEN") CmmInfo
 mkSMAP_FROZEN0_infoLabel        = CmmLabel rtsUnitId (fsLit "stg_SMALL_MUT_ARR_PTRS_FROZEN0") CmmInfo
 mkSMAP_DIRTY_infoLabel          = CmmLabel rtsUnitId (fsLit "stg_SMALL_MUT_ARR_PTRS_DIRTY") CmmInfo
-mkRUBBISH_ENTRY_infoLabel       = CmmLabel rtsUnitId (fsLit "stg_RUBBISH_ENTRY")     CmmInfo
 
 -----
 mkCmmInfoLabel,   mkCmmEntryLabel, mkCmmRetInfoLabel, mkCmmRetLabel,
@@ -679,7 +663,6 @@ toSlowEntryLbl l = pprPanic "toSlowEntryLbl" (ppr l)
 toEntryLbl :: CLabel -> CLabel
 toEntryLbl (IdLabel n c LocalInfoTable)  = IdLabel n c LocalEntry
 toEntryLbl (IdLabel n c ConInfoTable)    = IdLabel n c ConEntry
-toEntryLbl (IdLabel n c StaticInfoTable) = IdLabel n c StaticConEntry
 toEntryLbl (IdLabel n c _)               = IdLabel n c Entry
 toEntryLbl (CaseLabel n CaseReturnInfo)  = CaseLabel n CaseReturnPt
 toEntryLbl (CmmLabel m str CmmInfo)      = CmmLabel m str CmmEntry
@@ -690,7 +673,6 @@ toInfoLbl :: CLabel -> CLabel
 toInfoLbl (IdLabel n c Entry)          = IdLabel n c InfoTable
 toInfoLbl (IdLabel n c LocalEntry)     = IdLabel n c LocalInfoTable
 toInfoLbl (IdLabel n c ConEntry)       = IdLabel n c ConInfoTable
-toInfoLbl (IdLabel n c StaticConEntry) = IdLabel n c StaticInfoTable
 toInfoLbl (IdLabel n c _)              = IdLabel n c InfoTable
 toInfoLbl (CaseLabel n CaseReturnPt)   = CaseLabel n CaseReturnInfo
 toInfoLbl (CmmLabel m str CmmEntry)    = CmmLabel m str CmmInfo
@@ -860,7 +842,12 @@ math_funs = mkUniqSet [
         (fsLit "significand"),  (fsLit "significandf"), (fsLit "significandl"),
         (fsLit "y0"),           (fsLit "y0f"),          (fsLit "y0l"),
         (fsLit "y1"),           (fsLit "y1f"),          (fsLit "y1l"),
-        (fsLit "yn"),           (fsLit "ynf"),          (fsLit "ynl")
+        (fsLit "yn"),           (fsLit "ynf"),          (fsLit "ynl"),
+
+        -- These functions are described in IEEE Std 754-2008 -
+        -- Standard for Floating-Point Arithmetic and ISO/IEC TS 18661
+        (fsLit "nextup"),       (fsLit "nextupf"),      (fsLit "nextupl"),
+        (fsLit "nextdown"),     (fsLit "nextdownf"),    (fsLit "nextdownl")
     ]
 
 -- -----------------------------------------------------------------------------
@@ -946,7 +933,6 @@ idInfoLabelType info =
     LocalInfoTable -> DataLabel
     Closure       -> GcPtrLabel
     ConInfoTable  -> DataLabel
-    StaticInfoTable -> DataLabel
     ClosureTable  -> DataLabel
     RednCounts    -> DataLabel
     _             -> CodeLabel
@@ -1241,8 +1227,6 @@ ppIdFlavor x = pp_cSEP <>
                        RednCounts       -> text "ct"
                        ConEntry         -> text "con_entry"
                        ConInfoTable     -> text "con_info"
-                       StaticConEntry   -> text "static_entry"
-                       StaticInfoTable  -> text "static_info"
                        ClosureTable     -> text "closure_tbl"
                       )
 

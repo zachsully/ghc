@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module RepType
   ( -- * Code generator views onto Types
@@ -199,7 +200,9 @@ ubxSumRepType constrs0 =
       | Just s' <- s `fitsIn` es
       = -- found a slot, use it
         s' : merge ess ss
-
+      | s < es
+      = -- we need a new slot and this is the right place for it
+        s : merge (es : ess) ss
       | otherwise
       = -- keep searching for a slot
         es : merge ess (s : ss)
@@ -330,14 +333,14 @@ fitsIn ty1 ty2
 ********************************************************************** -}
 
 -- | Discovers the primitive representation of a more abstract 'UnaryType'
-typePrimRep :: UnaryType -> PrimRep
+typePrimRep :: HasDebugCallStack => UnaryType -> PrimRep
 typePrimRep ty = kindPrimRep (text "kindRep ty" <+> ppr ty $$ ppr (typeKind ty))
                              (typeKind ty)
 
 -- | Find the runtime representation of a 'TyCon'. Defined here to
 -- avoid module loops. Do not call this on unboxed tuples or sums,
 -- because they don't /have/ a runtime representation
-tyConPrimRep :: TyCon -> PrimRep
+tyConPrimRep :: HasDebugCallStack => TyCon -> PrimRep
 tyConPrimRep tc
   = ASSERT2( not (isUnboxedTupleTyCon tc), ppr tc )
     ASSERT2( not (isUnboxedSumTyCon   tc), ppr tc )
@@ -348,7 +351,7 @@ tyConPrimRep tc
 
 -- | Take a kind (of shape @TYPE rr@) and produce the 'PrimRep'
 -- of values of types of this kind.
-kindPrimRep :: SDoc -> Kind -> PrimRep
+kindPrimRep :: HasDebugCallStack => SDoc -> Kind -> PrimRep
 kindPrimRep doc ki
   | Just ki' <- coreViewOneStarKind ki
   = kindPrimRep doc ki'

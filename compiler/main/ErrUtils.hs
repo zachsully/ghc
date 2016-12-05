@@ -13,15 +13,19 @@ module ErrUtils (
         Severity(..),
 
         -- * Messages
-        MsgDoc, ErrMsg, ErrDoc, errDoc, WarnMsg,
+        ErrMsg, errMsgDoc,
+        ErrDoc, errDoc, errDocImportant, errDocContext, errDocSupplementary,
+        WarnMsg, MsgDoc,
         Messages, ErrorMessages, WarningMessages,
         unionMessages,
         errMsgSpan, errMsgContext,
         errorsFound, isEmptyMessages,
+        isWarnMsgFatal,
 
         -- ** Formatting
         pprMessageBag, pprErrMsgBagWithLoc,
         pprLocErrMsg, printBagOfErrors,
+        formatErrDoc,
 
         -- ** Construction
         emptyMessages, mkLocMessage, mkLocMessageAnn, makeIntoWarning,
@@ -64,6 +68,7 @@ import Data.List
 import qualified Data.Set as Set
 import Data.IORef
 import Data.Maybe       ( fromMaybe )
+import Data.Monoid      ( mappend )
 import Data.Ord
 import Data.Time
 import Control.Monad
@@ -123,11 +128,11 @@ data ErrMsg = ErrMsg {
 -- from.
 data ErrDoc = ErrDoc {
         -- | Primary error msg.
-        errDocImportant :: [MsgDoc],
+        errDocImportant     :: [MsgDoc],
         -- | Context e.g. \"In the second argument of ...\".
-        _errDocContext :: [MsgDoc],
+        errDocContext       :: [MsgDoc],
         -- | Supplementary information, e.g. \"Relevant bindings include ...\".
-        _errDocSupplementary :: [MsgDoc]
+        errDocSupplementary :: [MsgDoc]
         }
 
 errDoc :: [MsgDoc] -> [MsgDoc] -> [MsgDoc] -> ErrDoc
@@ -175,18 +180,25 @@ mkLocMessageAnn ann severity locn msg
       let locn' = if gopt Opt_ErrorSpans dflags
                   then ppr locn
                   else ppr (srcSpanStart locn)
-      in hang (locn' <> colon <+> sev_info <> opt_ann) 4 msg
+      in bold (hang (locn' <> colon <+> sevInfo <> optAnn) 4 msg)
   where
     -- Add prefixes, like    Foo.hs:34: warning:
     --                           <the warning message>
-    sev_info = case severity of
-                 SevWarning -> text "warning:"
-                 SevError -> text "error:"
-                 SevFatal -> text "fatal:"
-                 _ -> empty
+    (sevInfo, sevColor) =
+      case severity of
+        SevWarning ->
+          (coloured sevColor (text "warning:"), colBold `mappend` colMagentaFg)
+        SevError ->
+          (coloured sevColor (text "error:"), colBold `mappend` colRedFg)
+        SevFatal ->
+          (coloured sevColor (text "fatal:"), colBold `mappend` colRedFg)
+        _ ->
+          (empty, mempty)
 
     -- Add optional information
-    opt_ann = text $ maybe "" (\i -> " ["++i++"]") ann
+    optAnn = case ann of
+      Nothing -> text ""
+      Just i -> text " [" <> coloured sevColor (text i) <> text "]"
 
 makeIntoWarning :: WarnReason -> ErrMsg -> ErrMsg
 makeIntoWarning reason err = err
@@ -353,7 +365,7 @@ dumpSDoc dflags print_unqual flag hdr doc
                         gd <- readIORef gdref
                         let append = Set.member fileName gd
                             mode = if append then AppendMode else WriteMode
-                        when (not append) $
+                        unless append $
                             writeIORef gdref (Set.insert fileName gd)
                         createDirectoryIfMissing True (takeDirectory fileName)
                         handle <- openFile fileName mode
@@ -550,3 +562,9 @@ prettyPrintGhcErrors dflags
                           pprDebugAndThen dflags pgmError (text str) doc
                       _ ->
                           liftIO $ throwIO e
+
+-- | Checks if given 'WarnMsg' is a fatal warning.
+isWarnMsgFatal :: DynFlags -> WarnMsg -> Bool
+isWarnMsgFatal dflags ErrMsg{errMsgReason = Reason wflag}
+  = wopt_fatal wflag dflags
+isWarnMsgFatal dflags _ = gopt Opt_WarnIsError dflags

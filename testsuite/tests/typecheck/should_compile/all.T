@@ -357,8 +357,18 @@ test('tc262', normal, compile, [''])
 test('tc263',
     extra_clean(['Tc263_Help.o','Tc263_Help.hi']),
     multimod_compile, ['tc263','-v0'])
-test('tc264', normal, multimod_compile, ['tc264.hsig', '-sig-of "ShouldCompile is base:Data.STRef"'])
 test('tc265', compile_timeout_multiplier(0.01), compile, [''])
+test('tc266',
+     [extra_clean(['Tc266.hi-boot', 'Tc266.o-boot', 'Tc266a.hi', 'Tc266a.o', 'Tc266.hi', 'Tc266.o'])] ,
+     run_command,
+     ['$MAKE -s --no-print-directory tc266'])
+test('Tc267',
+     extra_clean(['Tc267a.hi-boot', 'Tc267a.o-boot', 'Tc267b.hi-boot', 'Tc267b.o-boot', 'Tc267a.hi', 'Tc267a.o', 'Tc267b.hi', 'Tc267b.o']),
+     run_command,
+     ['$MAKE -s --no-print-directory Tc267'])
+test('tc268', normal, compile, [''])
+test('tc269', normal, compile, [''])
+test('tc270', normal, compile, [''])
 
 test('GivenOverlapping', normal, compile, [''])
 test('GivenTypeSynonym', normal, compile, [''])
@@ -500,7 +510,7 @@ test('T11462',
 test('T11480', normal, compile, [''])
 test('RebindHR', normal, compile, [''])
 test('RebindNegate', normal, compile, [''])
-test('T11319', expect_broken(11319), compile, [''])
+test('T11319', normal, compile, [''])
 test('T11397', normal, compile, [''])
 test('T11458', normal, compile, [''])
 test('T11524', normal, compile, [''])
@@ -533,3 +543,15 @@ test('T12185', normal, compile, [''])
 test('T12133', normal, compile, [''])
 test('T12381', normal, compile, [''])
 test('T12082', normal, compile, [''])
+test('T10635', normal, compile, [''])
+test('T12170b', normal, compile, [''])
+test('T12466', normal, compile, [''])
+test('T12466a', normal, compile, [''])
+test('T12644', normal, compile, [''])
+test('T12427a', normal, compile_fail, [''])
+test('T12427b', normal, compile, [''])
+test('T12507', normal, compile, [''])
+test('T12734', normal, compile, [''])
+test('T12734a', normal, compile_fail, [''])
+test('T12763', normal, compile, [''])
+test('T12797', normal, compile, [''])

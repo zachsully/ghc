@@ -19,6 +19,9 @@ types that
 module BasicTypes(
         Version, bumpVersion, initialVersion,
 
+        LeftOrRight(..),
+        pickLR,
+
         ConTag, ConTagZ, fIRST_TAG,
 
         Arity, RepArity, JoinArity,
@@ -41,10 +44,14 @@ module BasicTypes(
 
         TopLevelFlag(..), isTopLevel, isNotTopLevel,
 
+        DerivStrategy(..),
+
         OverlapFlag(..), OverlapMode(..), setOverlapModeMaybe,
         hasOverlappingFlag, hasOverlappableFlag, hasIncoherentFlag,
 
         Boxity(..), isBoxed,
+
+        TyPrec(..), maybeParen,
 
         TupleSort(..), tupleSortBoxity, boxityTupleSort,
         tupleParens,
@@ -103,6 +110,25 @@ import Data.Function (on)
 {-
 ************************************************************************
 *                                                                      *
+          Binary choice
+*                                                                      *
+************************************************************************
+-}
+
+data LeftOrRight = CLeft | CRight
+                 deriving( Eq, Data )
+
+pickLR :: LeftOrRight -> (a,a) -> a
+pickLR CLeft  (l,_) = l
+pickLR CRight (_,r) = r
+
+instance Outputable LeftOrRight where
+  ppr CLeft    = text "Left"
+  ppr CRight   = text "Right"
+
+{-
+************************************************************************
+*                                                                      *
 \subsection[Arity]{Arity}
 *                                                                      *
 ************************************************************************
@@ -115,7 +141,9 @@ import Data.Function (on)
 -- See also Note [Definition of arity] in CoreArity
 type Arity = Int
 
--- | The number of represented arguments that can be applied to a value before it does
+-- | Representation Arity
+--
+-- The number of represented arguments that can be applied to a value before it does
 -- "real work". So:
 --  fib 100                    has representation arity 0
 --  \x -> fib x                has representation arity 1
@@ -136,8 +164,10 @@ type JoinArity = Int
 ************************************************************************
 -}
 
--- | Type of the tags associated with each constructor possibility
---   or superclass selector
+-- | Constructor Tag
+--
+-- Type of the tags associated with each constructor possibility or superclass
+-- selector
 type ConTag = Int
 
 -- | A *zero-indexed* constructor tag
@@ -277,7 +307,7 @@ initialVersion = 1
 ************************************************************************
 -}
 
--- |A String Literal in the source, including its original raw format for use by
+-- | A String Literal in the source, including its original raw format for use by
 -- source to source manipulation tools.
 data StringLiteral = StringLiteral
                        { sl_st :: SourceText, -- literal raw source.
@@ -288,6 +318,8 @@ data StringLiteral = StringLiteral
 instance Eq StringLiteral where
   (StringLiteral _ a) == (StringLiteral _ b) = a == b
 
+-- | Warning Text
+--
 -- reason/explanation from a WARNING or DEPRECATED pragma
 data WarningTxt = WarningTxt (Located SourceText)
                              [Located StringLiteral]
@@ -435,6 +467,7 @@ instance Outputable Boxity where
 ************************************************************************
 -}
 
+-- | Recursivity Flag
 data RecFlag = Recursive
              | NonRecursive
              deriving( Eq, Data )
@@ -474,6 +507,30 @@ isGenerated FromSource = False
 instance Outputable Origin where
   ppr FromSource  = text "FromSource"
   ppr Generated   = text "Generated"
+
+{-
+************************************************************************
+*                                                                      *
+                Deriving strategies
+*                                                                      *
+************************************************************************
+-}
+
+-- | Which technique the user explicitly requested when deriving an instance.
+data DerivStrategy
+  -- See Note [Deriving strategies] in TcDeriv
+  = DerivStock    -- ^ GHC's \"standard\" strategy, which is to implement a
+                  --   custom instance for the data type. This only works for
+                  --   certain types that GHC knows about (e.g., 'Eq', 'Show',
+                  --   'Functor' when @-XDeriveFunctor@ is enabled, etc.)
+  | DerivAnyclass -- ^ @-XDeriveAnyClass@
+  | DerivNewtype  -- ^ @-XGeneralizedNewtypeDeriving@
+  deriving (Eq, Data)
+
+instance Outputable DerivStrategy where
+    ppr DerivStock    = text "stock"
+    ppr DerivAnyclass = text "anyclass"
+    ppr DerivNewtype  = text "newtype"
 
 {-
 ************************************************************************
@@ -600,6 +657,26 @@ pprSafeOverlap False = empty
 {-
 ************************************************************************
 *                                                                      *
+                Type precedence
+*                                                                      *
+************************************************************************
+-}
+
+data TyPrec   -- See Note [Prededence in types]
+  = TopPrec         -- No parens
+  | FunPrec         -- Function args; no parens for tycon apps
+  | TyOpPrec        -- Infix operator
+  | TyConPrec       -- Tycon args; no parens for atomic
+  deriving( Eq, Ord )
+
+maybeParen :: TyPrec -> TyPrec -> SDoc -> SDoc
+maybeParen ctxt_prec inner_prec pretty
+  | ctxt_prec < inner_prec = pretty
+  | otherwise              = parens pretty
+
+{-
+************************************************************************
+*                                                                      *
                 Tuples
 *                                                                      *
 ************************************************************************
@@ -672,6 +749,7 @@ Tring is the 'representation' type.  (This just helps us remember
 whether to use 'from' or 'to'.
 -}
 
+-- | Embedding Projection pair
 data EP a = EP { fromEP :: a,   -- :: T -> Tring
                  toEP   :: a }  -- :: Tring -> T
 
@@ -698,7 +776,7 @@ the base of the module hierarchy.  So it seemed simpler to put the
 defn of OccInfo here, safely at the bottom
 -}
 
--- | Identifier occurrence information
+-- | identifier Occurrence Information
 data OccInfo
   = NoOccInfo           -- ^ There are many occurrences, or unknown occurrences
 
@@ -739,11 +817,13 @@ seqOccInfo :: OccInfo -> ()
 seqOccInfo occ = occ `seq` ()
 
 -----------------
+-- | Interesting Context
 type InterestingCxt = Bool      -- True <=> Function: is applied
                                 --          Data value: scrutinised by a case with
                                 --                      at least one non-DEFAULT branch
 
 -----------------
+-- | Inside Lambda
 type InsideLam = Bool   -- True <=> Occurs inside a non-linear lambda
                         -- Substituting a redex for this occurrence is
                         -- dangerous because it might duplicate work.
@@ -810,6 +890,7 @@ interface files; it is converted to Class.DefMethInfo before begin put in a
 Class object.
 -}
 
+-- | Default Method Specification
 data DefMethSpec ty
   = VanillaDM     -- Default method given with polymorphic code
   | GenericDM ty  -- Default method given with code of this type
@@ -917,6 +998,7 @@ type SourceText = String -- Note [Literal source text],[Pragma source text]
 When a rule or inlining is active
 -}
 
+-- | Phase Number
 type PhaseNum = Int  -- Compilation phase
                      -- Phases decrease towards zero
                      -- Zero is the last phase
@@ -939,6 +1021,7 @@ data Activation = NeverActive
                 deriving( Eq, Data )
                   -- Eq used in comparing rules in HsDecls
 
+-- | Rule Match Information
 data RuleMatchInfo = ConLike                    -- See Note [CONLIKE pragma]
                    | FunLike
                    deriving( Eq, Data, Show )
@@ -954,13 +1037,14 @@ data InlinePragma            -- Note [InlinePragma]
                                      --   That is, inl_sat describes the number of *source-code*
                                      --   arguments the thing must be applied to.  We add on the
                                      --   number of implicit, dictionary arguments when making
-                                     --   the InlineRule, and don't look at inl_sat further
+                                     --   the Unfolding, and don't look at inl_sat further
 
       , inl_act    :: Activation     -- Says during which phases inlining is allowed
 
       , inl_rule   :: RuleMatchInfo  -- Should the function be treated like a constructor?
     } deriving( Eq, Data )
 
+-- | Inline Specification
 data InlineSpec   -- What the user's INLINE pragma looked like
   = Inline
   | Inlinable
@@ -977,14 +1061,16 @@ This data type mirrors what you can write in an INLINE or NOINLINE pragma in
 the source program.
 
 If you write nothing at all, you get defaultInlinePragma:
-   inl_inline = False
+   inl_inline = EmptyInlineSpec
    inl_act    = AlwaysActive
    inl_rule   = FunLike
 
 It's not possible to get that combination by *writing* something, so
 if an Id has defaultInlinePragma it means the user didn't specify anything.
 
-If inl_inline = True, then the Id should have an InlineRule unfolding.
+If inl_inline = Inline or Inlineable, then the Id should have an InlineRule unfolding.
+
+If you want to know where InlinePragmas take effect: Look in DsBinds.makeCorePair
 
 Note [CONLIKE pragma]
 ~~~~~~~~~~~~~~~~~~~~~
@@ -1176,6 +1262,8 @@ isEarlyActive AlwaysActive      = True
 isEarlyActive (ActiveBefore {}) = True
 isEarlyActive _                 = False
 
+-- | Fractional Literal
+--
 -- Used (instead of Rational) to represent exactly the floating point literal that we
 -- encountered in the user's source program. This allows us to pretty-print exactly what
 -- the user wrote, which is important e.g. for floating point numbers that can't represented

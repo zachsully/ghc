@@ -38,6 +38,7 @@ import MkGraph
 
 import Hoopl
 import SMRep
+import BlockId
 import Cmm
 import CmmUtils
 import CostCentre
@@ -72,7 +73,7 @@ allocDynClosure
 
 allocDynClosureCmm
         :: Maybe Id -> CmmInfoTable -> LambdaFormInfo -> CmmExpr -> CmmExpr
-        -> [(CmmArg, ByteOff)]
+        -> [(CmmExpr, ByteOff)]
         -> FCode CmmExpr -- returns Hp+n
 
 -- allocDynClosure allocates the thing in the heap,
@@ -113,7 +114,7 @@ allocHeapClosure
   :: SMRep                            -- ^ representation of the object
   -> CmmExpr                          -- ^ info pointer
   -> CmmExpr                          -- ^ cost centre
-  -> [(CmmArg,ByteOff)]               -- ^ payload
+  -> [(CmmExpr,ByteOff)]              -- ^ payload
   -> FCode CmmExpr                    -- ^ returns the address of the object
 allocHeapClosure rep info_ptr use_cc payload = do
   profDynAlloc rep use_cc
@@ -144,7 +145,7 @@ allocHeapClosure rep info_ptr use_cc payload = do
 emitSetDynHdr :: CmmExpr -> CmmExpr -> CmmExpr -> FCode ()
 emitSetDynHdr base info_ptr ccs
   = do dflags <- getDynFlags
-       hpStore base (zip (map CmmExprArg (header dflags)) [0, wORD_SIZE dflags ..])
+       hpStore base (zip (header dflags) [0, wORD_SIZE dflags ..])
   where
     header :: DynFlags -> [CmmExpr]
     header dflags = [info_ptr] ++ dynProfHdr dflags ccs
@@ -152,11 +153,11 @@ emitSetDynHdr base info_ptr ccs
         -- No ticky header
 
 -- Store the item (expr,off) in base[off]
-hpStore :: CmmExpr -> [(CmmArg, ByteOff)] -> FCode ()
+hpStore :: CmmExpr -> [(CmmExpr, ByteOff)] -> FCode ()
 hpStore base vals = do
   dflags <- getDynFlags
   sequence_ $
-    [ emitStore (cmmOffsetB dflags base off) val | (CmmExprArg val,off) <- vals ]
+    [ emitStore (cmmOffsetB dflags base off) val | (val,off) <- vals ]
 
 -----------------------------------------------------------
 --              Layout of static closures
@@ -364,7 +365,7 @@ entryHeapCheck' is_fastf node arity args code
   = do dflags <- getDynFlags
        let is_thunk = arity == 0
 
-           args' = map (CmmExprArg . CmmReg . CmmLocal) args
+           args' = map (CmmReg . CmmLocal) args
            stg_gc_fun    = CmmReg (CmmGlobal GCFun)
            stg_gc_enter1 = CmmReg (CmmGlobal GCEnter1)
 
@@ -376,17 +377,17 @@ entryHeapCheck' is_fastf node arity args code
            -}
            gc_call upd
                | is_thunk
-                 = mkJump dflags NativeNodeCall stg_gc_enter1 [CmmExprArg node] upd
+                 = mkJump dflags NativeNodeCall stg_gc_enter1 [node] upd
 
                | is_fastf
-                 = mkJump dflags NativeNodeCall stg_gc_fun (CmmExprArg node : args') upd
+                 = mkJump dflags NativeNodeCall stg_gc_fun (node : args') upd
 
                | otherwise
-                 = mkJump dflags Slow stg_gc_fun (CmmExprArg node : args') upd
+                 = mkJump dflags Slow stg_gc_fun (node : args') upd
 
        updfr_sz <- getUpdFrameOff
 
-       loop_id <- newLabelC
+       loop_id <- newBlockId
        emitLabel loop_id
        heapCheck True True (gc_call updfr_sz <*> mkBranch loop_id) code
 
@@ -417,9 +418,9 @@ altOrNoEscapeHeapCheck checkYield regs code = do
     case cannedGCEntryPoint dflags regs of
       Nothing -> genericGC checkYield code
       Just gc -> do
-        lret <- newLabelC
+        lret <- newBlockId
         let (off, _, copyin) = copyInOflow dflags NativeReturn (Young lret) regs []
-        lcont <- newLabelC
+        lcont <- newBlockId
         tscope <- getTickScope
         emitOutOfLine lret (copyin <*> mkBranch lcont, tscope)
         emitLabel lcont
@@ -446,7 +447,7 @@ cannedGCReturnsTo checkYield cont_on_stack gc regs lret off code
        updfr_sz <- getUpdFrameOff
        heapCheck False checkYield (gc_call dflags gc updfr_sz) code
   where
-    reg_exprs = map (CmmExprArg . CmmReg . CmmLocal) regs
+    reg_exprs = map (CmmReg . CmmLocal) regs
       -- Note [stg_gc arguments]
 
       -- NB. we use the NativeReturn convention for passing arguments
@@ -462,7 +463,7 @@ cannedGCReturnsTo checkYield cont_on_stack gc regs lret off code
 genericGC :: Bool -> FCode a -> FCode a
 genericGC checkYield code
   = do updfr_sz <- getUpdFrameOff
-       lretry <- newLabelC
+       lretry <- newBlockId
        emitLabel lretry
        call <- mkCall generic_gc (GC, GC) [] [] updfr_sz []
        heapCheck False checkYield (call <*> mkBranch lretry) code
@@ -551,7 +552,7 @@ heapCheck checkStack checkYield do_gc code
 heapStackCheckGen :: Maybe CmmExpr -> Maybe CmmExpr -> FCode ()
 heapStackCheckGen stk_hwm mb_bytes
   = do updfr_sz <- getUpdFrameOff
-       lretry <- newLabelC
+       lretry <- newBlockId
        emitLabel lretry
        call <- mkCall generic_gc (GC, GC) [] [] updfr_sz []
        do_checks stk_hwm False mb_bytes (call <*> mkBranch lretry)
@@ -610,7 +611,7 @@ do_checks :: Maybe CmmExpr    -- Should we check the stack?
           -> FCode ()
 do_checks mb_stk_hwm checkYield mb_alloc_lit do_gc = do
   dflags <- getDynFlags
-  gc_id <- newLabelC
+  gc_id <- newBlockId
 
   let
     Just alloc_lit = mb_alloc_lit
@@ -636,7 +637,8 @@ do_checks mb_stk_hwm checkYield mb_alloc_lit do_gc = do
 
   case mb_stk_hwm of
     Nothing -> return ()
-    Just stk_hwm -> tickyStackCheck >> (emit =<< mkCmmIfGoto (sp_oflo stk_hwm) gc_id)
+    Just stk_hwm -> tickyStackCheck
+      >> (emit =<< mkCmmIfGoto' (sp_oflo stk_hwm) gc_id (Just False) )
 
   -- Emit new label that might potentially be a header
   -- of a self-recursive tail call.
@@ -651,14 +653,14 @@ do_checks mb_stk_hwm checkYield mb_alloc_lit do_gc = do
     then do
      tickyHeapCheck
      emitAssign hpReg bump_hp
-     emit =<< mkCmmIfThen hp_oflo (alloc_n <*> mkBranch gc_id)
+     emit =<< mkCmmIfThen' hp_oflo (alloc_n <*> mkBranch gc_id) (Just False)
     else do
       when (checkYield && not (gopt Opt_OmitYields dflags)) $ do
          -- Yielding if HpLim == 0
          let yielding = CmmMachOp (mo_wordEq dflags)
                                   [CmmReg (CmmGlobal HpLim),
                                    CmmLit (zeroCLit dflags)]
-         emit =<< mkCmmIfGoto yielding gc_id
+         emit =<< mkCmmIfGoto' yielding gc_id (Just False)
 
   tscope <- getTickScope
   emitOutOfLine gc_id

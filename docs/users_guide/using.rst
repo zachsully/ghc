@@ -418,7 +418,8 @@ The main advantages to using ``ghc --make`` over traditional
    dependencies never get out of sync with the source.
 
 -  Using the :ghc-flag:`-j` flag, you can compile modules in parallel. Specify
-   ``-j⟨N⟩`` to compile ⟨N⟩ jobs in parallel.
+   ``-j⟨N⟩`` to compile ⟨N⟩ jobs in parallel. If N is omitted,
+   then it defaults to the number of processors.
 
 Any of the command-line options described in the rest of this chapter
 can be used with ``--make``, but note that any options you give on the
@@ -444,11 +445,12 @@ The source files for the program don't all need to be in the same
 directory; the :ghc-flag:`-i` option can be used to add directories to the
 search path (see :ref:`search-path`).
 
-.. ghc-flag:: -j <N>
+.. ghc-flag:: -j [N]
 
     Perform compilation in parallel when possible. GHC will use up to ⟨N⟩
-    threads during compilation. Note that compilation of a module may not
-    begin until its dependencies have been built.
+    threads during compilation. If N is omitted, then it defaults to the
+    number of processors. Note that compilation of a module may not begin
+    until its dependencies have been built.
 
 .. _eval-mode:
 
@@ -615,6 +617,11 @@ See also the ``--help``, ``--version``, ``--numeric-version``, and
     list of some in the instances it knows about. With this flag it
     prints *all* the instances it knows about.
 
+.. ghc-flag:: -fhide-source-paths
+
+    Starting with minimal verbosity (see :ghc-flag:`-v1`), GHC displays the
+    name, the source path and the target path of each compiled module. This flag
+    can be used to reduce GHC's output by hiding source paths and target paths.
 
 The following flags control the way in which GHC displays types in error
 messages and in GHCi:
@@ -783,6 +790,15 @@ messages and in GHCi:
                        Binds: a = "hello"}
                   in a’
         or by using the flag -fno-warn-unused-do-bind
+
+.. ghc-flag:: -fdiagnostics-color=(always|auto|never)
+
+    Causes GHC to display error messages with colors.  To do this, the
+    terminal must have support for ANSI color codes, or else garbled text will
+    appear.  The default value is `auto`, which means GHC will make an attempt
+    to detect whether terminal supports colors and choose accordingly.  (Note:
+    the detection mechanism is not yet implemented, so colors are off by
+    default on all platforms.)
 
 .. ghc-flag:: -ferror-spans
 

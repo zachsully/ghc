@@ -239,20 +239,24 @@ getCoreToDo dflags
       -- TODO Check whether this helps often enough to be worth it. We could
       -- also run simpleOptPgm instead.
 
+    -- Static forms are moved to the top level with the FloatOut pass.
+    -- See Note [Grand plan for static forms].
+    static_ptrs_float_outwards =
+      runWhen static_ptrs $ CoreDoPasses
+        [ simpl_gently -- Float Out can't handle type lets
+        , CoreDoFloatOutwards FloatOutSwitches
+          { floatOutLambdas   = Just 0
+          , floatOutConstants = True
+          , floatOutOverSatApps = False
+          , floatToTopLevelOnly = True
+          , finalPass_          = Nothing
+          }
+        ]
+
     core_todo =
      if opt_level == 0 then
        [ vectorisation,
-         -- Static forms are moved to the top level with the FloatOut pass.
-         -- See Note [Grand plan for static forms].
-         runWhen static_ptrs $ CoreDoPasses [
-                                 simpl_gently, -- Float Out can't handle type lets
-                                 CoreDoFloatOutwards FloatOutSwitches {
-                                   floatOutLambdas   = Just 0,
-                                   floatOutConstants = True,
-                                   floatOutOverSatApps = False,
-                                   floatToTopLevelOnly = True,
-                                   finalPass_          = Nothing }
-                               ],
+         static_ptrs_float_outwards,
          CoreDoSimplify max_iter
              (base_mode { sm_phase = Phase 0
                         , sm_names = ["Non-opt simplification"] })
@@ -277,13 +281,13 @@ getCoreToDo dflags
         -- so that overloaded functions have all their dictionary lambdas manifest
         runWhen do_specialise CoreDoSpecialising,
 
-        runWhen full_laziness $
+        if full_laziness then
            CoreDoFloatOutwards FloatOutSwitches {
                                  floatOutLambdas   = Just 0,
                                  floatOutConstants = True,
                                  floatOutOverSatApps = False,
                                  floatToTopLevelOnly = False,
-                                 finalPass_        = Nothing },
+                                 finalPass_        = Nothing }
                 -- Was: gentleFloatOutSwitches
                 --
                 -- I have no idea why, but not floating constants to
@@ -301,6 +305,10 @@ getCoreToDo dflags
                 -- difference at all to performance if we do it here,
                 -- but maybe we save some unnecessary to-and-fro in
                 -- the simplifier.
+        else
+           -- Even with full laziness turned off, we still need to float static
+           -- forms to the top level. See Note [Grand plan for static forms].
+           static_ptrs_float_outwards,
 
         simpl_phases,
 
@@ -426,6 +434,22 @@ addPluginPasses builtin_passes
 #endif
 
 {-
+Note [RULEs enabled in SimplGently]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+RULES are enabled when doing "gentle" simplification.  Two reasons:
+
+  * We really want the class-op cancellation to happen:
+        op (df d1 d2) --> $cop3 d1 d2
+    because this breaks the mutual recursion between 'op' and 'df'
+
+  * I wanted the RULE
+        lift String ===> ...
+    to work in Template Haskell when simplifying
+    splices, so we get simpler code for literal strings
+
+But watch out: list fusion can prevent floating.  So use phase control
+to switch off those rules until after floating.
+
 ************************************************************************
 *                                                                      *
                   The CoreToDo interpreter

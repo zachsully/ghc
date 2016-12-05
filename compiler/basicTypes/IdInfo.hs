@@ -39,7 +39,7 @@ module IdInfo (
         demandInfo, setDemandInfo, pprStrictness,
 
         -- ** Unfolding Info
-        unfoldingInfo, setUnfoldingInfo, setUnfoldingInfoLazily,
+        unfoldingInfo, setUnfoldingInfo,
 
         -- ** The InlinePragInfo type
         InlinePragInfo,
@@ -103,7 +103,9 @@ infixl  1 `setRuleInfo`,
 ************************************************************************
 -}
 
--- | The 'IdDetails' of an 'Id' give stable, and necessary,
+-- | Identifier Details
+--
+-- The 'IdDetails' of an 'Id' give stable, and necessary,
 -- information about the Id.
 data IdDetails
   = VanillaId
@@ -141,6 +143,7 @@ data IdDetails
   | JoinId JoinArity           -- ^ An 'Id' for a join point taking n arguments
        -- Note [Join points]
 
+-- | Recursive Selector Parent
 data RecSelParent = RecSelData TyCon | RecSelPatSyn PatSyn deriving Eq
   -- Either `TyCon` or `PatSyn` depending
   -- on the origin of the record selector.
@@ -234,7 +237,9 @@ However, it is always safe to set the join point flag to False.
 ************************************************************************
 -}
 
--- | An 'IdInfo' gives /optional/ information about an 'Id'.  If
+-- | Identifier Information
+--
+-- An 'IdInfo' gives /optional/ information about an 'Id'.  If
 -- present it never lies, but it may not be present, in which case there
 -- is always a conservative assumption which can be made.
 --
@@ -276,11 +281,6 @@ setInlinePragInfo info pr = pr `seq` info { inlinePragInfo = pr }
 setOccInfo :: IdInfo -> OccInfo -> IdInfo
 setOccInfo        info oc = oc `seq` info { occInfo = oc }
         -- Try to avoid spack leaks by seq'ing
-
-setUnfoldingInfoLazily :: IdInfo -> Unfolding -> IdInfo
-setUnfoldingInfoLazily info uf  -- Lazy variant to avoid looking at the
-  =                             -- unfolding of an imported Id unless necessary
-    info { unfoldingInfo = uf } -- (In this case the demand-zapping is redundant.)
 
 setUnfoldingInfo :: IdInfo -> Unfolding -> IdInfo
 setUnfoldingInfo info uf
@@ -339,7 +339,9 @@ of their arities; so it should not be asking...  (but other things
 besides the code-generator need arity info!)
 -}
 
--- | An 'ArityInfo' of @n@ tells us that partial application of this
+-- | Arity Information
+--
+-- An 'ArityInfo' of @n@ tells us that partial application of this
 -- 'Id' to up to @n-1@ value arguments does essentially no work.
 --
 -- That is not necessarily the same as saying that it has @n@ leading
@@ -365,7 +367,9 @@ ppArityInfo n = hsep [text "Arity", int n]
 ************************************************************************
 -}
 
--- | Tells when the inlining is active.
+-- | Inline Pragma Information
+--
+-- Tells when the inlining is active.
 -- When it is active the thing may be inlined, depending on how
 -- big it is.
 --
@@ -414,7 +418,9 @@ In TidyPgm, when the LocalId becomes a GlobalId, its RULES are stripped off
 and put in the global list.
 -}
 
--- | Records the specializations of this 'Id' that we know about
+-- | Rule Information
+--
+-- Records the specializations of this 'Id' that we know about
 -- in the form of rewrite 'CoreRule's that target them
 data RuleInfo
   = RuleInfo
@@ -454,7 +460,9 @@ setRuleInfoHead fn (RuleInfo rules fvs)
 
 -- CafInfo is used to build Static Reference Tables (see simplStg/SRT.hs).
 
--- | Records whether an 'Id' makes Constant Applicative Form references
+-- | Constant applicative form Information
+--
+-- Records whether an 'Id' makes Constant Applicative Form references
 data CafInfo
         = MayHaveCafRefs                -- ^ Indicates that the 'Id' is for either:
                                         --

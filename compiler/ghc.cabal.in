@@ -40,6 +40,11 @@ Flag stage3
     Default: False
     Manual: True
 
+Flag terminfo
+    Description: Build GHC with terminfo support on non-Windows platforms.
+    Default: True
+    Manual: True
+
 Library
     Default-Language: Haskell2010
     Exposed: False
@@ -54,15 +59,18 @@ Library
                    containers >= 0.5 && < 0.6,
                    array      >= 0.1 && < 0.6,
                    filepath   >= 1   && < 1.5,
-                   template-haskell == 2.11.*,
+                   template-haskell == 2.12.*,
                    hpc        == 0.6.*,
                    transformers == 0.5.*,
                    ghc-boot   == @ProjectVersionMunged@,
+                   ghc-boot-th == @ProjectVersionMunged@,
                    hoopl      >= 3.10.2 && < 3.11
 
     if os(windows)
         Build-Depends: Win32  == 2.3.*
     else
+        if flag(terminfo)
+            Build-Depends: terminfo == 0.4.*
         Build-Depends: unix   == 2.7.*
 
     if flag(ghci)
@@ -132,6 +140,7 @@ Library
         cbits/genSym.c
 
     hs-source-dirs:
+        backpack
         basicTypes
         cmm
         codeGen
@@ -158,6 +167,10 @@ Library
         vectorise
 
     Exposed-Modules:
+        DriverBkp
+        BkpSyn
+        NameShape
+        RnModIface
         Avail
         BasicTypes
         ConLike
@@ -192,6 +205,7 @@ Library
         NameSet
         OccName
         RdrName
+        NameCache
         SrcLoc
         UniqSupply
         Unique
@@ -304,10 +318,12 @@ Library
         HsTypes
         HsUtils
         BinIface
+        BinFingerprint
         BuildTyCl
         IfaceEnv
         IfaceSyn
         IfaceType
+        ToIface
         LoadIface
         MkIface
         TcIface
@@ -353,6 +369,7 @@ Library
         RdrHsSyn
         ApiAnnotation
         ForeignCall
+        KnownUniques
         PrelInfo
         PrelNames
         PrelRules
@@ -407,10 +424,13 @@ Library
         TcClassDcl
         TcDefaults
         TcDeriv
+        TcDerivInfer
+        TcDerivUtils
         TcEnv
         TcExpr
         TcForeign
         TcGenDeriv
+        TcGenFunctor
         TcGenGenerics
         TcHsSyn
         TcHsType
@@ -421,6 +441,8 @@ Library
         TcPat
         TcPatSyn
         TcRnDriver
+        TcBackpack
+        TcRnExports
         TcRnMonad
         TcRnTypes
         TcRules
@@ -470,6 +492,7 @@ Library
         GraphPpr
         IOEnv
         ListSetOps
+        ListT
         Maybes
         MonadUtils
         OrdList

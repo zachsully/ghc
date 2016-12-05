@@ -13,6 +13,11 @@ verbosityOptions =
          , flagType = DynamicFlag
          , flagReverse = ""
          }
+  , flag { flagName = "-fhide-source-paths"
+         , flagDescription = "hide module source and object paths"
+         , flagType = DynamicFlag
+         , flagReverse = ""
+         }
   , flag { flagName = "-fprint-potential-instances"
          , flagDescription =
            "display all available instances in type error messages"
@@ -58,6 +63,10 @@ verbosityOptions =
            "Print extra information from typechecker."
          , flagType = DynamicFlag
          , flagReverse = "-fno-print-typechecker-elaboration"
+         }
+  , flag { flagName = "-fdiagnostics-color=(always|auto|never)"
+         , flagDescription = "Use colors in error messages"
+         , flagType = DynamicFlag
          }
   , flag { flagName = "-ferror-spans"
          , flagDescription = "Output full span in error messages"

@@ -81,11 +81,13 @@ test('lazy-bs-alloc',
 
 test('T876',
      [stats_num_field('bytes allocated',
-          [(platform('x86_64-unknown-mingw32'), 71904, 5),
+          [(platform('x86_64-unknown-mingw32'), 66928, 5),
               # 2015-04-03: 71904 (amd64/Windows, unknown cause)
-           (wordsize(64), 63216 , 5),
+              # 2016-11-27: 66928 (amd64/Windows, unknown cause)
+           (wordsize(64), 58128, 5),
               # 2013-02-14: 1263712 (x86_64/Linux)
               # 2014-02-10:   63216 (x86_64/Linux), call arity analysis
+              # 2016-11-11:   58128 (x86_64/Linux), it's not clear
 
            (wordsize(32), 53156, 5) ]),
               # some date:  663712  (Windows, 64-bit machine)
@@ -116,8 +118,9 @@ test('T3736',
      ['$MAKE -s --no-print-directory T3736'])
 test('T3738',
      [extra_clean(['T3738a.hi', 'T3738a.o']),
-      stats_num_field('peak_megabytes_allocated', (1, 0)),
-                                 # expected value: 1 (amd64/Linux)
+      stats_num_field('peak_megabytes_allocated', (2, 0)),
+                    # expected value: 1 (amd64/Linux)
+                    # 2016-08-31:     2 (allocation area size bumped to 1MB)
       stats_num_field('bytes allocated',
                       [(wordsize(32), 45648, 5),
                     # expected value: 50520 (x86/Linux)
@@ -132,8 +135,9 @@ test('T3738',
      ['-O'])
 
 test('MethSharing',
-     [stats_num_field('peak_megabytes_allocated', (1, 0)),
-                                 # expected value: 1 (amd64/Linux)
+     [stats_num_field('peak_megabytes_allocated', (2, 0)),
+                    # expected value: 1 (amd64/Linux)
+                    # 2016-08-31:     2 (allocation area size bumped to 1MB)
       stats_num_field('bytes allocated',
                       [(wordsize(32), 360940756, 5),
                     # expected value: 2685858140 (x86/OS X)

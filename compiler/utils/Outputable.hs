@@ -38,8 +38,9 @@ module Outputable (
         speakNth, speakN, speakNOf, plural, isOrAre, doOrDoes,
         unicodeSyntax,
 
-        coloured, PprColour, colType, colCoerc, colDataCon,
-        colBinder, bold, keyword,
+        coloured, bold, keyword, PprColour, colReset, colBold, colBlackFg,
+        colRedFg, colGreenFg, colYellowFg, colBlueFg, colMagentaFg, colCyanFg,
+        colWhiteFg, colBinder, colCoerc, colDataCon, colType,
 
         -- * Converting 'SDoc' into strings and outputing it
         printForC, printForAsm, printForUser, printForUserPartWay,
@@ -85,6 +86,7 @@ module Outputable (
 import {-# SOURCE #-}   DynFlags( DynFlags,
                                   targetPlatform, pprUserLength, pprCols,
                                   useUnicode, useUnicodeSyntax,
+                                  useColor, canUseColor, overrideWith,
                                   unsafeGlobalDynFlags )
 import {-# SOURCE #-}   Module( UnitId, Module, ModuleName, moduleName )
 import {-# SOURCE #-}   OccName( OccName )
@@ -107,6 +109,7 @@ import Data.Int
 import qualified Data.IntMap as IM
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.Monoid (Monoid, mappend, mempty)
 import Data.String
 import Data.Word
 import System.IO        ( Handle )
@@ -118,9 +121,6 @@ import Data.List (intersperse)
 
 import GHC.Fingerprint
 import GHC.Show         ( showMultiLineString )
-#if __GLASGOW_HASKELL__ > 710
-import GHC.Stack
-#endif
 
 {-
 ************************************************************************
@@ -181,7 +181,7 @@ type QueryQualifyName = Module -> OccName -> QualifyName
 type QueryQualifyModule = Module -> Bool
 
 -- | For a given package, we need to know whether to print it with
--- the unit id to disambiguate it.
+-- the component id to disambiguate it.
 type QueryQualifyPackage = UnitId -> Bool
 
 -- See Note [Printing original names] in HscTypes
@@ -656,25 +656,55 @@ ppUnless False doc = doc
 -- | A colour\/style for use with 'coloured'.
 newtype PprColour = PprColour String
 
+-- | Allow colours to be combined (e.g. bold + red);
+--   In case of conflict, right side takes precedence.
+instance Monoid PprColour where
+  mempty = PprColour mempty
+  PprColour s1 `mappend` PprColour s2 = PprColour (s1 `mappend` s2)
+
 -- Colours
 
-colType :: PprColour
-colType = PprColour "\27[34m"
+colReset :: PprColour
+colReset = PprColour "\27[0m"
 
 colBold :: PprColour
 colBold = PprColour "\27[;1m"
 
-colCoerc :: PprColour
-colCoerc = PprColour "\27[34m"
+colBlackFg :: PprColour
+colBlackFg = PprColour "\27[30m"
 
-colDataCon :: PprColour
-colDataCon = PprColour "\27[31m"
+colRedFg :: PprColour
+colRedFg = PprColour "\27[31m"
+
+colGreenFg :: PprColour
+colGreenFg = PprColour "\27[32m"
+
+colYellowFg :: PprColour
+colYellowFg = PprColour "\27[33m"
+
+colBlueFg :: PprColour
+colBlueFg = PprColour "\27[34m"
+
+colMagentaFg :: PprColour
+colMagentaFg = PprColour "\27[35m"
+
+colCyanFg :: PprColour
+colCyanFg = PprColour "\27[36m"
+
+colWhiteFg :: PprColour
+colWhiteFg = PprColour "\27[37m"
 
 colBinder :: PprColour
-colBinder = PprColour "\27[32m"
+colBinder = colGreenFg
 
-colReset :: PprColour
-colReset = PprColour "\27[0m"
+colCoerc :: PprColour
+colCoerc = colBlueFg
+
+colDataCon :: PprColour
+colDataCon = colRedFg
+
+colType :: PprColour
+colType = colBlueFg
 
 -- | Apply the given colour\/style for the argument.
 --
@@ -682,9 +712,14 @@ colReset = PprColour "\27[0m"
 coloured :: PprColour -> SDoc -> SDoc
 -- TODO: coloured _ sdoc ctxt | coloursDisabled = sdoc ctxt
 coloured col@(PprColour c) sdoc =
-  SDoc $ \ctx@SDC{ sdocLastColour = PprColour lc } ->
-    let ctx' = ctx{ sdocLastColour = col } in
-    Pretty.zeroWidthText c Pretty.<> runSDoc sdoc ctx' Pretty.<> Pretty.zeroWidthText lc
+  sdocWithDynFlags $ \dflags ->
+    if overrideWith (canUseColor dflags) (useColor dflags)
+    then SDoc $ \ctx@SDC{ sdocLastColour = PprColour lc } ->
+         let ctx' = ctx{ sdocLastColour = col } in
+         Pretty.zeroWidthText c
+           Pretty.<> runSDoc sdoc ctx'
+           Pretty.<> Pretty.zeroWidthText lc
+    else sdoc
 
 bold :: SDoc -> SDoc
 bold = coloured colBold
@@ -1074,9 +1109,13 @@ doOrDoes _   = text "do"
 ************************************************************************
 -}
 
-pprPanic :: String -> SDoc -> a
+callStackDoc :: HasCallStack => SDoc
+callStackDoc =
+    hang (text "Call stack:") 4 (vcat $ map text $ lines prettyCurrentCallStack)
+
+pprPanic :: HasCallStack => String -> SDoc -> a
 -- ^ Throw an exception saying "bug in GHC"
-pprPanic    = panicDoc
+pprPanic s doc = panicDoc s (doc $$ callStackDoc)
 
 pprSorry :: String -> SDoc -> a
 -- ^ Throw an exception saying "this isn't finished yet"
@@ -1101,13 +1140,8 @@ pprTraceIt desc x = pprTrace desc (ppr x) x
 
 -- | If debug output is on, show some 'SDoc' on the screen along
 -- with a call stack when available.
-#if __GLASGOW_HASKELL__ > 710
-pprSTrace :: (?callStack :: CallStack) => SDoc -> a -> a
-pprSTrace = pprTrace (prettyCallStack ?callStack)
-#else
-pprSTrace :: SDoc -> a -> a
-pprSTrace = pprTrace "no callstack info"
-#endif
+pprSTrace :: HasCallStack => SDoc -> a -> a
+pprSTrace doc = pprTrace "" (doc $$ callStackDoc)
 
 warnPprTrace :: Bool -> String -> Int -> SDoc -> a -> a
 -- ^ Just warn about an assertion failure, recording the given file and line number.
@@ -1122,22 +1156,11 @@ warnPprTrace True   file  line  msg x
 
 -- | Panic with an assertation failure, recording the given file and
 -- line number. Should typically be accessed with the ASSERT family of macros
-#if __GLASGOW_HASKELL__ > 710
-assertPprPanic :: (?callStack :: CallStack) => String -> Int -> SDoc -> a
+assertPprPanic :: HasCallStack => String -> Int -> SDoc -> a
 assertPprPanic _file _line msg
   = pprPanic "ASSERT failed!" doc
   where
-    doc = sep [ text (prettyCallStack ?callStack)
-              , msg ]
-#else
-assertPprPanic :: String -> Int -> SDoc -> a
-assertPprPanic file line msg
-  = pprPanic "ASSERT failed!" doc
-  where
-    doc = sep [ hsep [ text "file", text file
-                     , text "line", int line ]
-              , msg ]
-#endif
+    doc = sep [ msg, callStackDoc ]
 
 pprDebugAndThen :: DynFlags -> (String -> a) -> SDoc -> SDoc -> a
 pprDebugAndThen dflags cont heading pretty_msg

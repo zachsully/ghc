@@ -94,7 +94,6 @@ module Id (
         idOccInfo,
 
         -- ** Writing 'IdInfo' fields
-        setIdUnfoldingLazily,
         setIdUnfolding,
         setIdArity,
         setIdCallArity,
@@ -143,8 +142,7 @@ import Util
 import StaticFlags
 
 -- infixl so you can say (id `set` a `set` b)
-infixl  1 `setIdUnfoldingLazily`,
-          `setIdUnfolding`,
+infixl  1 `setIdUnfolding`,
           `setIdArity`,
           `setIdCallArity`,
           `setIdOccInfo`,
@@ -347,7 +345,7 @@ mkWorkerId uniq unwrkr ty
 
 -- | Create a /template local/: a family of system local 'Id's in bijection with @Int@s, typically used in unfoldings
 mkTemplateLocal :: Int -> Type -> Id
-mkTemplateLocal i ty = mkSysLocalOrCoVar (fsLit "tpl") (mkBuiltinUnique i) ty
+mkTemplateLocal i ty = mkSysLocalOrCoVar (fsLit "v") (mkBuiltinUnique i) ty
 
 -- | Create a template local for a series of types
 mkTemplateLocals :: [Type] -> [Id]
@@ -654,9 +652,6 @@ idUnfolding id
 realIdUnfolding :: Id -> Unfolding
 -- Expose the unfolding if there is one, including for loop breakers
 realIdUnfolding id = unfoldingInfo (idInfo id)
-
-setIdUnfoldingLazily :: Id -> Unfolding -> Id
-setIdUnfoldingLazily id unfolding = modifyIdInfo (`setUnfoldingInfoLazily` unfolding) id
 
 setIdUnfolding :: Id -> Unfolding -> Id
 setIdUnfolding id unfolding = modifyIdInfo (`setUnfoldingInfo` unfolding) id

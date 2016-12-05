@@ -732,7 +732,7 @@ lintCoreExpr e@(Case scrut var alt_ty alts) =
      ; when (null alts) $
      do { checkL (not (exprIsHNF scrut))
           (text "No alternatives for a case scrutinee in head-normal form:" <+> ppr scrut)
-        ; checkL scrut_diverges
+        ; checkWarnL scrut_diverges
           (text "No alternatives for a case scrutinee not known to diverge for sure:" <+> ppr scrut)
         }
 
@@ -1057,7 +1057,7 @@ lintCoBndr cv thing_inside
        ; let (subst', cv') = substCoVarBndr subst cv
        ; lintKind (varType cv')
        ; lintL (isCoercionType (varType cv'))
-               (text "CoVar with non-coercion type:" <+> pprTvBndr cv)
+               (text "CoVar with non-coercion type:" <+> pprTyVar cv)
        ; updateTCvSubst subst' (thing_inside cv') }
 
 lintIdBndr :: Id -> (Id -> LintM a) -> LintM a
@@ -1084,7 +1084,7 @@ lintAndScopeId id linterF
                 (text "Non-local Id binder" <+> ppr id)
                 -- See Note [Checking for global Ids]
        ; (ty, k) <- lintInTy (idType id)
-       ; lintL (not (isRuntimeRepPolymorphic k))
+       ; lintL (not (isLevityPolymorphic k))
            (text "RuntimeRep-polymorphic binder:" <+>
                  (ppr id <+> dcolon <+> parens (ppr ty <+> dcolon <+> ppr k)))
        ; let id' = setIdType id ty
@@ -1368,7 +1368,7 @@ lintCoercion :: OutCoercion -> LintM (LintedKind, LintedKind, LintedType, Linted
 -- Check the kind of a coercion term, returning the kind
 -- Post-condition: the returned OutTypes are lint-free
 --
--- If   lintCorecion co = (k1, k2, s1, s2, r)
+-- If   lintCoercion co = (k1, k2, s1, s2, r)
 -- then co :: s1 ~r s2
 --      s1 :: k2
 --      s2 :: k2
@@ -1973,7 +1973,7 @@ lintInScope loc_msg var =
 ensureEqTys :: OutType -> OutType -> MsgDoc -> LintM ()
 -- check ty2 is subtype of ty1 (ie, has same structure but usage
 -- annotations need only be consistent, not equal)
--- Assumes ty1,ty2 are have alrady had the substitution applied
+-- Assumes ty1,ty2 are have already had the substitution applied
 ensureEqTys ty1 ty2 msg = lintL (ty1 `eqType` ty2) msg
 
 lintRole :: Outputable thing

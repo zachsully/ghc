@@ -282,18 +282,23 @@ blockConcat splitting_procs g@CmmGraph { g_entry = entry_id }
           -- This helps the native codegen a little bit, and probably has no
           -- effect on LLVM.  It's convenient to do it here, where we have the
           -- information about predecessors.
-          --
-          -- NB., only do this if the branch does not have a
-          -- likeliness annotation.
           swapcond_last
-            | CmmCondBranch cond t f Nothing <- shortcut_last
+            | CmmCondBranch cond t f l <- shortcut_last
+            , likelyFalse l
             , numPreds f > 1
             , hasOnePredecessor t
             , Just cond' <- maybeInvertCmmExpr cond
-            = CmmCondBranch cond' f t Nothing
+            = CmmCondBranch cond' f t (invertLikeliness l)
 
             | otherwise
             = shortcut_last
+
+          likelyFalse (Just False) = True
+          likelyFalse Nothing      = True
+          likelyFalse _            = False
+
+          invertLikeliness (Just b)     = Just (not b)
+          invertLikeliness Nothing      = Nothing
 
           -- Number of predecessors for a block
           numPreds bid = mapLookup bid backEdges `orElse` 0
@@ -397,7 +402,7 @@ removeUnreachableBlocksProc proc@(CmmProc info lbl live g)
              -- Remove any info_tbls for unreachable
 
      keep_used :: BlockEnv CmmInfoTable -> BlockEnv CmmInfoTable
-     keep_used bs = mapFoldWithKey keep emptyBlockMap bs
+     keep_used bs = mapFoldWithKey keep mapEmpty bs
 
      keep :: Label -> CmmInfoTable -> BlockEnv CmmInfoTable -> BlockEnv CmmInfoTable
      keep l i env | l `setMember` used_lbls = mapInsert l i env

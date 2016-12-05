@@ -24,7 +24,11 @@ test('TH_repPrimOutput', normal, compile_and_run, [''])
 test('TH_repPrimOutput2', normal, compile_and_run, [''])
 test('TH_repGuard', normal, compile, ['-v0'])
 test('TH_repGuardOutput', normal, compile_and_run, [''])
-test('TH_repPatSig', normal, compile_fail, [''])
+test('TH_repPatSig',
+     extra_clean(['TH_repPatSig_asserts.hi', 'TH_repPatSig_asserts.o']),
+     multimod_compile,
+     ['TH_repPatSig.hs', '-v0 ' + config.ghc_th_way_flags])
+test('TH_repPatSigTVar', normal, compile_fail, ['-v0'])
 
 test('TH_overlaps', normal, compile, ['-v0'])
 
@@ -78,6 +82,7 @@ test('TH_spliceD2',
 test('TH_reifyDecl1', normal, compile, ['-v0'])
 test('TH_reifyDecl2', normal, compile, ['-v0'])
 test('TH_reifyLocalDefs', normal, compile, ['-v0'])
+test('TH_reifyLocalDefs2', normal, compile, ['-v0'])
 
 test('TH_reifyMkName', normal, compile, ['-v0'])
 
@@ -368,6 +373,7 @@ test('T10267', extra_clean(['T10267a.hi', 'T10267a.o']),
 test('T10279', normal, compile_fail, ['-v0'])
 test('T10306', normal, compile, ['-v0'])
 test('T10596', normal, compile, ['-v0'])
+test('T10598_TH', normal, compile, ['-v0 -dsuppress-uniques -ddump-splices'])
 test('T10620', normal, compile_and_run, ['-v0'])
 test('T10638', normal, compile_fail, ['-v0'])
 test('T10697_decided_1', normal, compile_and_run, ['-v0'])
@@ -405,6 +411,9 @@ test('T10820', normal, compile_and_run, ['-v0'])
 test('T11341', normal, compile, ['-v0 -dsuppress-uniques'])
 test('T11345', normal, compile_and_run, ['-v0 -dsuppress-uniques'])
 test('TH_finalizer', normal, compile, ['-v0'])
+test('TH_finalizer2',
+     normal, multimod_compile_and_run,
+     ['TH_finalizer2', '-v0 ' + config.ghc_th_way_flags])
 test('T10603', normal, compile, ['-ddump-splices -dsuppress-uniques'])
 test('T11452', normal, compile_fail, ['-v0'])
 test('T9022', normal, compile_and_run, ['-v0'])
@@ -415,9 +424,22 @@ test('T11809', normal, compile, ['-v0'])
 test('T11797', normal, compile, ['-v0 -dsuppress-uniques'])
 test('T11941', normal, compile_fail, ['-v0'])
 test('T11484', normal, compile, ['-v0'])
+test('T11629', normal, compile, ['-v0'])
+
 test('T8761', normal, compile, ['-v0 -ddump-splices -dsuppress-uniques'])
 test('T12130', extra_clean(['T12130a.hi','T12130a.o']),
               multimod_compile, ['T12130', '-v0 ' + config.ghc_th_way_flags])
 test('T12403', omit_ways(['ghci']),
               compile_and_run, ['-v0 -ddump-splices -dsuppress-uniques'])
 test('T12407', omit_ways(['ghci']), compile, ['-v0'])
+test('T12411', normal, compile_fail, [''])
+test('T12478_1', omit_ways(['ghci']), compile_and_run,
+     ['-v0 -dsuppress-uniques'])
+test('T12478_2', omit_ways(['ghci']), compile_and_run, ['-v0'])
+test('T12478_3', omit_ways(['ghci']), compile, ['-v0'])
+test('T12478_4', omit_ways(['ghci']), compile_fail, ['-v0'])
+test('T12513', omit_ways(['ghci']), compile_fail, ['-v0'])
+test('T12530', normal, compile, ['-v0 -ddump-splices -dsuppress-uniques'])
+test('T12788', extra_clean(['T12788_Lib.hi', 'T12788_Lib.o']),
+               multimod_compile_fail,
+               ['T12788.hs', '-v0 ' + config.ghc_th_way_flags])
