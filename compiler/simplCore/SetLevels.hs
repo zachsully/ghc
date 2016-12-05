@@ -431,7 +431,7 @@ lvlCase :: LevelEnv             -- Level of in-scope names/tyvars
         -> LvlM LevelledExpr    -- Result expression
 lvlCase env scrut_fvs scrut' case_bndr ty alts
   | [(con@(DataAlt {}), bs, body)] <- alts
-  , exprOkForSpeculation scrut'   -- See Note [Check the output scrutinee for okForSpec]
+  , exprOkForSpeculation scrut''  -- See Note [Check the output scrutinee for okForSpec]
   , not (isTopLvl dest_lvl)       -- Can't have top-level cases
   , not (floatTopLvlOnly env)     -- Can float anywhere
   =     -- See Note [Floating cases]
@@ -449,6 +449,7 @@ lvlCase env scrut_fvs scrut' case_bndr ty alts
        ; alts' <- mapM (lvl_alt alts_env) alts
        ; return (Case scrut' case_bndr' ty' alts') }
   where
+    scrut'' = removeCxts scrut'
     ty' = substTy (le_subst env) ty
 
     incd_lvl = incMinorLvl (le_ctxt_lvl env)
