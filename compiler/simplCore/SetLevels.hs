@@ -1546,7 +1546,7 @@ newLvlVar lvld_rhs is_bot join_arity_maybe
     mk_id uniq
       -- See Note [Grand plan for static forms] in SimplCore.
       | isJust $ collectStaticPtrSatArgs $ snd $ collectTyBinders $
-                                                   deTagExpr lvld_rhs
+                                                   removeCxts de_tagged_rhs
       = mkExportedVanillaId (mkSystemVarName uniq (mkFastString "static_ptr"))
                             rhs_ty
       | otherwise
