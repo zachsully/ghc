@@ -1327,7 +1327,7 @@ we can sort them into the right place when doing dependency analysis.
 
 occAnal env (Tick tickish body)
   | tickish `tickishScopesLike` SoftScope
-  = (usage, Tick tickish body')
+  = (dropTailCallInfo usage, Tick tickish body')
 
   | Breakpoint _ ids <- tickish
   = (usage_lam +++ foldr addIdOcc emptyDetails ids, Tick tickish body')
