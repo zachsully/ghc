@@ -718,9 +718,6 @@ coreToStgLet let_no_escape bind body = do
                 | debugIsOn && not no_binder_escapes && any is_join_var binders
                 = pprTrace "Interesting!  A join var that isn't let-no-escaped" (ppr binders)
                   no_binder_escapes
-                | debugIsOn && no_binder_escapes && any ((0 ==) . idArity) binders
-                = pprTrace "Interesting!  A let-no-escape with zero arity" (ppr binders)
-                  no_binder_escapes
                 | otherwise = no_binder_escapes
 
     noLNE <- getNoLNE
