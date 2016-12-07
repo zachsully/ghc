@@ -31,8 +31,8 @@ import CostCentre       ( noCCS )
 import VarSet
 import VarEnv
 import Module
-import Name             ( getOccName, isExternalName, nameOccName )
-import OccName          ( occNameString, occNameFS )
+import Name             ( isExternalName, nameOccName )
+import OccName          ( occNameFS )
 import BasicTypes       ( Arity )
 import TysWiredIn       ( unboxedUnitDataCon )
 import Literal
@@ -139,6 +139,10 @@ import Control.Monad (liftM, ap)
 -- Note [What is a non-escaping let]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 --
+-- NB: Nowadays this is recognized by the occurrence analyser by turning a
+-- "non-escaping let" into a join point. The following is then an operational
+-- account of join points.
+--
 -- Consider:
 --
 --     let x = fvs \ args -> e
@@ -155,8 +159,7 @@ import Control.Monad (liftM, ap)
 -- to the code for `x'.
 --
 -- All of this is provided x is:
---   1. non-updatable - it must have at least one parameter (see Note
---      [Join point abstraction]);
+--   1. non-updatable;
 --   2. guaranteed to be entered before the stack retreats -- ie x is not
 --      buried in a heap-allocated closure, or passed as an argument to
 --      something;
@@ -191,6 +194,17 @@ import Control.Monad (liftM, ap)
 --     letrec x = [y] \ [v] -> if v then x True else ...
 --     in
 --         ...(x b)...
+--
+-- Note [Redundant LNE analysis]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+--
+-- The LNE analysis is almost* entirely duplicative of the occurrence analyser's
+-- join-point analysis. We could just call isJoinId_maybe to find out whether an
+-- id should be LNE. For the moment, we retain this machinery in CoreToStg just
+-- to compare to what the occurrence analyser finds. TODO Remove LNE analysis
+-- here.
+--
+-- * See Type.isValidJoinPointType.
 
 -- --------------------------------------------------------------
 -- Setting variable info: top-level, binds, RHSs
@@ -715,10 +729,14 @@ coreToStgLet let_no_escape bind body = do
 
         -- Debugging code as requested by Andrew Kennedy
         checked_no_binder_escapes
-                | debugIsOn && not no_binder_escapes && any is_join_var binders
-                = pprTrace "Interesting!  A join var that isn't let-no-escaped" (ppr binders)
-                  no_binder_escapes
-                | otherwise = no_binder_escapes
+          = WARN( not no_binder_escapes && isJoinId (head binders),
+                  hang (text "Interesting!  CoreToStg says not a join var") 2
+                       (ppr binders) ) -- shouldn't happen
+            WARN( no_binder_escapes && not (isJoinId (head binders)),
+                  hang (text "Interesting!  A let-no-escape that's not a join var") 2
+                       (ppr binders) ) -- see Test.isValidJoinPointType for
+                                       -- one possibility
+            no_binder_escapes
 
     noLNE <- getNoLNE
 
@@ -771,12 +789,6 @@ coreToStgLet let_no_escape bind body = do
 
               return (StgRec (binders `zip` rhss2),
                       bind_fvs, escs, env_ext)
-
-
-is_join_var :: Id -> Bool
--- A hack (used only for compiler debuggging) to tell if
--- a variable started life as a join point ($j)
-is_join_var j = occNameString (getOccName j) == "$j"
 
 coreToStgRhs :: FreeVarsInfo      -- Free var info for the scope of the binding
              -> (Id,CoreExpr)
