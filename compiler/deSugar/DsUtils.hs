@@ -846,14 +846,14 @@ mkBigLHsPatTupId = mkChunkified mkLHsPatTup
 ************************************************************************
 
 Generally, we handle pattern matching failure like this: let-bind a
-join point, and jump if the thing fails:
+fail-variable, and use that variable if the thing fails:
 \begin{verbatim}
-        letjoin fail.33 = error "Help"
+        let fail.33 = error "Help"
         in
         case x of
                 p1 -> ...
-                p2 -> jump fail.33
-                p3 -> jump fail.33
+                p2 -> fail.33
+                p3 -> fail.33
                 p4 -> ...
 \end{verbatim}
 Then
@@ -869,22 +869,64 @@ If it can fail in only one way, then the simplifier will inline it.
 Only if it is used more than once will the let-binding remain.
 \end{itemize}
 
+There's a problem when the result of the case expression is of
+unboxed type.  Then the type of @fail.33@ is unboxed too, and
+there is every chance that someone will change the let into a case:
+\begin{verbatim}
+        case error "Help" of
+          fail.33 -> case ....
+\end{verbatim}
+
+which is of course utterly wrong.  Rather than drop the condition that
+only boxed types can be let-bound, we just turn the fail into a function
+for the primitive case:
+\begin{verbatim}
+        let fail.33 :: Void -> Int#
+            fail.33 = \_ -> error "Help"
+        in
+        case x of
+                p1 -> ...
+                p2 -> fail.33 void
+                p3 -> fail.33 void
+                p4 -> ...
+\end{verbatim}
+
+Now @fail.33@ is a function, so it can be let-bound.
 -}
 
 mkFailurePair :: CoreExpr       -- Result type of the whole case expression
-              -> DsM (CoreBind, -- Binds the newly-created fail label
-                                -- to expression
-                      CoreExpr) -- Fail label
+              -> DsM (CoreBind, -- Binds the newly-created fail variable
+                                -- to \ _ -> expression
+                      CoreExpr) -- Fail variable applied to realWorld#
 -- See Note [Failure thunks and CPR]
 mkFailurePair expr
-  = do { fail_var <- newFailLocalDs ty
-       ; let fail_label = fail_var `asJoinId` 0
-       ; return (NonRec fail_label expr,
-                 Var fail_label) }
+  = do { fail_fun_var <- newFailLocalDs (voidPrimTy `mkFunTy` ty)
+       ; fail_fun_arg <- newSysLocalDs voidPrimTy
+       ; let real_arg = setOneShotLambda fail_fun_arg
+       ; return (NonRec fail_fun_var (Lam real_arg expr),
+                 App (Var fail_fun_var) (Var voidPrimId)) }
   where
     ty = exprType expr
 
 {-
+Note [Failure thunks and CPR]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When we make a failure point we ensure that it
+does not look like a thunk. Example:
+
+   let fail = \rw -> error "urk"
+   in case x of
+        [] -> fail realWorld#
+        (y:ys) -> case ys of
+                    [] -> fail realWorld#
+                    (z:zs) -> (y,z)
+
+Reason: we know that a failure point is always a "join point" and is
+entered at most once.  Adding a dummy 'realWorld' token argument makes
+it clear that sharing is not an issue.  And that in turn makes it more
+CPR-friendly.  This matters a lot: if you don't get it right, you lose
+the tail call property.  For example, see Trac #3403.
+
 
 ************************************************************************
 *                                                                      *
