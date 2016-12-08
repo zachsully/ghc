@@ -813,6 +813,12 @@ mkStgRhs' con_updateable rhs_fvs bndr binder_info rhs
                    (getFVs rhs_fvs)
                    ReEntrant
                    bndrs body
+  | isJoinId bndr -- must be nullary join point
+  = ASSERT(idJoinArity bndr == 0)
+    StgRhsClosure noCCS binder_info
+                   (getFVs rhs_fvs)
+                   ReEntrant -- ignored for LNE
+                   [] rhs
   | StgConApp con args _ <- unticked_rhs
   , not (con_updateable con args)
   = -- CorePrep does this right, but just to make sure

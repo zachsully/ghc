@@ -19,7 +19,7 @@ import OccurAnal
 
 import HscTypes
 import PrelNames
-import MkId             ( realWorldPrimId, voidArgId, voidPrimId )
+import MkId             ( realWorldPrimId )
 import CoreUtils
 import CoreArity
 import CoreFVs
@@ -396,11 +396,10 @@ cpeBind top_lvl env (NonRec bndr rhs)
   | otherwise
   = ASSERT(not (isTopLevel top_lvl))
     do { (_, bndr1) <- cpCloneBndr env bndr
-       ; let (bndr2, rhs1, changed) = addVoidParamIfNeeded bndr1 rhs
-       ; (bndr3, rhs2) <- cpeJoinPair env bndr2 rhs1
-       ; return (extendCorePrepEnvAddingVoidParam env bndr bndr3 changed,
+       ; (bndr2, rhs1) <- cpeJoinPair env bndr1 rhs
+       ; return (extendCorePrepEnv env bndr bndr2,
                  emptyFloats,
-                 Just (Let (NonRec bndr3 rhs2))) }
+                 Just (Let (NonRec bndr2 rhs1))) }
 
 cpeBind top_lvl env (Rec pairs)
   | not (isJoinId (head bndrs))
@@ -415,12 +414,10 @@ cpeBind top_lvl env (Rec pairs)
                  Nothing) }
   | otherwise
   = do { (env', bndrs1) <- cpCloneBndrs env bndrs
-       ; let (bndrs2, rhss1, changed) = unzip3 (zipWith addVoidParamIfNeeded bndrs1 rhss)
-       ; let rhs_env = extendCorePrepEnvListAddingVoidParam env' (zip3 bndrs bndrs2 changed)
-       ; pairs1 <- zipWithM (cpeJoinPair rhs_env) bndrs2 rhss1
+       ; pairs1 <- zipWithM (cpeJoinPair env') bndrs1 rhss
 
-       ; let bndrs3 = map fst pairs1
-       ; return (extendCorePrepEnvListAddingVoidParam env' (zip3 bndrs bndrs3 changed),
+       ; let bndrs2 = map fst pairs1
+       ; return (extendCorePrepEnvList env' (bndrs `zip` bndrs2),
                  emptyFloats,
                  Just (Let (Rec pairs1))) }
   where
@@ -956,10 +953,6 @@ maybeSaturate env fn expr n_args
   | hasNoBinding fn        -- There's no binding
   = return sat_expr
 
-  | addingVoidParam env fn
-  = let (head, args) = collectArgs expr in
-    return $ mkApps head (Var voidPrimId : args)
-  
   | otherwise
   = return expr
   where
@@ -1396,7 +1389,6 @@ data CorePrepEnv
         --      and Note [CorePrep inlines trivial CoreExpr not Id] (#12076)
         , cpe_mkIntegerId     :: Id
         , cpe_integerSDataCon :: Maybe DataCon
-        , cpe_addingVoidParam :: IdSet
     }
 
 lookupMkIntegerName :: DynFlags -> HscEnv -> IO Id
@@ -1427,8 +1419,7 @@ mkInitialCorePrepEnv dflags hsc_env
                       cpe_dynFlags = dflags,
                       cpe_env = emptyVarEnv,
                       cpe_mkIntegerId = mkIntegerId,
-                      cpe_integerSDataCon = integerSDataCon,
-                      cpe_addingVoidParam = emptyVarSet
+                      cpe_integerSDataCon = integerSDataCon
                   }
 
 extendCorePrepEnv :: CorePrepEnv -> Id -> Id -> CorePrepEnv
@@ -1444,28 +1435,6 @@ extendCorePrepEnvList cpe prs
     = cpe { cpe_env = extendVarEnvList (cpe_env cpe)
                         (map (\(id, id') -> (id, Var id')) prs) }
 
-extendCorePrepEnvAddingVoidParam :: CorePrepEnv
-                                 -> Id
-                                 -> Id
-                                 -> Bool
-                                 -> CorePrepEnv
-extendCorePrepEnvAddingVoidParam cpe id id' adding
-    = cpe { cpe_env = extendVarEnv (cpe_env cpe) id (Var id')
-          , cpe_addingVoidParam = avp' }
-    where
-      avp = cpe_addingVoidParam cpe
-      avp' | adding    = extendVarSet avp id'
-           | otherwise = avp
-
-extendCorePrepEnvListAddingVoidParam :: CorePrepEnv
-                                     -> [(Id,Id,Bool)]
-                                     -> CorePrepEnv
-extendCorePrepEnvListAddingVoidParam cpe trs
-    = cpe { cpe_env = extendVarEnvList (cpe_env cpe)
-                        (map (\(id, id', _) -> (id, Var id')) trs)
-          , cpe_addingVoidParam = extendVarSetList (cpe_addingVoidParam cpe)
-                                    [ id' | (_, id', True) <- trs ] }
-
 lookupCorePrepEnv :: CorePrepEnv -> Id -> CoreExpr
 lookupCorePrepEnv cpe id
   = case lookupVarEnv (cpe_env cpe) id of
@@ -1474,9 +1443,6 @@ lookupCorePrepEnv cpe id
 
 getMkIntegerId :: CorePrepEnv -> Id
 getMkIntegerId = cpe_mkIntegerId
-
-addingVoidParam :: CorePrepEnv -> Id -> Bool
-addingVoidParam cpe id = id `elemVarSet` cpe_addingVoidParam cpe
 
 ------------------------------------------------------------------------------
 -- Cloning binders
@@ -1570,35 +1536,3 @@ wrapTicks (Floats flag floats0) expr = (Floats flag floats1, expr')
         wrapBind t (NonRec binder rhs) = NonRec binder (mkTick t rhs)
         wrapBind t (Rec pairs)         = Rec (mapSnd (mkTick t) pairs)
 
-{-
-************************************************************************
-*                                                                      *
-                Join points
-*                                                                      *
-************************************************************************
--}
-
--- | Ensure that a join point's RHS takes at least one value parameter (as
--- expected by codegen)
-addVoidParamIfNeeded :: CoreBndr      -- Original binder (must be join id)
-                     -> CoreExpr      -- Original RHS
-                     -> (CoreBndr,    -- New binder, possibly with new type
-                         CoreExpr,    -- New RHS
-                         Bool)        -- Changed?
-addVoidParamIfNeeded bndr expr
-  | needs_void_param
-  = (bndr', expr', True)
-  | otherwise
-  = (bndr, expr, False)
-  where
-    Just join_arity = isJoinId_maybe bndr
-
-    needs_void_param = go join_arity (idType bndr)
-    go 0 _  = True
-    go n ty | isFunTy ty = False
-            | Just (_, res_ty) <- splitForAllTy_maybe ty = go (n-1) res_ty
-            | otherwise = WARN ( True, pprBndr LetBind bndr ) False
-
-    expr' = Lam voidArgId expr
-    bndr' = bndr `setIdType` exprType expr'
-                 `asJoinId`  join_arity + 1
