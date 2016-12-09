@@ -468,7 +468,6 @@ data GeneralFlag
    | Opt_Loopification                  -- See Note [Self-recursive tail calls]
    | Opt_CprAnal
    | Opt_WorkerWrapper
-   | Opt_CheapJoinPoints                -- Count join points and their calls as cheaper for inlining purposes
 
    | Opt_ProtectLastValArg
    | Opt_IgnoreRealWorld
@@ -3713,7 +3712,6 @@ fFlagsDeps = [
   flagSpec "worker-wrapper"                   Opt_WorkerWrapper,
   flagSpec "show-warning-groups"              Opt_ShowWarnGroups,
   flagSpec "hide-source-paths"                Opt_HideSourcePaths,
-  flagSpec "cheap-join-points"                Opt_CheapJoinPoints,
   flagSpec "no-LNE"                           Opt_NoLNE,
 
   flagSpec "llf"                              Opt_LLF,
