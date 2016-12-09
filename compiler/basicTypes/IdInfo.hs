@@ -196,39 +196,35 @@ pprIdDetails other     = brackets (pp other)
 {-
 Note [Join points]
 
-In Core, a *join point* is a function whose only occurrences are
-saturated tail calls. A *tail call* is an invocation in a *tail
-context*, which is a context conforming to the following grammar:
+In Core, a *join point* is a specially tagged function whose only occurrences
+are saturated tail calls. A tail call can appear in these places:
 
-  T ::= []
-     |  let ... in T
-     |  let <join> k = T; ... in ...
-     |  case ... of P -> T; ...
+  1. In the branches (not the scrutinee) of a case
+  2. Underneath a let (value or join point)
+  3. Inside another join point
 
-The invariant on a join point, then, is that given an expression
+We write a join-point declaration as
+  join j @a @b x y = e1 in e2,
+like a let binding but with "join" instead (or "join rec" for "let rec"). Note
+that we put the parameters before the = rather than using lambdas; this is
+because it's relevant how many parameters the join point takes *as a join
+point.* Note that a join point may return a lambda! So
+  join j x = x + 1
+is different from
+  join j = \x -> x + 1
 
-  let join k = ... in E,
-  
-any occurrence of k "factors" E into T[k E1 ... En], where T is a tail
-context and n is k's arity. (Recursive invocations are also okay, subject to
-the same restriction.) Only local variables can be join points.
+The identifier for a join point is called a join id or a *label.* An invocation
+is called a *jump.* We write a jump using the jump keyword:
 
-Note from the above grammar that one join point can invoke another from an
-outer scope, but a non-join-point cannot:
+  jump j 3
 
-  let <join> k = \n m -> ...
-      <join> h = \n -> k n n -- GOOD
-             f = \n -> k n n -- BAD
-  in case b of True  -> h 3
-               False -> 1 + f 4
-
-Here f is not a join point since it has a non-tail call in the False branch;
-thus it should not invoke k.
-
-Join points are very special: At runtime, they exist only as blocks of code, so
-they are never allocated and invoking them is very fast (little more than a
-jump). Thus we would like to maintain their status as join points when possible.
-However, it is always safe to set the join point flag to False.
+The words *label* and *jump* are evocative of assembly code (or Cmm) for a
+reason: join points are indeed compiled as labeled blocks, and jumps become
+actual jumps (plus argument passing and stack adjustment). There is no closure
+allocated and only a fraction of the function-call overhead. Hence we would
+like as many functions as possible to become join points (see OccurAnal) and
+the type rules for join points ensure we preserve the properties that make them
+efficient.
 
 ************************************************************************
 *                                                                      *
