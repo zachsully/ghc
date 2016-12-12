@@ -119,6 +119,7 @@ import Data.Maybe       ( isJust, mapMaybe )
 import qualified Data.List
 
 import qualified Control.Monad
+import Control.Monad    ( zipWithM )
 
 {-
 ************************************************************************
@@ -558,7 +559,8 @@ lvlMFE strict_ctxt env ann_expr
     lvlExpr env ann_expr
 
   | otherwise   -- Float it out!
-  = do { expr' <- lvlFloatRhs abs_vars dest_lvl env ann_expr
+  = do { expr' <- lvlFloatRhs abs_vars dest_lvl env NonRecursive False Nothing
+                              ann_expr
        ; var   <- newLvlVar expr' is_bot join_arity_maybe
        ; return (Let (NonRec (TB var (FloatMe dest_lvl)) expr')
                      (mkVarApps (Var var) abs_vars)) }
@@ -824,7 +826,7 @@ lvlBind :: LevelEnv
 lvlBind env binding@(AnnNonRec bndr rhs)
   = case decideBindFloat env (exprIsBottom $ deTagExpr $ deAnnotate rhs) binding of
       Nothing -> do
-        { rhs' <- lvlRhs env NonRecursive bndr rhs
+        { rhs' <- lvlRhs env NonRecursive False mb_join_arity rhs
         ; let  bind_lvl        = incMinorLvl (le_ctxt_lvl env)
                (env', [bndr']) = substAndLvlBndrs NonRecursive env bind_lvl [bndr]
         ; return (NonRec bndr' rhs', env') }
@@ -832,23 +834,27 @@ lvlBind env binding@(AnnNonRec bndr rhs)
       Just (dest_lvl, abs_vars, zapping_join)
         | null abs_vars
         -> do {  -- No type abstraction; clone existing binder
-                rhs' <- lvlExpr (setCtxtLvl env dest_lvl) rhs
+                rhs' <- lvlRhs (setCtxtLvl env dest_lvl) NonRecursive
+                               zapping_join mb_join_arity rhs
               ; (env', [bndr']) <- cloneLetVars NonRecursive env
                                                 dest_lvl zapping_join [bndr]
               ; return (NonRec (TB bndr' (FloatMe dest_lvl)) rhs', env') }
         | otherwise
         -> do {  -- Yes, type abstraction; create a new binder, extend substitution, etc
-                rhs' <- lvlFloatRhs abs_vars dest_lvl env rhs
+                rhs' <- lvlFloatRhs abs_vars dest_lvl env NonRecursive
+                                    zapping_join mb_join_arity rhs
               ; (env', [bndr']) <- newPolyBndrs dest_lvl env abs_vars
                                                 zapping_join [bndr]
               ; return (NonRec (TB bndr' (FloatMe dest_lvl)) rhs', env') }
+  where
+    mb_join_arity = isJoinId_maybe (unTag bndr)
 
 lvlBind env binding@(AnnRec pairs)
   = case decideBindFloat env False binding of
       Nothing -> do -- decided to not float
         { let bind_lvl = incMinorLvl (le_ctxt_lvl env)
               (env', bndrs') = substAndLvlBndrs Recursive env bind_lvl bndrs
-        ; rhss' <- Control.Monad.zipWithM (lvlRhs env' Recursive) bndrs rhss
+        ; rhss' <- zipWithM (lvlRhs env' Recursive False) mb_join_arities rhss
         ; return (Rec (bndrs' `zip` rhss'), env')
         }
 
@@ -856,7 +862,9 @@ lvlBind env binding@(AnnRec pairs)
         | null abs_vars -> do
         { (new_env, new_bndrs) <- cloneLetVars Recursive env
                                                dest_lvl zapping_joins bndrs
-        ; new_rhss <- mapM (lvlExpr (setCtxtLvl new_env dest_lvl)) rhss
+        ; let env_rhs = setCtxtLvl new_env dest_lvl
+        ; new_rhss <- zipWithM (lvlRhs env_rhs Recursive zapping_joins)
+                               mb_join_arities rhss
         ; return ( Rec ([TB b (FloatMe dest_lvl) | b <- new_bndrs] `zip` new_rhss)
                  , new_env
                  )
@@ -865,24 +873,24 @@ lvlBind env binding@(AnnRec pairs)
         | otherwise -> do  -- Non-null abs_vars
         { (new_env, new_bndrs) <- newPolyBndrs dest_lvl env
                                                abs_vars zapping_joins bndrs
-        ; new_rhss <- mapM (lvlFloatRhs abs_vars dest_lvl new_env) rhss
+        ; new_rhss <- zipWithM (lvlFloatRhs abs_vars dest_lvl new_env
+                                            Recursive zapping_joins)
+                               mb_join_arities rhss
         ; return ( Rec ([TB b (FloatMe dest_lvl) | b <- new_bndrs] `zip` new_rhss)
                  , new_env
           )
         }
   where
     (bndrs, rhss) = unzip pairs
+    mb_join_arities = map (isJoinId_maybe . unTag) bndrs
 
--- Only used when NOT floating, since floating will promote the join point to a
--- function (see Note [When to ruin a join point]).
 lvlRhs :: LevelEnv
        -> RecFlag
-       -> TaggedBndr BSilt
+       -> Bool -- True <=> we're zapping a join point back to a value
+       -> Maybe JoinArity
        -> CoreExprWithBoth
        -> LvlM LevelledExpr
-lvlRhs env rec_flag (TB bndr _) expr
-  | isId bndr
-  , Just join_arity <- isJoinId_maybe bndr
+lvlRhs env rec_flag False (Just join_arity) expr
   = do { let (bndrs, body)            = collect_n_bndrs join_arity expr
              new_lvl | isRec rec_flag = incMajorLvl (le_ctxt_lvl env)
                      | otherwise      = incMinorLvl (le_ctxt_lvl env)
@@ -901,8 +909,36 @@ lvlRhs env rec_flag (TB bndr _) expr
         collect n bs (_, AnnLam b body) = collect (n-1) (b:bs) body
         collect _ _  _                  = pprPanic "collect_n_bndrs" $ int orig_n
 
+lvlRhs env rec_flag True (Just _) expr
+  = -- Trouble: we need to process the RHS as if it's a value declaration,
+    -- because we're promoting it to one, but it doesn't have the right context
+    -- ids. So we add an RHS context id, then (if there are lambdas) another
+    -- context id.
+    do { let rhs_ty = exprType (deTagExpr (deAnnotate expr))
+       ; rhs_cid <- mkSysLocalOrCoVarM (fsLit "zap_rhs") rhs_ty
+       ; let rhs_env              = enterTailContext env rhs_cid
+             rhs_lvl | isRec rec_flag = incMajorLvl (le_ctxt_lvl rhs_env)
+                     | otherwise      = incMinorLvl (le_ctxt_lvl rhs_env)
+             (bndrs, body)        = collectAnnBndrs expr
+             (env1, bndrs1)       = substBndrsSL NonRecursive rhs_env bndrs
+             (lam_env, new_bndrs) = lvlLamBndrs env1 rhs_lvl bndrs1
+       ; (body_env, mark_cxt) <-
+           if null bndrs
+              then return (lam_env, \body' -> body') -- reuse RHS cid
+              else do { let body_ty = exprType (deTagExpr (deAnnotate body))
+                      ; body_cid <- mkSysLocalOrCoVarM (fsLit "zap_lam") body_ty
+                      ; let body_env = enterTailContext lam_env body_cid
+                            body_lvl = le_ctxt_lvl body_env
+                            mark_cxt body' = markCxt (TB body_cid (StayPut body_lvl))
+                                                     body_ty body'
+                      ; return (body_env, mark_cxt)}
+       ; body1 <- lvlExpr body_env body
+       ; let body' = mark_cxt body1
+             expr' = mkLams new_bndrs body'
+       ; return $ markCxt (TB rhs_cid (StayPut rhs_lvl)) rhs_ty expr'
+       }
 
-lvlRhs env _ _ expr
+lvlRhs env _ _ _ expr
   = lvlExpr env expr
 
 decideBindFloat ::
@@ -960,14 +996,21 @@ decideBindFloat init_env is_bot binding =
               ids
             -- See [When to ruin a join point]
 
+        is_join_binding
+          = case binding of
+              AnnNonRec (TB bndr _) _   -> isJoinId bndr
+              AnnRec ((TB bndr _, _):_) -> isJoinId bndr
+              _                         -> panic "is_join_binding"
+
         zapping_joins = dest_lvl `ltLvl` joinCeilingLevel init_env
+                        && is_join_binding
 
     lateLambdaLift fps
       | all_funs || (fps_floatLNE0 fps && isLNE)
            -- only lift functions or zero-arity LNEs
       ,  not (any (`elemVarSet` le_joins env) abs_vars) -- can't abstract over join
       ,  not (fps_leaveLNE fps && isLNE) -- see Note [Lifting LNEs]
-      ,  Nothing <- decider = Just (tOP_LEVEL, abs_vars, True)
+      ,  Nothing <- decider = Just (tOP_LEVEL, abs_vars, isLNE)
       | otherwise = Nothing -- do not lift
       where
         abs_vars = abstractVars tOP_LEVEL env bindings_fvs
@@ -1197,10 +1240,11 @@ wouldIncreaseAllocation env isLNE abs_ids_set pairs (FISilt _ scope_fiis scope_s
 ----------------------------------------------------
 -- Three help functions for the type-abstraction case
 
-lvlFloatRhs :: [OutVar] -> Level -> LevelEnv -> CoreExprWithBoth
+lvlFloatRhs :: [OutVar] -> Level -> LevelEnv -> RecFlag -> Bool
+            -> Maybe JoinArity -> CoreExprWithBoth
             -> LvlM (Expr LevelledBndr)
-lvlFloatRhs abs_vars dest_lvl env rhs
-  = do { rhs' <- lvlExpr rhs_env rhs
+lvlFloatRhs abs_vars dest_lvl env rec zapping_joins mb_join_arity rhs
+  = do { rhs' <- lvlRhs rhs_env rec zapping_joins mb_join_arity rhs
        ; return (mkLams abs_vars_w_lvls rhs') }
   where
     (rhs_env, abs_vars_w_lvls) = lvlLamBndrs env dest_lvl abs_vars
