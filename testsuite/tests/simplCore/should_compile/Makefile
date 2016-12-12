@@ -35,6 +35,7 @@ T5658b:
 	$(RM) -f T5658b.o T5658b.hi
 	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c T5658b.hs -ddump-simpl | grep -c indexIntArray
 # Trac 5658 meant that there were three calls to indexIntArray instead of two
+# (now four due to join-point discount causing W/W to stabilize unfolding)
 
 T5776:
 	$(RM) -f T5776.o T5776.hi
