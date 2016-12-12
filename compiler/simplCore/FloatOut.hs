@@ -20,7 +20,7 @@ import CoreMonad        ( FloatOutSwitches(..) )
 
 import DynFlags
 import ErrUtils         ( dumpIfSet_dyn )
-import Id               ( Id, idArity, isBottomingId, isJoinId )
+import Id               ( Id, idArity, idType, isBottomingId, isJoinId )
 import Var              ( Var )
 import SetLevels
 import UniqSupply       ( UniqSupply )
@@ -28,6 +28,7 @@ import Bag
 import Util
 import Maybes
 import Outputable
+import Type
 import qualified Data.IntMap as M
 
 import Data.List        ( partition )
@@ -144,8 +145,11 @@ floatTopBind bind
   = case (floatBind bind) of { (fs, floats, bind') ->
     let float_bag = flattenTopFloats floats
     in case bind' of
-      Rec prs   -> (fs, unitBag (Rec (addTopFloatPairs float_bag prs)))
-      NonRec {} -> (fs, float_bag `snocBag` bind') }
+      -- bind' can't have unlifted values or join points, so can only be one
+      -- value bind, rec or non-rec (see comment on floatBind)
+      [Rec prs]    -> (fs, unitBag (Rec (addTopFloatPairs float_bag prs)))
+      [NonRec b e] -> (fs, float_bag `snocBag` NonRec b e)
+      _            -> pprPanic "floatTopBind" (ppr bind') }
 
 {-
 ************************************************************************
@@ -155,7 +159,14 @@ floatTopBind bind
 ************************************************************************
 -}
 
-floatBind :: LevelledBind -> (FloatStats, FloatBinds, CoreBind)
+floatBind :: LevelledBind -> (FloatStats, FloatBinds, [CoreBind])
+  -- Returns a list with either
+  --   * A single non-recursive binding (value or join point), or
+  --   * The following, in order:
+  --     * Zero or more non-rec unlifted bindings
+  --     * One or both of:
+  --       * A recursive group of join binds
+  --       * A recursive group of value binds
 floatBind (NonRec (TB var _) rhs)
   = case (floatExpr rhs) of { (fs, rhs_floats, rhs') ->
 
@@ -164,33 +175,55 @@ floatBind (NonRec (TB var _) rhs)
     let rhs'' | isBottomingId var = etaExpand (idArity var) rhs'
               | otherwise         = rhs'
 
-    in (fs, rhs_floats, NonRec var rhs'') }
+    in (fs, rhs_floats, [NonRec var rhs'']) }
 
 floatBind (Rec pairs)
   = case floatList do_pair pairs of { (fs, rhs_floats, new_pairs) ->
-    (fs, rhs_floats, Rec (concat new_pairs)) }
+    let (new_ul_pairss, new_other_pairss) = unzip new_pairs
+        (new_join_pairs, new_l_pairs)     = partition (isJoinId . fst)
+                                                      (concat new_other_pairss)
+        -- Can't put the join points and the values in the same rec group
+        new_rec_binds | null new_join_pairs = [ Rec new_l_pairs    ]
+                      | null new_l_pairs    = [ Rec new_join_pairs ]
+                      | otherwise           = [ Rec new_l_pairs
+                                              , Rec new_join_pairs ]
+        new_non_rec_binds = [ NonRec b e | (b, e) <- concat new_ul_pairss ]
+    in
+    (fs, rhs_floats, new_non_rec_binds ++ new_rec_binds) }
   where
+    do_pair :: (LevelledBndr, LevelledExpr)
+            -> (FloatStats, FloatBinds,
+                ([(Id,CoreExpr)],  -- Non-recursive unlifted value bindings
+                 [(Id,CoreExpr)])) -- Join points and lifted value bindings
     do_pair (TB name spec, rhs)
       | isTopLvl dest_lvl  -- See Note [floatBind for top level]
       = case (floatExpr rhs) of { (fs, rhs_floats, rhs') ->
-        (fs, emptyFloats, addTopFloatPairs (flattenTopFloats rhs_floats) [(name, rhs')])}
+        (fs, emptyFloats, ([], addTopFloatPairs (flattenTopFloats rhs_floats) [(name, rhs')]))}
       | otherwise         -- Note [Floating out of Rec rhss]
       = case (floatExpr rhs) of { (fs, rhs_floats, rhs') ->
         case (partitionByLevel dest_lvl rhs_floats) of { (rhs_floats', heres) ->
-        case (splitRecFloats heres) of { (pairs, case_heres) ->
-        (fs, rhs_floats', (name, installUnderLambdas case_heres rhs') : pairs) }}}
+        case (splitRecFloats heres) of { (ul_pairs, pairs, case_heres) ->
+        (fs, rhs_floats', (ul_pairs, (name, installUnderLambdas case_heres rhs') : pairs)) }}}
       where
         dest_lvl = floatSpecLevel spec
 
-splitRecFloats :: Bag FloatBind -> ([(Id,CoreExpr)], Bag FloatBind)
+splitRecFloats :: Bag FloatBind
+               -> ([(Id,CoreExpr)], -- Non-recursive unlifted value bindings
+                   [(Id,CoreExpr)], -- Join points and lifted value bindings
+                   Bag FloatBind)   -- A tail of further bindings
 -- The "tail" begins with a case
 -- See Note [Floating out of Rec rhss]
 splitRecFloats fs
-  = go [] (bagToList fs)
+  = go [] [] (bagToList fs)
   where
-    go prs (FloatLet (NonRec b r) : fs) = go ((b,r):prs) fs
-    go prs (FloatLet (Rec prs')   : fs) = go (prs' ++ prs) fs
-    go prs fs                           = (prs, listToBag fs)
+    go ul_prs prs (FloatLet (NonRec b r) : fs) | isUnliftedType (idType b)
+                                               , not (isJoinId b)
+                                               = go ((b,r):ul_prs) prs fs
+                                               | otherwise
+                                               = go ul_prs ((b,r):prs) fs
+    go ul_prs prs (FloatLet (Rec prs')   : fs) = go ul_prs (prs' ++ prs) fs
+    go ul_prs prs fs                           = (reverse ul_prs, prs, listToBag fs)
+                                                   -- Order only matters for non-rec
 
 installUnderLambdas :: Bag FloatBind -> CoreExpr -> CoreExpr
 -- Note [Floating out of Rec rhss]
@@ -229,6 +262,31 @@ So, gruesomely, we split the floats into
    pushed *inside* the lambdas.
 This loses full-laziness the rare situation where there is a
 FloatCase and a Rec interacting.
+
+If there are unlifted FloatLets (that *aren't* join points) among the floats,
+we can't add them to the recursive group without angering Core Lint, but since
+they must be ok-for-speculation, they can't actually be making any recursive
+calls, so we can safely pull them out and keep them non-recursive.
+
+(Why is something getting floated to <1,0> that doesn't make a recursive call?
+The case that came up in testing was that f *and* the unlifted binding were
+getting floated *to the same place*:
+
+  \x<2,0> ->
+    ... <3,0>
+    letrec { f<F<2,0>> =
+      ... let x'<F<2,0>> = x +# 1# in ...
+    } in ...
+
+Everything gets labeled "float to <2,0>" because it all depends on x, but this
+makes f and x' look mutually recursive when they're not.
+
+The test was shootout/k-nucleotide, as compiled using commit 47d5dd68 on the
+wip/join-points branch.
+
+TODO: This can probably be solved somehow in SetLevels. The difference between
+"this *is at* level <2,0>" and "this *depends on* level <2,0>" is very
+important.)
 
 Note [floatBind for top level]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -336,10 +394,9 @@ floatExpr (Cast expr co)
 floatExpr (Let bind body)
   = case bind_spec of
       FloatMe dest_lvl
-        -> case (floatBind bind) of { (fsb, bind_floats, bind') ->
+        -> case (floatBind bind) of { (fsb, bind_floats, binds') ->
            case (floatExpr body) of { (fse, body_floats, body') ->
-           let binds' = split_bind bind'
-               new_bind_floats = foldr plusFloats emptyFloats
+           let new_bind_floats = foldr plusFloats emptyFloats
                                    (map (unitLetFloat dest_lvl) binds') in
            ( add_stats fsb fse
            , bind_floats `plusFloats` new_bind_floats
@@ -347,25 +404,16 @@ floatExpr (Let bind body)
            , body') }}
 
       StayPut bind_lvl  -- See Note [Avoiding unnecessary floating]
-        -> case (floatBind bind)          of { (fsb, bind_floats, bind') ->
+        -> case (floatBind bind)          of { (fsb, bind_floats, binds') ->
            case (floatBody bind_lvl body) of { (fse, body_floats, body') ->
            ( add_stats fsb fse
            , bind_floats `plusFloats` body_floats
-           , foldr Let body' (split_bind bind') ) }}
+           , foldr Let body' binds' ) }}
   where
     bind_spec = case bind of
                  NonRec (TB _ s) _     -> s
                  Rec ((TB _ s, _) : _) -> s
                  Rec []                -> panic "floatExpr:rec"
-    -- HACK: Sometimes floatBind combines joins and non-joins
-    -- TODO: Have floatBind return a list instead
-    split_bind (Rec pairs)
-      | not (null joins), not (null values)
-      = [Rec values, Rec joins]
-      where
-        (joins, values) = partition (isJoinId . fst) pairs
-    split_bind other
-      = [other]
 
 floatExpr (Case scrut (TB case_bndr case_spec) ty alts)
   = case case_spec of
