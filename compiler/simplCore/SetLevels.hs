@@ -56,7 +56,7 @@
 module SetLevels (
         setLevels,
 
-        Level(..), tOP_LEVEL,
+        Level(..), LevelType(..), tOP_LEVEL, isJoinCeilLvl, asJoinCeilLvl,
         LevelledBind, LevelledExpr, LevelledBndr,
         FloatSpec(..), floatSpecLevel,
 
@@ -82,7 +82,6 @@ import CoreArity        ( exprBotStrictness_maybe )
 import CoreFVs          -- all of it
 import Coercion         ( tyCoVarsOfCoDSet )
 import CoreSubst
-import CoreCxts
 import MkCore           ( sortQuantVars )
 
 import SMRep            ( WordOff )
@@ -129,8 +128,8 @@ import Control.Monad    ( zipWithM )
 ************************************************************************
 -}
 
-type LevelledExpr = ExprWithCxts LevelledBndr
-type LevelledBind = BindWithCxts LevelledBndr
+type LevelledExpr = Expr LevelledBndr
+type LevelledBind = Bind LevelledBndr
 type LevelledBndr = TaggedBndr FloatSpec
 
 type MajorLevel = Int
@@ -138,6 +137,8 @@ data Level = Level MajorLevel -- Level number of enclosing lambdas
                    Int  -- Number of big-lambda and/or case expressions and/or
                         -- context boundaries between
                         -- here and the nearest enclosing lambda
+                   LevelType -- Binder or join ceiling?
+data LevelType = BndrLvl | JoinCeilLvl deriving (Eq)
 
 data FloatSpec
   = FloatMe Level       -- Float to just inside the binding
@@ -203,6 +204,26 @@ One particular case is that of workers: we don't want to float the
 call to the worker outside the wrapper, otherwise the worker might get
 inlined into the floated expression, and an importing module won't see
 the worker at all.
+
+Note [Join ceiling]
+~~~~~~~~~~~~~~~~~~~
+Join points can't float very far; too far, and they can't remain join points
+(though see Note [When to ruin a join point]). So, suppose we have:
+
+  f x =
+    (joinrec j y = ... x ... in jump j x) + 1
+
+One may be tempted to float j out to the top of f's RHS, but then the jump
+would not be a tail call. Thus we keep track of a level called the *join
+ceiling* past which join points are not allowed to float.
+
+The troublesome thing is that, unlike most levels to which something might
+float, there is not necessarily an identifier to which the join ceiling is
+attached. Fortunately, if something is to be floated to a join ceiling, it must
+be dropped at the *nearest* join ceiling. Thus each level is marked as to
+whether it is a join ceiling, so that FloatOut can tell which binders are being
+floated to the nearest join ceiling and which to a particular binder (or set of
+binders).
 -}
 
 instance Outputable FloatSpec where
@@ -210,36 +231,43 @@ instance Outputable FloatSpec where
   ppr (StayPut l) = ppr l
 
 tOP_LEVEL :: Level
-tOP_LEVEL   = Level 0 0
+tOP_LEVEL   = Level 0 0 BndrLvl
 
 incMajorLvl :: Level -> Level
-incMajorLvl (Level major _) = Level (major + 1) 0
+incMajorLvl (Level major _ _) = Level (major + 1) 0 BndrLvl
 
 incMinorLvl :: Level -> Level
-incMinorLvl (Level major minor) = Level major (minor+1)
+incMinorLvl (Level major minor _) = Level major (minor+1) BndrLvl
+
+asJoinCeilLvl :: Level -> Level
+asJoinCeilLvl (Level major minor _) = Level major minor JoinCeilLvl
 
 maxLvl :: Level -> Level -> Level
-maxLvl l1@(Level maj1 min1) l2@(Level maj2 min2)
+maxLvl l1@(Level maj1 min1 _) l2@(Level maj2 min2 _)
   | (maj1 > maj2) || (maj1 == maj2 && min1 > min2) = l1
   | otherwise                                      = l2
 
 ltLvl :: Level -> Level -> Bool
-ltLvl (Level maj1 min1) (Level maj2 min2)
+ltLvl (Level maj1 min1 _) (Level maj2 min2 _)
   = (maj1 < maj2) || (maj1 == maj2 && min1 < min2)
 
 ltMajLvl :: Level -> Level -> Bool
     -- Tells if one level belongs to a difft *lambda* level to another
-ltMajLvl (Level maj1 _) (Level maj2 _) = maj1 < maj2
+ltMajLvl (Level maj1 _ _) (Level maj2 _ _) = maj1 < maj2
 
 isTopLvl :: Level -> Bool
-isTopLvl (Level 0 0) = True
-isTopLvl _           = False
+isTopLvl (Level 0 0 _) = True
+isTopLvl _             = False
+
+isJoinCeilLvl :: Level -> Bool
+isJoinCeilLvl (Level _ _ t) = t == JoinCeilLvl
 
 instance Outputable Level where
-  ppr (Level maj min) = hcat [ char '<', int maj, char ',', int min, char '>' ]
+  ppr (Level maj min typ) = hcat [ char '<', int maj, char ',', int min, char '>'
+                                 , ppWhen (typ == JoinCeilLvl) (char 'C') ]
 
 instance Eq Level where
-  (Level maj1 min1) == (Level maj2 min2) = maj1 == maj2 && min1 == min2
+  (Level maj1 min1 _) == (Level maj2 min2 _) = maj1 == maj2 && min1 == min2
 
 {-
 ************************************************************************
@@ -263,14 +291,13 @@ setLevels dflags float_lams binds us
     do_them :: LevelEnv -> [CoreBind] -> LvlM [LevelledBind]
     do_them _ [] = return []
     do_them env (b:bs)
-      = do { b_with_cxts <- liftUs $ addContextsToTopBind b
-           ; (lvld_bind, env') <- lvlTopBind dflags env b_with_cxts
+      = do { (lvld_bind, env') <- lvlTopBind dflags env b
            ; lvld_binds <- do_them env' bs
            ; return (lvld_bind : lvld_binds) }
 
-lvlTopBind :: DynFlags -> LevelEnv -> CoreBindWithCxts -> LvlM (LevelledBind, LevelEnv)
+lvlTopBind :: DynFlags -> LevelEnv -> CoreBind -> LvlM (LevelledBind, LevelEnv)
 lvlTopBind dflags env (NonRec bndr rhs)
-  = do { rhs' <- lvlExpr env (analyzeFVs (initFVEnv $ finalPass env) rhs)
+  = do { rhs' <- lvlNonTailExpr env (analyzeFVs (initFVEnv $ finalPass env) rhs)
        ; let  -- lambda lifting impedes specialization, so: if the old
               -- RHS has an unstable unfolding that will survive
               -- TidyPgm, "stablize it" so that it ends up in the .hi
@@ -292,7 +319,7 @@ lvlTopBind _ env (Rec pairs)
   = do let (bndrs,rhss) = unzip pairs
            (env', bndrs') = substAndLvlBndrs Recursive env tOP_LEVEL
                               [ boringBinder bndr | bndr <- bndrs ]
-       rhss' <- mapM (lvlExpr env' . analyzeFVs (initFVEnv $ finalPass env)) rhss
+       rhss' <- mapM (lvlNonTailExpr env' . analyzeFVs (initFVEnv $ finalPass env)) rhss
        return (Rec (bndrs' `zip` rhss'), env')
 
 {-
@@ -337,23 +364,17 @@ don't want @lvlExpr@ to turn the scrutinee of the @case@ into an MFE
 
 If there were another lambda in @r@'s rhs, it would get level-2 as well.
 -}
-lvlExpr env (splitAnnCxt -> InNewCxt (TB cid _) expr)
-  = do let env' = enterTailContext env cid
-           lvl' = le_ctxt_lvl env'
-       expr' <- lvlExpr env' expr
-       return (markCxt (TB cid (StayPut lvl')) (idType cid) expr')
-
 lvlExpr env (_, AnnType ty)     = return (Type (substTy (le_subst env) ty))
 lvlExpr env (_, AnnCoercion co) = return (Coercion (substCo (le_subst env) co))
 lvlExpr env (_, AnnVar v)       = return (lookupVar env v)
 lvlExpr _   (_, AnnLit lit)     = return (Lit lit)
 
 lvlExpr env (_, AnnCast expr (_, co)) = do
-    expr' <- lvlExpr env expr
+    expr' <- lvlNonTailExpr env expr
     return (Cast expr' (substCo (le_subst env) co))
 
 lvlExpr env (_, AnnTick tickish expr) = do
-    expr' <- lvlExpr env expr
+    expr' <- lvlNonTailExpr env expr
     return (Tick tickish expr')
 
 lvlExpr env expr@(_, AnnApp _ _) = do
@@ -367,8 +388,8 @@ lvlExpr env expr@(_, AnnApp _ _) = do
                     , Nothing <- isClassOpId_maybe f ->
         do
          let (lapp, rargs) = left (n_val_args - arity) expr []
-         rargs' <- mapM (lvlMFE False env) rargs
-         lapp' <- lvlMFE False env lapp
+         rargs' <- mapM (lvlNonTailMFE False env) rargs
+         lapp' <- lvlNonTailMFE False env lapp
          return (foldl App lapp' rargs')
         where
          n_val_args = count (isValArg . deAnnotate) args
@@ -386,8 +407,8 @@ lvlExpr env expr@(_, AnnApp _ _) = do
          -- No PAPs that we can float: just carry on with the
          -- arguments and the function.
       _otherwise -> do
-         args' <- mapM (lvlMFE False env) args
-         fun'  <- lvlExpr env fun
+         args' <- mapM (lvlNonTailMFE False env) args
+         fun'  <- lvlNonTailExpr env fun
          return (foldl App fun' args')
 
 -- We don't split adjacent lambdas.  That is, given
@@ -398,7 +419,7 @@ lvlExpr env expr@(_, AnnApp _ _) = do
 -- lambdas makes them more expensive.
 
 lvlExpr env expr@(_, AnnLam {})
-  = do { new_body <- lvlMFE True new_env body
+  = do { new_body <- lvlNonTailMFE True new_env body
        ; return (mkLams new_bndrs new_body) }
   where
     (bndrs, body)        = collectAnnBndrs expr
@@ -420,8 +441,14 @@ lvlExpr env (_, AnnLet bind body)
        ; return (Let bind' body') }
 
 lvlExpr env (_, AnnCase scrut case_bndr ty alts)
-  = do { scrut' <- lvlMFE True env scrut
+  = do { scrut' <- lvlNonTailMFE True env scrut
        ; lvlCase env (fvsOf scrut) scrut' case_bndr ty alts }
+
+lvlNonTailExpr :: LevelEnv             -- Context
+               -> CoreExprWithBoth     -- Input expression
+               -> LvlM LevelledExpr    -- Result expression
+lvlNonTailExpr env expr
+  = lvlExpr (placeJoinCeiling env) expr
 
 -------------------------------------------
 lvlCase :: LevelEnv             -- Level of in-scope names/tyvars
@@ -432,7 +459,7 @@ lvlCase :: LevelEnv             -- Level of in-scope names/tyvars
         -> LvlM LevelledExpr    -- Result expression
 lvlCase env scrut_fvs scrut' case_bndr ty alts
   | [(con@(DataAlt {}), bs, body)] <- alts
-  , exprOkForSpeculation scrut''  -- See Note [Check the output scrutinee for okForSpec]
+  , exprOkForSpeculation scrut'   -- See Note [Check the output scrutinee for okForSpec]
   , not (isTopLvl dest_lvl)       -- Can't have top-level cases
   , not (floatTopLvlOnly env)     -- Can float anywhere
   =     -- See Note [Floating cases]
@@ -450,7 +477,6 @@ lvlCase env scrut_fvs scrut' case_bndr ty alts
        ; alts' <- mapM (lvl_alt alts_env) alts
        ; return (Case scrut' case_bndr' ty' alts') }
   where
-    scrut'' = removeCxts scrut'
     ty' = substTy (le_subst env) ty
 
     incd_lvl = incMinorLvl (le_ctxt_lvl env)
@@ -515,12 +541,6 @@ lvlMFE ::  Bool                 -- True <=> strict context [body of case or let]
         -> LvlM LevelledExpr    -- Result expression
 -- lvlMFE is just like lvlExpr, except that it might let-bind
 -- the expression, so that it can itself be floated.
-
-lvlMFE strict_ctxt env (splitAnnCxt -> InNewCxt (TB cid _) expr)
-  = do let env' = enterTailContext env cid
-           lvl' = le_ctxt_lvl env'
-       expr' <- lvlMFE strict_ctxt env' expr
-       return (markCxt (TB cid (StayPut lvl')) (idType cid) expr')
 
 lvlMFE _ env (_, AnnType ty)
   = return (Type (substTy (le_subst env) ty))
@@ -600,6 +620,13 @@ lvlMFE strict_ctxt env ann_expr
           --
           -- Also a strict contxt includes uboxed values, and they
           -- can't be bound at top level
+
+lvlNonTailMFE :: Bool                 -- True <=> strict context [body of case or let]
+              -> LevelEnv             -- Level of in-scope names/tyvars
+              -> CoreExprWithBoth     -- input expression
+              -> LvlM LevelledExpr    -- Result expression
+lvlNonTailMFE strict_ctxt env ann_expr
+  = lvlMFE strict_ctxt (placeJoinCeiling env) ann_expr
 
 {-
 Note [Unlifted MFEs]
@@ -890,14 +917,15 @@ lvlRhs :: LevelEnv
        -> Maybe JoinArity
        -> CoreExprWithBoth
        -> LvlM LevelledExpr
-lvlRhs env rec_flag False (Just join_arity) expr
+lvlRhs env rec_flag zapping_join (Just join_arity) expr
   = do { let (bndrs, body)            = collect_n_bndrs join_arity expr
              new_lvl | isRec rec_flag = incMajorLvl (le_ctxt_lvl env)
                      | otherwise      = incMinorLvl (le_ctxt_lvl env)
                -- Non-recursive joins are one-shot; recursive joins are not
              (env1, bndrs1)           = substBndrsSL NonRecursive env bndrs
              (new_env, new_bndrs)     = lvlBndrs env1 new_lvl bndrs1
-       ; new_body <- lvlExpr new_env body
+       ; new_body <- if zapping_join then lvlNonTailExpr new_env body
+                                     else lvlExpr new_env body
        ; return (mkLams new_bndrs new_body) }
   where
     collect_n_bndrs orig_n e
@@ -909,37 +937,8 @@ lvlRhs env rec_flag False (Just join_arity) expr
         collect n bs (_, AnnLam b body) = collect (n-1) (b:bs) body
         collect _ _  _                  = pprPanic "collect_n_bndrs" $ int orig_n
 
-lvlRhs env rec_flag True (Just _) expr
-  = -- Trouble: we need to process the RHS as if it's a value declaration,
-    -- because we're promoting it to one, but it doesn't have the right context
-    -- ids. So we add an RHS context id, then (if there are lambdas) another
-    -- context id.
-    do { let rhs_ty = exprType (deTagExpr (deAnnotate expr))
-       ; rhs_cid <- mkSysLocalOrCoVarM (fsLit "zap_rhs") rhs_ty
-       ; let rhs_env              = enterTailContext env rhs_cid
-             rhs_lvl | isRec rec_flag = incMajorLvl (le_ctxt_lvl rhs_env)
-                     | otherwise      = incMinorLvl (le_ctxt_lvl rhs_env)
-             (bndrs, body)        = collectAnnBndrs expr
-             (env1, bndrs1)       = substBndrsSL NonRecursive rhs_env bndrs
-             (lam_env, new_bndrs) = lvlLamBndrs env1 rhs_lvl bndrs1
-       ; (body_env, mark_cxt) <-
-           if null bndrs
-              then return (lam_env, \body' -> body') -- reuse RHS cid
-              else do { let body_ty = exprType (deTagExpr (deAnnotate body))
-                      ; body_cid <- mkSysLocalOrCoVarM (fsLit "zap_lam") body_ty
-                      ; let body_env = enterTailContext lam_env body_cid
-                            body_lvl = le_ctxt_lvl body_env
-                            mark_cxt body' = markCxt (TB body_cid (StayPut body_lvl))
-                                                     body_ty body'
-                      ; return (body_env, mark_cxt)}
-       ; body1 <- lvlExpr body_env body
-       ; let body' = mark_cxt body1
-             expr' = mkLams new_bndrs body'
-       ; return $ markCxt (TB rhs_cid (StayPut rhs_lvl)) rhs_ty expr'
-       }
-
 lvlRhs env _ _ _ expr
-  = lvlExpr env expr
+  = lvlNonTailExpr env expr
 
 decideBindFloat ::
   LevelEnv ->
@@ -1350,7 +1349,7 @@ data LevelEnv
   = LE { le_switches :: FloatOutSwitches
        , le_ctxt_lvl :: Level           -- The current level
        , le_lvl_env  :: VarEnv Level    -- Domain is *post-cloned* TyVars and Ids
-       , le_cid      :: CxtId           -- Identifier for tail context (see CoreCxts)
+       , le_join_ceil:: Level           -- Highest level to which joins can float
        , le_subst    :: Subst           -- Domain is pre-cloned TyVars and Ids
                                         -- The Id -> CoreExpr in the Subst is ignored
                                         -- (since we want to substitute in LevelledExpr
@@ -1389,7 +1388,7 @@ initialEnv :: DynFlags -> FloatOutSwitches -> LevelEnv
 initialEnv dflags float_lams
   = LE { le_switches = float_lams
        , le_ctxt_lvl = tOP_LEVEL
-       , le_cid = panic "initialEnv"
+       , le_join_ceil = panic "initialEnv"
        , le_lvl_env = emptyVarEnv
        , le_subst = emptySubst
        , le_env = emptyVarEnv
@@ -1439,11 +1438,12 @@ extendCaseBndrEnv le@(LE { le_subst = subst, le_env = id_env })
        , le_env     = add_id id_env (case_bndr, scrut_var) }
 extendCaseBndrEnv env _ _ = env
 
-enterTailContext :: LevelEnv -> CxtId -> LevelEnv
-enterTailContext le@(LE { le_ctxt_lvl = lvl, le_lvl_env = env }) cid
-  = le { le_ctxt_lvl = lvl', le_lvl_env = addLvl lvl' env cid, le_cid = cid }
+-- See Note [Join ceiling]
+placeJoinCeiling :: LevelEnv -> LevelEnv
+placeJoinCeiling le@(LE { le_ctxt_lvl = lvl })
+  = le { le_ctxt_lvl = lvl', le_join_ceil = lvl' }
   where
-    lvl' = incMinorLvl lvl
+    lvl' = asJoinCeilLvl (incMinorLvl lvl)
 
 maxFvLevel :: (Var -> Bool) -> LevelEnv -> DVarSet -> Level
 maxFvLevel max_me (LE { le_lvl_env = lvl_env, le_env = id_env }) var_set
@@ -1466,12 +1466,9 @@ lookupVar le v = case lookupVarEnv (le_env le) v of
                     _              -> Var v
 
 -- Level to which join points are allowed to float (boundary of current tail
--- context; would call this "tailContextLevel" but "context" is overloaded here)
+-- context). See Note [Join ceiling]
 joinCeilingLevel :: LevelEnv -> Level
-joinCeilingLevel (LE { le_lvl_env = lvl_env, le_cid = cid })
-  = case lookupVarEnv lvl_env cid of
-      Just lvl -> lvl
-      Nothing  -> pprPanic "joinCeilingLevel" (ppr cid)
+joinCeilingLevel = le_join_ceil
 
 remainsJoinId :: LevelEnv -> Id -> Bool
 remainsJoinId le v = case lookupVarEnv (le_env le) v of
@@ -1590,8 +1587,7 @@ newLvlVar lvld_rhs is_bot join_arity_maybe
     rhs_ty = exprType de_tagged_rhs
     mk_id uniq
       -- See Note [Grand plan for static forms] in SimplCore.
-      | isJust $ collectStaticPtrSatArgs $ snd $ collectTyBinders $
-                                                   removeCxts de_tagged_rhs
+      | isJust $ collectStaticPtrSatArgs $ snd $ collectTyBinders de_tagged_rhs
       = mkExportedVanillaId (mkSystemVarName uniq (mkFastString "static_ptr"))
                             rhs_ty
       | otherwise
@@ -2042,7 +2038,7 @@ lambdaLikeFVUp bs up = up {
   where del = delBindersFVs bs
 
 -- see Note [FVUp for closures and floats]
-floatFVUp :: FVEnv -> Maybe CoreBndr -> Bool -> CoreExprWithCxts -> FVUp -> FVUp
+floatFVUp :: FVEnv -> Maybe CoreBndr -> Bool -> CoreExpr -> FVUp -> FVUp
 floatFVUp env mb_id use_case rhs up =
   let rhs_floats@(FIFloats _ _ bndrs_floating_out _ _) = fvu_floats up
 
@@ -2111,14 +2107,14 @@ appliedEnv :: FVEnv -> FVEnv
 appliedEnv env =
   env { fve_runtimeArgs = 1 + fve_runtimeArgs env }
 
-letBoundEnv :: CoreBndr -> CoreExprWithCxts -> FVEnv -> FVEnv
+letBoundEnv :: CoreBndr -> CoreExpr -> FVEnv -> FVEnv
 letBoundEnv bndr rhs env =
    env { fve_letBoundVars = extendVarEnv_C (\_ new -> new)
            (fve_letBoundVars env)
            bndr
            (isFunction rhs) }
 
-letBoundsEnv :: [(CoreBndr, CoreExprWithCxts)] -> FVEnv -> FVEnv
+letBoundsEnv :: [(CoreBndr, CoreExpr)] -> FVEnv -> FVEnv
 letBoundsEnv binds env = foldl (\e (id, rhs) -> letBoundEnv id rhs e) env binds
 
 extendEnv :: [CoreBndr] -> FVEnv -> FVEnv
@@ -2127,7 +2123,7 @@ extendEnv bndrs env =
 
 -- | Annotate a 'CoreExpr' with its non-TopLevel free type and value
 -- variables and its unapplied variables at every tree node
-analyzeFVs :: FVEnv -> CoreExprWithCxts -> CoreExprWithBoth
+analyzeFVs :: FVEnv -> CoreExpr -> CoreExprWithBoth
 analyzeFVs env e = fst $ runIdentity $ analyzeFVsM env e
 
 boringBinder :: CoreBndr -> InVar
@@ -2137,13 +2133,6 @@ ret :: FVUp -> a -> FVM (((DVarSet,FISilt), a), FVUp)
 ret up x = return (((fvu_fvs up,fvu_silt up),x),up)
 
 analyzeFVsM :: FVEnv -> CoreExpr -> FVM (CoreExprWithBoth, FVUp)
-analyzeFVsM env (splitCxt -> InNewCxt cid body)
-  = do (body', up) <- analyzeFVsM env body
-       ret up $ markAnnCxt ann (boringBinder cid) (idType cid) body'
-  where
-    ann = (emptyDVarSet, emptySilt)
-      -- Don't bother annotating a context marker (just a fake let binding)
-
 analyzeFVsM  env (Var v) = ret up $ AnnVar v where
   up = varFVUp v nonTopLevel usage
 
