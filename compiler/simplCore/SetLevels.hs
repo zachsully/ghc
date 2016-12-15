@@ -918,24 +918,27 @@ lvlRhs :: LevelEnv
        -> CoreExprWithBoth
        -> LvlM LevelledExpr
 lvlRhs env rec_flag zapping_join (Just join_arity) expr
-  = do { let (bndrs, body)            = collect_n_bndrs join_arity expr
+  = do { let (bndrs, body, has_all_bndrs) = collect_n_bndrs join_arity expr
              new_lvl | isRec rec_flag = incMajorLvl (le_ctxt_lvl env)
                      | otherwise      = incMinorLvl (le_ctxt_lvl env)
                -- Non-recursive joins are one-shot; recursive joins are not
              (env1, bndrs1)           = substBndrsSL NonRecursive env bndrs
              (new_env, new_bndrs)     = lvlBndrs env1 new_lvl bndrs1
-       ; new_body <- if zapping_join then lvlNonTailExpr new_env body
+             nontail_body             = zapping_join || not has_all_bndrs
+       ; new_body <- if nontail_body then lvlNonTailExpr new_env body
                                      else lvlExpr new_env body
        ; return (mkLams new_bndrs new_body) }
   where
+    collect_n_bndrs :: Int -> CoreExprWithBoth
+                    -> ([InVar],          -- Binders
+                        CoreExprWithBoth, -- Body
+                        Bool)             -- Found n binders?
     collect_n_bndrs orig_n e
-      -- This is only safe because CoreCxts eta-expands join points, so we're
-      -- guaranteed to have enough lambdas.
       = collect orig_n [] e
       where
-        collect 0 bs body               = (reverse bs, body)
+        collect 0 bs body               = (reverse bs, body, True)
         collect n bs (_, AnnLam b body) = collect (n-1) (b:bs) body
-        collect _ _  _                  = pprPanic "collect_n_bndrs" $ int orig_n
+        collect _ bs body               = (reverse bs, body, False)
 
 lvlRhs env _ _ _ expr
   = lvlNonTailExpr env expr
