@@ -274,9 +274,7 @@ Library
         StgCmmExtCode
         SMRep
         CoreArity
-        CoreCxts
         CoreFVs
-        CoreJoins
         CoreLint
         CorePrep
         CoreSubst
