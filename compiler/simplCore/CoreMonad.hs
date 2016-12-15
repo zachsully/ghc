@@ -245,10 +245,9 @@ data FinalPassSwitches = FinalPassSwitches
   -- is allocated inside a lambda
   , fps_trace             :: !Bool
   , fps_strictness        :: !Bool
-  , fps_ignoreLNEClo      :: !Bool
-  , fps_floatLNE0         :: !Bool
+  , fps_floatNullaryJoins :: !Bool
   , fps_oneShot           :: !Bool
-  , fps_leaveLNE          :: !Bool
+  , fps_leaveJoins        :: !Bool
   }
 
 instance Outputable FloatOutSwitches where

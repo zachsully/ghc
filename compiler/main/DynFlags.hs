@@ -472,10 +472,7 @@ data GeneralFlag
    | Opt_ProtectLastValArg
    | Opt_IgnoreRealWorld
 
-   | Opt_NoLNE
-
    | Opt_LLF        -- ^ Enable the late lambda lift pass
-   | Opt_LLF_AbsLNE        -- ^ allowed to abstract LNE variables?
    | Opt_LLF_AbsUnsat        -- ^ allowed to abstract undersaturated applied let-bound variables?
    | Opt_LLF_AbsSat        -- ^ allowed to abstract      saturated applied let-bound variables?
    | Opt_LLF_AbsOversat       -- ^ allowed to abstract  oversaturated applied let-bound variables?
@@ -483,10 +480,9 @@ data GeneralFlag
    | Opt_LLF_Simpl        -- ^ follow the late lambda lift with a simplification pass?
    | Opt_LLF_Stabilize
    | Opt_LLF_UseStr        -- ^ use strictness in the late lambda float
-   | Opt_LLF_IgnoreLNEClo        -- ^ predict LNEs in the late lambda float
-   | Opt_LLF_FloatLNE0        -- ^ float zero-arity LNEs
+   | Opt_LLF_FloatNullaryJoinPoints -- ^ float zero-arity join points
    | Opt_LLF_OneShot
-   | Opt_LLF_LeaveLNE
+   | Opt_LLF_LeaveJoinPoints
 
    -- Interface files
    | Opt_IgnoreInterfacePragmas
@@ -3712,7 +3708,6 @@ fFlagsDeps = [
   flagSpec "worker-wrapper"                   Opt_WorkerWrapper,
   flagSpec "show-warning-groups"              Opt_ShowWarnGroups,
   flagSpec "hide-source-paths"                Opt_HideSourcePaths,
-  flagSpec "no-LNE"                           Opt_NoLNE,
 
   flagSpec "llf"                              Opt_LLF,
   flagSpec "llf-abstract-undersat"            Opt_LLF_AbsUnsat,
@@ -3722,10 +3717,9 @@ fFlagsDeps = [
   flagSpec "llf-simpl"                        Opt_LLF_Simpl,
   flagSpec "llf-stabilize"                    Opt_LLF_Stabilize,
   flagSpec "llf-use-strictness"               Opt_LLF_UseStr,
-  flagSpec "llf-ignore-LNE-clo"               Opt_LLF_IgnoreLNEClo,
-  flagSpec "llf-LNE0"                         Opt_LLF_FloatLNE0,
+  flagSpec "llf-float-nullary-join-points"    Opt_LLF_FloatNullaryJoinPoints,
   flagSpec "llf-oneshot"                      Opt_LLF_OneShot,
-  flagSpec "llf-leave-LNE"                    Opt_LLF_LeaveLNE
+  flagSpec "llf-leave-join-points"            Opt_LLF_LeaveJoinPoints
   ]
 
 -- | These @-f\<blah\>@ flags can all be reversed with @-fno-\<blah\>@

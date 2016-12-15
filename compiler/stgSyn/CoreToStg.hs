@@ -215,9 +215,9 @@ coreToStg dflags this_mod pgm
   = pgm'
   where (_, _, pgm') = coreTopBindsToStg dflags this_mod emptyVarEnv pgm
 
-coreExprToStg :: DynFlags -> CoreExpr -> StgExpr
-coreExprToStg dflags expr
-  = new_expr where (new_expr,_,_) = initLne dflags emptyVarEnv (coreToStgExpr expr)
+coreExprToStg :: CoreExpr -> StgExpr
+coreExprToStg expr
+  = new_expr where (new_expr,_,_) = initLne emptyVarEnv (coreToStgExpr expr)
 
 
 coreTopBindsToStg
@@ -251,7 +251,7 @@ coreTopBindToStg dflags this_mod env body_fvs (NonRec id rhs)
         how_bound = LetBound TopLet $! manifestArity rhs
 
         (stg_rhs, fvs') =
-            initLne dflags env $ do
+            initLne env $ do
               (stg_rhs, fvs') <- coreToTopStgRhs dflags this_mod body_fvs (id,rhs)
               return (stg_rhs, fvs')
 
@@ -274,7 +274,7 @@ coreTopBindToStg dflags this_mod env body_fvs (Rec pairs)
         env' = extendVarEnvList env extra_env'
 
         (stg_rhss, fvs')
-          = initLne dflags env' $ do
+          = initLne env' $ do
                (stg_rhss, fvss') <- mapAndUnzipM (coreToTopStgRhs dflags this_mod body_fvs) pairs
                let fvs' = unionFVInfos fvss'
                return (stg_rhss, fvs')
@@ -738,15 +738,13 @@ coreToStgLet let_no_escape bind body = do
                                        -- one possibility
             no_binder_escapes
 
-    noLNE <- getNoLNE
-
                 -- Mustn't depend on the passed-in let_no_escape flag, since
                 -- no_binder_escapes is used by the caller to derive the flag!
     return (
         new_let,
         free_in_whole_let,
         let_escs,
-        not noLNE && checked_no_binder_escapes
+        checked_no_binder_escapes
       )
   where
     set_of_binders = mkVarSet binders
@@ -895,7 +893,6 @@ isPAP env _               = False
 
 newtype LneM a = LneM
     { unLneM :: IdEnv HowBound
-             -> Bool -- disable LNE?
              -> a
     }
 
@@ -942,18 +939,20 @@ topLevelBound _                   = False
 
 -- The std monad functions:
 
-initLne :: DynFlags -> IdEnv HowBound -> LneM a -> a
-initLne dflags env m = unLneM m env (gopt Opt_NoLNE dflags)
+initLne :: IdEnv HowBound -> LneM a -> a
+initLne env m = unLneM m env
+
+
 
 {-# INLINE thenLne #-}
 {-# INLINE returnLne #-}
 
 returnLne :: a -> LneM a
-returnLne e = LneM $ \_ _ -> e
+returnLne e = LneM $ \_ -> e
 
 thenLne :: LneM a -> (a -> LneM b) -> LneM b
-thenLne m k = LneM $ \env noLNE
-  -> unLneM (k (unLneM m env noLNE)) env noLNE
+thenLne m k = LneM $ \env
+  -> unLneM (k (unLneM m env)) env
 
 instance Functor LneM where
     fmap = liftM
@@ -966,22 +965,19 @@ instance Monad LneM where
     (>>=)  = thenLne
 
 instance MonadFix LneM where
-    mfix expr = LneM $ \env noLNE ->
-                       let result = unLneM (expr result) env noLNE
+    mfix expr = LneM $ \env ->
+                       let result = unLneM (expr result) env
                        in  result
 
 -- Functions specific to this monad:
 
-getNoLNE :: LneM Bool
-getNoLNE = LneM $ \_env noLNE -> noLNE
-
 extendVarEnvLne :: [(Id, HowBound)] -> LneM a -> LneM a
 extendVarEnvLne ids_w_howbound expr
-   =    LneM $   \env noLNE
-   -> unLneM expr (extendVarEnvList env ids_w_howbound) noLNE
+   =    LneM $   \env
+   -> unLneM expr (extendVarEnvList env ids_w_howbound)
 
 lookupVarLne :: Id -> LneM HowBound
-lookupVarLne v = LneM $ \env _noLNE -> lookupBinding env v
+lookupVarLne v = LneM $ \env -> lookupBinding env v
 
 lookupBinding :: IdEnv HowBound -> Id -> HowBound
 lookupBinding env v = case lookupVarEnv env v of

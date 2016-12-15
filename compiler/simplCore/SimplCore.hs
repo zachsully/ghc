@@ -143,11 +143,10 @@ getCoreToDo dflags
               , fps_ifInClo        = lateFloatIfInClo           dflags
               , fps_cloGrowth      = lateFloatCloGrowth         dflags
               , fps_cloGrowthInLam = lateFloatCloGrowthInLam    dflags
-              , fps_ignoreLNEClo   = gopt Opt_LLF_IgnoreLNEClo  dflags
               , fps_strictness     = gopt Opt_LLF_UseStr        dflags
-              , fps_floatLNE0      = gopt Opt_LLF_FloatLNE0     dflags
+              , fps_floatNullaryJoins = gopt Opt_LLF_FloatNullaryJoinPoints dflags
               , fps_oneShot        = gopt Opt_LLF_OneShot       dflags
-              , fps_leaveLNE       = gopt Opt_LLF_LeaveLNE      dflags
+              , fps_leaveJoins     = gopt Opt_LLF_LeaveJoinPoints dflags
               }
     late_dmd_anal = gopt Opt_LateDmdAnal                  dflags
     static_args   = gopt Opt_StaticArgumentTransformation dflags

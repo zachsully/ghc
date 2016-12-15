@@ -823,16 +823,15 @@ OLD comment was:
                 || (strict_ctxt && not (exprIsBottom expr))
         to the condition above. We should really try this out.
 
-Node [Lifting LNEs]
-~~~~~~~~~~~~~~~~~~~
+Node [Lifting join points]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Lifting LNEs is dubious. The only benefit of lifting an LNE is the
+Lifting join points is dubious. The only benefit is the
 reduction in expression size increasing the likelihood of inlining,
-eg. LNEs do not allocate and by definition cannot pin other function
+eg. Join points do not allocate and by definition cannot pin other function
 closures.
 
-However a function call seems to be a bit slower than an LNE entry;
-TODO investigate the CMM difference.
+However, a function call is a bit slower than a jump.
 
 ************************************************************************
 *                                                                      *
@@ -961,10 +960,9 @@ decideBindFloat _ _ (AnnNonRec (TB bndr _) _)
                     -- so we will ignore this case for now
   = Nothing
 
-decideBindFloat init_env is_bot binding =
+decideBindFloat env is_bot binding =
   maybe conventionalFloatOut lateLambdaLift (finalPass env)
   where
-    env = lneLvlEnv init_env ids
     conventionalFloatOut | is_forbidden_float  = Nothing
                          | is_profitable_float = Just (dest_lvl, abs_vars,
                                                        zapping_joins)
@@ -984,7 +982,7 @@ decideBindFloat init_env is_bot binding =
                -- Note [When to ruin a join point]
 
         is_profitable_float =
-             (dest_lvl `ltMajLvl` le_ctxt_lvl init_env) -- Escapes a value lambda
+             (dest_lvl `ltMajLvl` le_ctxt_lvl env) -- Escapes a value lambda
           || isTopLvl dest_lvl -- Going all the way to top level
 
         is_unlifted_binding
@@ -1004,25 +1002,25 @@ decideBindFloat init_env is_bot binding =
               AnnRec ((TB bndr _, _):_) -> isJoinId bndr
               _                         -> panic "is_join_binding"
 
-        zapping_joins = dest_lvl `ltLvl` joinCeilingLevel init_env
+        zapping_joins = dest_lvl `ltLvl` joinCeilingLevel env
                         && is_join_binding
 
     lateLambdaLift fps
-      | all_funs || (fps_floatLNE0 fps && isLNE)
-           -- only lift functions or zero-arity LNEs
-      ,  not (any (`elemVarSet` le_joins env) abs_vars) -- can't abstract over join
-      ,  not (fps_leaveLNE fps && isLNE) -- see Note [Lifting LNEs]
-      ,  Nothing <- decider = Just (tOP_LEVEL, abs_vars, isLNE)
+      | all_funs || (fps_floatNullaryJoins fps && is_join)
+           -- only lift functions or nullary join points
+      ,  not (any isJoinId abs_vars) -- can't abstract over join
+      ,  not (fps_leaveJoins fps && is_join) -- see Note [Lifting join points]
+      ,  Nothing <- decider = Just (tOP_LEVEL, abs_vars, is_join)
       | otherwise = Nothing -- do not lift
       where
         abs_vars = abstractVars tOP_LEVEL env bindings_fvs
         abs_ids_set = expandFloatedIds env $ mapDVarEnv fii_var bindings_fiis
         abs_ids  = dVarSetElems abs_ids_set
 
-        decider = decideLateLambdaFloat env isRec isLNE all_one_shot abs_ids_set badTime spaceInfo ids extra_sdoc fps
+        decider = decideLateLambdaFloat env isRec is_join all_one_shot abs_ids_set badTime spaceInfo ids extra_sdoc fps
 
         badTime   = wouldIncreaseRuntime    env abs_ids bindings_fiis
-        spaceInfo = wouldIncreaseAllocation env isLNE abs_ids_set rhs_silt_s scope_silt
+        spaceInfo = wouldIncreaseAllocation env is_join abs_ids_set rhs_silt_s scope_silt
 
         -- for -ddump-late-float with -dppr-debug
         extra_sdoc = text "scope_silt:" <+> ppr scope_silt
@@ -1053,7 +1051,7 @@ decideBindFloat init_env is_bot binding =
               rhss_silt = foldr bothSilt emptySilt (map siltOf rhss)
               rhss_fvs  = computeRecRHSsFVs (map unTag ids) (map fvsOf rhss)
 
-    isLNE = isJust join_arity
+    is_join = isJust join_arity
     is_OneShot e = case collectBinders $ deTagExpr $ deAnnotate e of
       (bs,_) -> all (\b -> isId b && isOneShotBndr b) bs
 
@@ -1089,7 +1087,7 @@ decideLateLambdaFloat ::
                 -- Just x <=> do not float, not (null x) <=> forgetting
                 -- fast calls to the ids in x are the only thing
                 -- pinning this binding
-decideLateLambdaFloat env isRec isLNE all_one_shot abs_ids_set badTime spaceInfo ids extra_sdoc fps
+decideLateLambdaFloat env isRec is_join all_one_shot abs_ids_set badTime spaceInfo ids extra_sdoc fps
   = (if fps_trace fps then pprTrace ('\n' : msg) msg_sdoc else (\x -> x)) $
     if floating then Nothing else Just $
     if isBadSpace
@@ -1105,8 +1103,8 @@ decideLateLambdaFloat env isRec isLNE all_one_shot abs_ids_set badTime spaceInfo
 
     isBadTime = not (isEmptyDVarSet badTime)
 
-    -- this should always be empty, by definition of LNE
-    spoiledLNEs = le_joins env `intersectVarSet` mkVarSet (dVarSetElems abs_ids_set)
+    -- this should always be empty, by the invariants on join points
+    spoiled_joins = filterDVarSet isJoinId abs_ids_set
 
     isBadSpace | fps_oneShot fps && all_one_shot = False
                | otherwise    = flip any spaceInfo $ \(createsPAPs, cloSize, cg, cgil) ->
@@ -1135,15 +1133,16 @@ decideLateLambdaFloat env isRec isLNE all_one_shot abs_ids_set badTime spaceInfo
     msg_sdoc = vcat (zipWith space (map unTag ids) spaceInfo) where
       abs_ids = dVarSetElems abs_ids_set
       space v (badPAP, closureSize, cg, cgil) = vcat
-       [ ppr v <+> if isLNE then parens (text "LNE") else empty
+       [ ppr v <+> ppWhen is_join (text "(join)")
        , text "size:" <+> ppr closureSize
        , text "abs_ids:" <+> ppr (length abs_ids) <+> ppr abs_ids
        , text "createsPAPs:" <+> ppr badPAP
        , text "closureGrowth:" <+> ppr cg
        , text "CG in lam:"   <+> ppr cgil
        , text "fast-calls:" <+> ppr (dVarSetElems badTime)
-       , if isEmptyVarSet spoiledLNEs then empty else text "spoiledLNEs!!:" <+> ppr spoiledLNEs
-       , if opt_PprStyle_Debug then extra_sdoc else empty
+       , ppWhen (not (isEmptyDVarSet spoiled_joins)) $
+         text "spoiled joins!!:" <+> ppr spoiled_joins
+       , ppWhen opt_PprStyle_Debug extra_sdoc
        ]
 
     wORDS_PTR = StgCmmArgRep.argRepSizeW (le_dflags env) StgCmmArgRep.P
@@ -1198,8 +1197,8 @@ wouldIncreaseAllocation ::
     , WordOff  -- estimated increase for closures that ARE allocated
                -- under a lambda
     )
-wouldIncreaseAllocation env isLNE abs_ids_set pairs (FISilt _ scope_fiis scope_sk)
-  | isLNE = map (const (False,0,0,0)) pairs
+wouldIncreaseAllocation env is_join abs_ids_set pairs (FISilt _ scope_fiis scope_sk)
+  | is_join = map (const (False,0,0,0)) pairs
   | otherwise = flip map bndrs $ \bndr -> case lookupDVarEnv scope_fiis bndr of
     Nothing -> (False, closuresSize, 0, 0) -- it's a dead variable. Huh.
     Just fii -> (violatesPAPs, closuresSize, closureGrowth, closureGrowthInLambda)
@@ -1267,11 +1266,9 @@ substAndLvlBndrs is_rec env lvl bndrs
 
 substBndrsSL :: RecFlag -> LevelEnv -> [TaggedBndr BSilt] -> (LevelEnv, [OutVar])
 -- So named only to avoid the name clash with CoreSubst.substBndrs
-substBndrsSL is_rec env@(LE { le_subst = subst, le_env = id_env, le_joins = joins }) bndrs
+substBndrsSL is_rec env@(LE { le_subst = subst, le_env = id_env }) bndrs
   = ( env { le_subst    = subst'
-          , le_env      = foldl add_id  id_env (bndrs `zip` bndrs')
-          , le_joins    = extendVarSetList joins [ bndr | TB bndr _ <- bndrs
-                                                        , isId bndr, isJoinId bndr ]}
+          , le_env      = foldl add_id  id_env (bndrs `zip` bndrs')}
     , bndrs')
   where
     (subst', bndrs') = case is_rec of
@@ -1364,7 +1361,6 @@ data LevelEnv
         -- see Note [The Reason SetLevels Does Substitution]
 
        , le_dflags   :: DynFlags
-       , le_joins    :: VarSet
     }
         -- We clone let- and case-bound variables so that they are still
         -- distinct when floated out; hence the le_subst/le_env.
@@ -1395,8 +1391,7 @@ initialEnv dflags float_lams
        , le_lvl_env = emptyVarEnv
        , le_subst = emptySubst
        , le_env = emptyVarEnv
-       , le_dflags = dflags
-       , le_joins = emptyVarSet }
+       , le_dflags = dflags }
 
 addLvl :: Level -> VarEnv Level -> OutVar -> VarEnv Level
 addLvl dest_lvl env v' = extendVarEnv env v' dest_lvl
@@ -1420,11 +1415,6 @@ floatOverSat le = floatOutOverSatApps (le_switches le)
 
 floatTopLvlOnly :: LevelEnv -> Bool
 floatTopLvlOnly le = floatToTopLevelOnly (le_switches le)
-
-lneLvlEnv :: LevelEnv -> [InId] -> LevelEnv
-lneLvlEnv env bndrs = env { le_joins = extendVarSetList (le_joins env) joins }
-  where
-    joins = [ bndr | TB bndr _ <- bndrs, isJoinId bndr ]
 
 setCtxtLvl :: LevelEnv -> Level -> LevelEnv
 setCtxtLvl env lvl = env { le_ctxt_lvl = lvl }
@@ -1817,8 +1807,7 @@ delBinderFVs bndr fvs
 -- cost of lifting f.
 --
 -- NB That floating cannot change the abs_ids of a function closure
--- because nothing floats past a lambda. TODO What about zero-arity
--- LNEs?
+-- because nothing floats past a lambda.
 --
 -- We are *approximating* CorePrep because we do not actually float
 -- anything: thus some of the emulated decisions might be
@@ -1945,40 +1934,17 @@ type FVM = Identity
 --
 -- NB We don't actually do any floating, but we anticipate it.
 
--- Note [recognizing LNE]
--- ~~~~~~~~~~~~~~~~~~~~~~
+-- Note [Significance of join points]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 --
--- (This is now performed in the CoreJoins module.)
+-- Join points matter in a couple of ways:
 --
--- We track escaping variables in order to recognize LNEs. This helps
--- in a couple of ways:
+--  (1) it is ok to lift a "thunk" if it is actually a join point
 --
---  (1) it is ok to lift a "thunk" if it is actually LNE
---
---  (2) LNEs are not actually closures, so adding free variables to
+--  (2) Join points are not actually closures, so adding free variables to
 --      one does not increase allocation (cf closureFVUp)
 --
 -- (See Note [FVUp] for the semantics of E, F, and E'.)
---
--- NB The escaping variables in E are the same as the escaping
--- variables in F and E'. A deceptive example suggesting they might
--- instead be different is this sort of floating:
---
---   let t = lne j = ...
---           in E[j]
---
--- becomes
---
---   let j = ...
---       t = E[j]
---
--- Since j hypothetically floated out of t, it is no longer
--- LNE. However, this example is impossible: j would not float out of
--- t. A binding only floats out of a closure if doing so would reveal
--- a head normal form (cf wantFloatNested and CoreUtil's Note
--- [exprIsHNF]), and for all such forms, the free ids of the arguments
--- are defined to be escaping. Thus: LNE bindings do not float out of
--- closures.
 
 -- Note [FVUp for closures and floats]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2041,8 +2007,8 @@ lambdaLikeFVUp bs up = up {
   where del = delBindersFVs bs
 
 -- see Note [FVUp for closures and floats]
-floatFVUp :: FVEnv -> Maybe CoreBndr -> Bool -> CoreExpr -> FVUp -> FVUp
-floatFVUp env mb_id use_case rhs up =
+floatFVUp :: Maybe CoreBndr -> Bool -> CoreExpr -> FVUp -> FVUp
+floatFVUp mb_id use_case rhs up =
   let rhs_floats@(FIFloats _ _ bndrs_floating_out _ _) = fvu_floats up
 
       join_arity = case mb_id of Nothing       -> Nothing -- floating an argument
@@ -2060,8 +2026,8 @@ floatFVUp env mb_id use_case rhs up =
             Nothing -> ((toArgRep $ typePrimRep $ exprType rhs):m,emptyDVarSet)
             Just id -> (m,unitDVarSet id)
 
-          -- treat LNEs like cases; see Note [recognizing LNE]
-          sk' | use_case || (fve_ignoreLNEClo env && isJust join_arity) = sk
+          -- treat join points like cases; see Note [Significance of join points]
+          sk' | use_case || isJust join_arity = sk
               | otherwise = CloSk mb_id fids' sk
 
                 where fids' = bndrs_floating_out `unionDVarSet` mapDVarEnv fii_var fids
@@ -2077,8 +2043,7 @@ floatFVUp env mb_id use_case rhs up =
 data FVEnv = FVEnv
   { fve_isFinal      :: !Bool
   , fve_useDmd       :: !Bool
-  , fve_ignoreLNEClo :: !Bool
-  , fve_floatLNE0    :: !Bool
+  , fve_floatNullaryJoins :: !Bool
   , fve_argumentDemands :: Maybe [Bool]
   , fve_runtimeArgs  :: !NumRuntimeArgs
   , fve_letBoundVars :: !(IdEnv Bool)
@@ -2090,18 +2055,14 @@ type NumRuntimeArgs = Int -- i <=> applied to i runtime arguments
 
 initFVEnv :: Maybe FinalPassSwitches -> FVEnv
 initFVEnv mb_fps = FVEnv {
-  fve_isFinal = isFinal,
-  fve_useDmd = useDmd,
-  fve_ignoreLNEClo = ignoreLNEClo,
-  fve_floatLNE0 = floatLNE0,
+  fve_isFinal = isJust mb_fps,
+  fve_useDmd = maybe False fps_strictness mb_fps,
+  fve_floatNullaryJoins = maybe False fps_floatNullaryJoins mb_fps,
   fve_argumentDemands = Nothing,
   fve_runtimeArgs = 0,
   fve_letBoundVars = emptyVarEnv,
   fve_nonTopLevel = emptyVarSet
   }
-  where (isFinal, useDmd, ignoreLNEClo, floatLNE0) = case mb_fps of
-          Nothing -> (False, False, False, False)
-          Just fps -> (True, fps_strictness fps, fps_ignoreLNEClo fps, fps_floatLNE0 fps)
 
 unappliedEnv :: FVEnv -> FVEnv
 unappliedEnv env = env { fve_runtimeArgs = 0, fve_argumentDemands = Nothing }
@@ -2202,7 +2163,7 @@ analyzeFVsM  env app@(App fun arg) = do
   let binding_up = -- does the argument itself float?
         if fvu_isTrivial rhs_up
         then rhs_up -- no, it does not
-        else floatFVUp env Nothing use_case rhs rhs_up
+        else floatFVUp Nothing use_case rhs rhs_up
 
   -- lastly: merge the Ups
   let up = fun_up {
@@ -2259,7 +2220,7 @@ analyzeFVsM env (Let (NonRec binder rhs) body) = do
       is_unlifted = isUnliftedType $ varType binder
       use_case    = is_strict || is_unlifted
 
-  let binding_up = floatFVUp env (Just binder) use_case rhs $
+  let binding_up = floatFVUp (Just binder) use_case rhs $
                    perhapsWrapFloatsFVUp NonRecursive use_case rhs rhs_up
 
   let rule_and_unfolding_vars | isId binder = idRuleAndUnfoldingVarsDSet binder
@@ -2277,7 +2238,7 @@ analyzeFVsM env (Let (NonRec binder rhs) body) = do
         fvu_isTrivial = fvu_isTrivial body_up
         }
 
-  -- extra lastly: tag the binder with LNE and its use info in both
+  -- extra lastly: tag the binder with its use info in both
   -- its whole scope
   let bsilt = CloB $ fvu_floats body_up `wrapFloats` fvu_silt body_up
 
@@ -2299,7 +2260,7 @@ analyzeFVsM env (Let (Rec binds) body) = do
 
   -- step 2: approximate floating the bindings
   let binding_up_s = flip map (zip binds rhs_up_s) $ \((binder,rhs),rhs_up) ->
-        floatFVUp env (Just binder) False rhs $
+        floatFVUp (Just binder) False rhs $
         rhs_up {fvu_silt = delBindersSilt [binder] (fvu_silt rhs_up)}
 
   -- lastly: merge Ups
