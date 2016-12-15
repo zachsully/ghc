@@ -58,7 +58,6 @@ module UniqFM (
         nonDetFoldUFM, foldUFM, nonDetFoldUFM_Directly,
         anyUFM, allUFM, seqEltsUFM,
         mapUFM, mapUFM_Directly,
-        mapMaybeUFM,
         elemUFM, elemUFM_Directly,
         filterUFM, filterUFM_Directly, partitionUFM,
         sizeUFM,
@@ -254,9 +253,6 @@ mapUFM f (UFM m) = UFM (M.map f m)
 
 mapUFM_Directly :: (Unique -> elt1 -> elt2) -> UniqFM elt1 -> UniqFM elt2
 mapUFM_Directly f (UFM m) = UFM (M.mapWithKey (f . getUnique) m)
-
-mapMaybeUFM :: (elt1 -> Maybe elt2) -> UniqFM elt1 -> UniqFM elt2
-mapMaybeUFM f (UFM m) = UFM (M.mapMaybe f m)
 
 filterUFM :: (elt -> Bool) -> UniqFM elt -> UniqFM elt
 filterUFM p (UFM m) = UFM (M.filter p m)

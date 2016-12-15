@@ -32,9 +32,9 @@ import CoreMonad        ( Tick(..), SimplifierMode(..) )
 import CoreSyn
 import Demand           ( StrictSig(..), dmdTypeDepth, isStrictDmd )
 import PprCore          ( pprCoreExpr )
-import CoreArity
 import CoreUnfold
 import CoreUtils
+import CoreArity
 --import PrimOp           ( tagToEnumKey ) -- temporalily commented out. See #8326
 import Rules            ( mkRuleInfo, lookupRule, getRules )
 --import TysPrim          ( intPrimTy ) -- temporalily commented out. See #8326
@@ -865,7 +865,7 @@ completeJoinBind :: SimplEnv
 --      * by extending the substitution (e.g. let x = y in ...)
 --      * or by returning the bind adding to the floats in the envt
 --
-completeJoinBind env top_lvl is_rec cont old_bndr new_bndr final_rhs
+completeJoinBind env top_lvl _is_rec cont old_bndr new_bndr final_rhs
  = ASSERT( isJoinId new_bndr )
    do { let old_info = idInfo old_bndr
             old_unf  = unfoldingInfo old_info
@@ -992,16 +992,16 @@ Here opInt has arity 1; but when we apply the rule its arity drops to 0.
 That's why Specialise goes to a little trouble to pin the right arity
 on specialised functions too.
 
-Also, the arity of a join point can decrease due to context substitution:
+Also, the arity of a join point can decrease:
 
   (let <join> j x = \y -> x + y in if b then j 1 else j 2) 3
 
   ==>
 
   let <join> j x = (\y -> x + y) 3 in if b then j 1 else j 2
-  
+
   ==>
-  
+
   let <join> j x = x + 3 in if b then j 1 else j 2
 
 Note [Setting the demand info]

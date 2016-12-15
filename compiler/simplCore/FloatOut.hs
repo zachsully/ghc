@@ -6,7 +6,7 @@
 ``Long-distance'' floating of bindings towards the top level.
 -}
 
-{-# LANGUAGE CPP, ViewPatterns #-}
+{-# LANGUAGE CPP #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module FloatOut ( floatOutwards ) where
@@ -651,7 +651,7 @@ partitionByMajorLevel (Level major _) (FB tops defns)
                Just h  -> flattenMinor h
 -}
 
-partitionByLevel lvl@(Level major minor typ) fb@(FB tops ceils defns)
+partitionByLevel (Level major minor typ) (FB tops ceils defns)
   = (FB tops ceils' (outer_maj `plusMajor` M.singleton major outer_min),
      here_min `unionBags` here_ceil
               `unionBags` flattenMinor inner_min
@@ -667,7 +667,7 @@ partitionByLevel lvl@(Level major minor typ) fb@(FB tops ceils defns)
                         | otherwise          = (emptyBag, ceils)
 
 partitionAtJoinCeiling :: FloatBinds -> (FloatBinds, Bag FloatBind)
-partitionAtJoinCeiling fb@(FB tops ceils defs)
+partitionAtJoinCeiling (FB tops ceils defs)
   = (FB tops emptyBag defs, ceils)
 
 atJoinCeiling :: (FloatStats, FloatBinds, CoreExpr)

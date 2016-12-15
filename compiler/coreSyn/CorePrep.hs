@@ -783,7 +783,7 @@ cpeApp top_env expr
            -- exprIsTrivial).  But note that we need the type of the
            -- expression, not the id.
            ; (app, floats) <- rebuild_app args e2 (exprType e2) emptyFloats stricts
-           ; mb_saturate env hd app floats depth }
+           ; mb_saturate hd app floats depth }
         where
           stricts = case idStrictness v of
                             StrictSig (DmdType _ demands _)
@@ -806,14 +806,14 @@ cpeApp top_env expr
                           -- The evalDmd says that it's sure to be evaluated,
                           -- so we'll end up case-binding it
            ; (app, floats) <- rebuild_app args fun' ty fun_floats []
-           ; mb_saturate env Nothing app floats depth }
+           ; mb_saturate Nothing app floats depth }
         where
           ty = exprType fun
 
     -- Saturate if necessary
-    mb_saturate env head app floats depth =
+    mb_saturate head app floats depth =
        case head of
-         Just fn_id -> do { sat_app <- maybeSaturate env fn_id app depth
+         Just fn_id -> do { sat_app <- maybeSaturate fn_id app depth
                           ; return (floats, sat_app) }
          _other              -> return (floats, app)
 
@@ -944,8 +944,8 @@ maybeSaturate deals with saturating primops and constructors
 The type is the type of the entire application
 -}
 
-maybeSaturate :: CorePrepEnv -> Id -> CpeApp -> Int -> UniqSM CpeRhs
-maybeSaturate env fn expr n_args
+maybeSaturate :: Id -> CpeApp -> Int -> UniqSM CpeRhs
+maybeSaturate fn expr n_args
   | Just DataToTagOp <- isPrimOpId_maybe fn     -- DataToTag must have an evaluated arg
                                                 -- A gruesome special case
   = saturateDataToTag sat_expr

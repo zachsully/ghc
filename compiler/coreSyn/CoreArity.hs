@@ -12,7 +12,7 @@
 module CoreArity (
         manifestArity, exprArity, typeArity, exprBotStrictness_maybe,
         exprEtaExpandArity, findRhsArity, CheapFun, etaExpand,
-        etaExpandCountingTypes, splitJoinPoint
+        splitJoinPoint
     ) where
 
 #include "HsVersions.h"
@@ -867,28 +867,14 @@ etaExpand :: Arity              -- ^ Result should have this number of value arg
 --
 -- It deals with coerces too, though they are now rare
 -- so perhaps the extra code isn't worth it
+
 etaExpand n orig_expr
-  = etaExpand' n False orig_expr
-
--- | A version of 'etaExpand' that counts type arguments.
-etaExpandCountingTypes :: JoinArity -- ^ Result should have this number of args
-                       -> CoreExpr  -- ^ Expression to expand
-                       -> CoreExpr
-etaExpandCountingTypes n orig_expr
-  = etaExpand' n True orig_expr
-
-etaExpand' :: Int  -- Number of arguments (possibly counting types)
-           -> Bool -- True <=> type arguments count as arguments
-           -> CoreExpr
-           -> CoreExpr
-etaExpand' n count_ty_args orig_expr
   = go n orig_expr
   where
       -- Strip off existing lambdas and casts
       -- Note [Eta expansion and SCCs]
     go 0 expr = expr
-    go n (Lam v body) | not count_ty_args
-                      , isTyVar v = Lam v (go n     body)
+    go n (Lam v body) | isTyVar v = Lam v (go n     body)
                       | otherwise = Lam v (go (n-1) body)
     go n (Cast expr co)           = Cast (go n expr) co
     go n expr
@@ -896,8 +882,7 @@ etaExpand' n count_ty_args orig_expr
         retick $ etaInfoAbs etas (etaInfoApp subst' sexpr etas)
       where
           in_scope = mkInScopeSet (exprFreeVars expr)
-          orig_ty = exprType expr
-          (in_scope', etas) = mkEtaWW n count_ty_args orig_expr in_scope orig_ty
+          (in_scope', etas) = mkEtaWW n orig_expr in_scope (exprType expr)
           subst' = mkEmptySubst in_scope'
 
           -- Find ticks behind type apps.
@@ -1043,20 +1028,17 @@ etaInfoAppRhs subst bndr expr eis
         join_body' = etaInfoApp subst' join_body eis
 
 --------------
-mkEtaWW :: Int -> Bool -> CoreExpr -> InScopeSet -> Type
+mkEtaWW :: Arity -> CoreExpr -> InScopeSet -> Type
         -> (InScopeSet, [EtaInfo])
         -- EtaInfo contains fresh variables,
         --   not free in the incoming CoreExpr
         -- Outgoing InScopeSet includes the EtaInfo vars
         --   and the original free vars
 
-mkEtaWW orig_n count_ty_args orig_expr in_scope orig_ty
+mkEtaWW orig_n orig_expr in_scope orig_ty
   = go orig_n empty_subst orig_ty []
   where
     empty_subst = mkEmptyTCvSubst in_scope
-
-    decrement_for_ty_arg n | count_ty_args = n-1
-                           | otherwise     = n
 
     go n subst ty eis       -- See Note [exprArity invariant]
        | n == 0
@@ -1065,7 +1047,7 @@ mkEtaWW orig_n count_ty_args orig_expr in_scope orig_ty
        | Just (tv,ty') <- splitForAllTy_maybe ty
        , let (subst', tv') = Type.substTyVarBndr subst tv
            -- Avoid free vars of the original expression
-       = go (decrement_for_ty_arg n) subst' ty' (EtaVar tv' : eis)
+       = go n subst' ty' (EtaVar tv' : eis)
 
        | Just (arg_ty, res_ty) <- splitFunTy_maybe ty
        , let (subst', eta_id') = freshEtaId n subst arg_ty
@@ -1091,6 +1073,7 @@ mkEtaWW orig_n count_ty_args orig_expr in_scope orig_ty
         -- So we simply decline to eta-expand.  Otherwise we'd end up
         -- with an explicit lambda having a non-function type
 
+
 --------------
 -- Don't use short-cutting substitution - we may be changing the types of join
 -- points, so applying the in-scope set is necessary
@@ -1113,7 +1096,7 @@ splitJoinPoint join_arity expr
     go n rev_bs e         = case eta n (exprType e) (init_subst e) [] e of
                               (bs, e') -> (reverse rev_bs ++ bs, e')
 
-    -- Don't use etaExpand', because that might leave casts in the way. We
+    -- Don't use etaExpand, because that might leave casts in the way. We
     -- actually need n leading lambdas.
     eta 0 _  _     rev_bs e
       = (reverse rev_bs, e)

@@ -103,6 +103,8 @@ module Type (
         isCoercionTy_maybe, isCoercionType, isForAllTy,
         isPiTy, isTauTy, isFamFreeTy,
 
+        isValidJoinPointType,
+
         -- (Lifting and boxity)
         isUnliftedType, isUnboxedTupleType, isUnboxedSumType,
         isAlgType, isClosedAlgType,
@@ -110,8 +112,6 @@ module Type (
         isRuntimeRepTy, isRuntimeRepVar, isRuntimeRepKindedTy,
         dropRuntimeRepArgs,
         getRuntimeRep, getRuntimeRepFromKind,
-
-        isValidJoinPointType,
 
         -- * Main data types representing Kinds
         Kind,
@@ -2346,7 +2346,7 @@ modifyJoinResTy :: Int            -- Number of binders to skip
                 -> Type           -- Type of join point
                 -> Type           -- New type
 -- INVARIANT: If any of the first n binders are foralls, those tyvars cannot
--- appear in the original result type. See decideSort in CoreJoins.
+-- appear in the original result type. See isValidJoinPointType.
 modifyJoinResTy orig_ar f orig_ty
   = go orig_ar orig_ty
   where
@@ -2360,7 +2360,7 @@ setJoinResTy :: Int  -- Number of binders to skip
              -> Type -- New result type
              -> Type -- Type of join point
              -> Type -- New type
--- INVARIANT: Same as modifyJoinResTy
+-- INVARIANT: Same as for modifyJoinResTy
 setJoinResTy ar new_res_ty ty
   = modifyJoinResTy ar (const new_res_ty) ty
 

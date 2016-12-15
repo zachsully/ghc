@@ -165,7 +165,7 @@ instance Outputable SimplSR where
   ppr (DoneEx e) = text "DoneEx" <+> ppr e
   ppr (DoneId v) = text "DoneId" <+> ppr v
   ppr (ContEx _tv _cv _id e) = vcat [text "ContEx" <+> ppr e {-,
-                               ppr (filter_env tv), ppr (filter_env id) -}]
+                                ppr (filter_env tv), ppr (filter_env id) -}]
         -- where
         -- fvs = exprFreeVars e
         -- filter_env env = filterVarEnv_Directly keep env
@@ -355,8 +355,7 @@ setSubstEnv :: SimplEnv -> TvSubstEnv -> CvSubstEnv -> SimplIdSubst -> SimplEnv
 setSubstEnv env tvs cvs ids = env { seTvSubst = tvs, seCvSubst = cvs, seIdSubst = ids }
 
 mkContEx :: SimplEnv -> InExpr -> SimplSR
-mkContEx (SimplEnv { seTvSubst = tvs, seCvSubst = cvs, seIdSubst = ids }) e
-  = ContEx tvs cvs ids e
+mkContEx (SimplEnv { seTvSubst = tvs, seCvSubst = cvs, seIdSubst = ids }) e = ContEx tvs cvs ids e
 
 {-
 ************************************************************************
@@ -422,7 +421,7 @@ andFF FltLifted  flt        = flt
 doFloatFromRhs :: TopLevelFlag -> RecFlag -> Bool -> OutExpr -> SimplEnv -> Bool
 -- If you change this function look also at FloatIn.noFloatFromRhs
 doFloatFromRhs lvl rec str rhs (SimplEnv {seFloats = Floats fs ff})
-  = not (isNilOL fs) && want_to_float && can_float
+  =  not (isNilOL fs) && want_to_float && can_float
   where
      want_to_float = isTopLevel lvl || exprIsCheap rhs || exprIsExpandable rhs
                      -- See Note [Float when cheap or expandable]
@@ -502,8 +501,7 @@ addRecFloats :: SimplEnv -> SimplEnv -> SimplEnv
 -- handled; see Simplify.simplRecBind
 addRecFloats env1 env2@(SimplEnv {seFloats = Floats bs ff})
   = ASSERT2( case ff of { FltLifted -> True; _ -> False }, ppr (fromOL bs) )
-    env2 {seFloats = seFloats env1 `addFlts`
-                       unitFloat (Rec (flattenBinds (fromOL bs)))}
+    env2 {seFloats = seFloats env1 `addFlts` unitFloat (Rec (flattenBinds (fromOL bs)))}
 
 wrapFloats :: SimplEnv -> OutExpr -> OutExpr
 -- Wrap the floats around the expression; they should all
@@ -520,8 +518,8 @@ isEmptyFloats (SimplEnv {seFloats = Floats bs _})
   = isNilOL bs
 
 mapFloats :: SimplEnv -> ((Id,CoreExpr) -> (Id,CoreExpr)) -> SimplEnv
-mapFloats env@SimplEnv { seFloats = Floats bs ff } fun
-   = env { seFloats = Floats (mapOL app bs) ff }
+mapFloats env@SimplEnv { seFloats = Floats fs ff } fun
+   = env { seFloats = Floats (mapOL app fs) ff }
    where
     app (NonRec b e) = case fun (b,e) of (b',e') -> NonRec b' e'
     app (Rec bs)     = Rec (map fun bs)
@@ -552,7 +550,7 @@ substId (SimplEnv { seInScope = in_scope, seIdSubst = ids }) v
         Nothing               -> DoneId (refineFromInScope in_scope v)
         Just (DoneId v)       -> DoneId (refineFromInScope in_scope v)
         Just (DoneEx (Var v)) -> DoneId (refineFromInScope in_scope v)
-        Just (res)            -> res    -- DoneEx non-var, or ContEx
+        Just res              -> res    -- DoneEx non-var, or ContEx
 
         -- Get the most up-to-date thing from the in-scope set
         -- Even though it isn't in the substitution, it may be in

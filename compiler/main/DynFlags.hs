@@ -469,9 +469,6 @@ data GeneralFlag
    | Opt_CprAnal
    | Opt_WorkerWrapper
 
-   | Opt_ProtectLastValArg
-   | Opt_IgnoreRealWorld
-
    | Opt_LLF        -- ^ Enable the late lambda lift pass
    | Opt_LLF_AbsUnsat        -- ^ allowed to abstract undersaturated applied let-bound variables?
    | Opt_LLF_AbsSat        -- ^ allowed to abstract      saturated applied let-bound variables?

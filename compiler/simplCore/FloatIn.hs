@@ -40,7 +40,6 @@ actually float any bindings downwards from the top-level.
 
 floatInwards :: DynFlags -> CoreProgram -> CoreProgram
 floatInwards dflags = map fi_top_bind
-                        -- Note [Look for join points afterward]
   where
     fi_top_bind (NonRec binder rhs)
       = NonRec binder (fiExpr dflags [] (freeVars rhs))
@@ -48,34 +47,6 @@ floatInwards dflags = map fi_top_bind
       = Rec [ (b, fiExpr dflags [] (freeVars rhs)) | (b, rhs) <- pairs ]
 
 {-
-
-Note [Look for join points afterward]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Float In may make things into potential join points:
-
-  let fac = \x a -> case x of 0 -> a
-                              _ -> fac (x-1) (a*x)
-  in fac y 1 > 100
-
-  =>
-
-  (let fac = \x a -> case x of 0 -> a
-                               _ -> fac (x-1) (a*x)
-   in fac y 1) > 100
-
-If fac is a join point, the simplifier will flatten things out:
-
-  let join fac = \x a -> case x of 0 -> a > 100
-                                   _ -> fac (x-1) (a*x)
-  in fac y 1
-
-Here the call a > 100 is not terribly exciting, but in general we can hope to
-see an inlining opportunity or a known case.
-
-Of course, the simplifier looks for join points after it runs the occurrence
-analyzer, but the simplifier doesn't always run right after Float In, and the
-earlier we can nail down a join point, the better.
 
 ************************************************************************
 *                                                                      *
@@ -255,6 +226,9 @@ So we treat lambda in groups, using the following rule:
 
 This is what the 'go' function in the AnnLam case is doing.
 
+(Join points are handled similarly: a join point is considered one-shot iff
+it's non-recursive, so we float only into non-recursive join points.)
+
 Urk! if all are tyvars, and we don't float in, we may miss an
       opportunity to float inside a nested case branch
 -}
@@ -324,15 +298,6 @@ can't have unboxed bindings.
 
 So we make "extra_fvs" which is the rhs_fvs of such bindings, and
 arrange to dump bindings that bind extra_fvs before the entire let.
-
-We also don't float into ok-for-speculation unlifted RHSs, since they would no
-longer be ok-for-speculation and thus would violate the let/app invariant. See
-Note [Do not destroy the let/app invariant].
-
-However, since we *never* float out of a join point (and the invariant doesn't
-apply to them), we can always float into one. Non-recursive join points (and not
-recursive ones) are implicitly one-shot, so we float into a join point iff it's
-not recursive.
 
 Note [extra_fvs (2): free variables of rules]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

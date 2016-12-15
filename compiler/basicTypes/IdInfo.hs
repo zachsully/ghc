@@ -243,7 +243,7 @@ efficient.
 -- 'Unique' (and are hence the same 'Id'); for example, one might lack
 -- the properties attached to the other.
 --
--- Much of the 'IdInfo' gives information about the value, or definition, of
+-- Most of the 'IdInfo' gives information about the value, or definition, of
 -- the 'Id', independent of its usage. Exceptions to this
 -- are 'demandInfo', 'occInfo', 'oneShotInfo' and 'callArityInfo'.
 --
@@ -264,7 +264,7 @@ data IdInfo
         strictnessInfo  :: StrictSig,      --  ^ A strictness signature
 
         demandInfo      :: Demand,       -- ^ ID demand information
-        callArityInfo   :: !ArityInfo    -- ^ How this is called.
+        callArityInfo :: !ArityInfo    -- ^ How this is called.
                                          -- n <=> all calls have at least n arguments
     }
 
@@ -315,7 +315,7 @@ vanillaIdInfo
             occInfo             = NoOccInfo,
             demandInfo          = topDmd,
             strictnessInfo      = nopSig,
-            callArityInfo       = unknownArity
+            callArityInfo     = unknownArity
            }
 
 -- | More informative 'IdInfo' we can use when we know the 'Id' has no CAF references

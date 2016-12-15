@@ -869,9 +869,9 @@ occAnalRec lvl (CyclicSCC nodes) (body_uds, binds)
 
   | otherwise   -- At this point we always build a single Rec
   = -- pprTrace "occAnalRec" (vcat
-    --   [ text "weak_fvs" <+> ppr weak_fvs
-    --   , text "tagged details" <+> ppr final_uds
-    --   , text "lb nodes" <+> ppr loop_breaker_nodes])
+    --  [ text "weak_fvs" <+> ppr weak_fvs
+    --  , text "tagged details" <+> ppr final_uds
+    --  , text "lb nodes" <+> ppr loop_breaker_nodes])
     (final_uds, Rec pairs : binds)
 
   where
@@ -880,8 +880,8 @@ occAnalRec lvl (CyclicSCC nodes) (body_uds, binds)
     bndrs     = [b | (ND { nd_bndr = b }) <- details_s]
     bndr_set  = mkVarSet bndrs
 
-        ----------------------------
-        -- Tag the binders with their occurrence info
+    ----------------------------
+    -- Tag the binders with their occurrence info
     tagged_details_s :: [Details]
     tagged_details_s = map tag_details details_s
     tagged_pairs = [ (nd_bndr nd, nd_rhs nd) | nd <- tagged_details_s ]
