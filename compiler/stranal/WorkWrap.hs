@@ -447,7 +447,8 @@ splitFun dflags fam_envs fn_id fn_info wrap_dmds res_info rhs
 
                         `setIdArity` work_arity
                                 -- Set the arity so that the Core Lint check that the
-                                -- arity is consistent with the demand type goes through
+                                -- arity is consistent with the demand type goes
+                                -- through
                         `asJoinId_maybe` work_join_arity
 
             work_arity = length work_demands

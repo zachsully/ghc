@@ -204,11 +204,13 @@ data FloatOutSwitches = FloatOutSwitches {
                                    --    iff it has no free vars
 
   floatOutConstants :: Bool,       -- ^ True <=> float constants to top level,
-                                   --            even if they do not escape a lambda
-  floatOutOverSatApps :: Bool,     -- ^ True <=> float out over-saturated applications
-                                   --            based on arity information.
-                                   -- See Note [Floating over-saturated applications]
-                                   -- in SetLevels
+                                   --            even if they do not escape a
+                                   --            lambda
+  floatOutOverSatApps :: Bool,     -- ^ True <=> float out over-saturated
+                                   --            applications based on arity
+                                   --            information.
+                                   -- See Note [Floating over-saturated
+                                   -- applications] in SetLevels
   floatToTopLevelOnly :: Bool,     -- ^ Allow floating to the top level only.
   finalPass_        :: Maybe FinalPassSwitches
   -- ^ Nothing <=> not the final pass, behave like normal
@@ -220,15 +222,18 @@ data FinalPassSwitches = FinalPassSwitches
   , fps_absUnsatVar    :: !Bool
   -- ^ abstract over undersaturated applied variables?
   , fps_absSatVar      :: !Bool
-  -- ^ abstract over exactly saturated applied variables? Doing so might lose some fast entries
+  -- ^ abstract over exactly saturated applied variables?
   , fps_absOversatVar  :: !Bool
+  --   Doing so might lose some fast entries
   -- ^ abstracting over oversaturated applied variables?
   , fps_createPAPs     :: !Bool
   -- ^ allowed to float functions occuring unapplied
   , fps_cloGrowth    :: !(Maybe Int)
-  -- ^ limits the number of free variables added to closures using the floated function
+  -- ^ limits the number of free variables added to closures using the floated
+  --   function
   , fps_ifInClo        :: !(Maybe Int)
-  -- ^ limits the number of abstracted variables allowed if the binder occurs in a closure
+  -- ^ limits the number of abstracted variables allowed if the binder occurs in
+  --   a closure
   , fps_stabilizeFirst   :: !Bool
   -- ^ stabilizes an unstable unfolding before floating things out of
   -- it, since floating out precludes specialization at the call-site

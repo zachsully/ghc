@@ -740,7 +740,8 @@ lintCont hdr doc env e orig_cont
     go ty (Select { sc_bndr = bndr, sc_alts = alts, sc_env = se, sc_cont = k })
       = check_ty (text "Case binder type") ty (substTy se (idType bndr)) $
         case alts of
-          [] -> go (contHoleType k) k -- empty case can nominally return any type
+          [] -> go (contHoleType k) k -- empty case can nominally return any
+                                      -- type
           (_, _, e) : alts'
             -> let alt_ty = substTy se (exprType e)
                in foldr (\(_, _, e) -> check_ty (text "Alt type") alt_ty
@@ -1484,7 +1485,8 @@ because the latter is not well-kinded.
 ************************************************************************
 -}
 
-tryEtaExpandRhs :: SimplEnv -> RecFlag -> OutId -> OutExpr -> SimplM (Arity, OutExpr)
+tryEtaExpandRhs :: SimplEnv -> RecFlag -> OutId -> OutExpr
+                -> SimplM (Arity, OutExpr)
 -- See Note [Eta-expanding at let bindings]
 tryEtaExpandRhs env is_rec bndr rhs
   = do { dflags <- getDynFlags
@@ -1506,7 +1508,8 @@ tryEtaExpandRhs env is_rec bndr rhs
             new_arity  = max new_arity1 new_arity2
       , new_arity > old_arity      -- And the current manifest arity isn't enough
       = if is_rec == Recursive && isJoinId bndr
-           then WARN(True, text "Can't eta-expand recursive join point:" <+> ppr bndr)
+           then WARN(True, text "Can't eta-expand recursive join point:" <+>
+                             ppr bndr)
                 return (old_arity, rhs)
            else do { tick (EtaExpansion bndr)
                    ; return (new_arity, etaExpand new_arity rhs) }

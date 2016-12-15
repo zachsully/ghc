@@ -144,7 +144,8 @@ getCoreToDo dflags
               , fps_cloGrowth      = lateFloatCloGrowth         dflags
               , fps_cloGrowthInLam = lateFloatCloGrowthInLam    dflags
               , fps_strictness     = gopt Opt_LLF_UseStr        dflags
-              , fps_floatNullaryJoins = gopt Opt_LLF_FloatNullaryJoinPoints dflags
+              , fps_floatNullaryJoins = gopt Opt_LLF_FloatNullaryJoinPoints
+                                                                dflags
               , fps_oneShot        = gopt Opt_LLF_OneShot       dflags
               , fps_leaveJoins     = gopt Opt_LLF_LeaveJoinPoints dflags
               }
@@ -384,7 +385,8 @@ getCoreToDo dflags
               , floatToTopLevelOnly         = False
               , finalPass_                  = Just fps
               }
-          , runWhen (gopt Opt_LLF_Simpl dflags) $ simpl_phase 0 ["post-late-float-lam"] max_iter
+          , runWhen (gopt Opt_LLF_Simpl dflags) $
+            simpl_phase 0 ["post-late-float-lam"] max_iter
           ],
         -- TODO this is an experimental FloatOut pass. The intention
         -- is to use extra space on the stack (for passing arguments)
@@ -807,7 +809,9 @@ simplifyPgmIO pass@(CoreDoSimplify max_iterations mode)
 
                 -- Dump the result of this iteration
            dump_end_iteration dflags print_unqual iteration_no counts1 binds2 rules1 ;
-           lintPassResult hsc_env pass (parens (text "iteration=" <> int iteration_no)) binds2 ;
+           lintPassResult hsc_env pass
+                          (parens (text "iteration=" <> int iteration_no))
+                          binds2 ;
 
                 -- Loop
            do_iteration us2 (iteration_no + 1) (counts1:counts_so_far) binds2 rules1

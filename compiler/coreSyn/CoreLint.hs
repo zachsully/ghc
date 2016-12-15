@@ -273,8 +273,10 @@ lintPassResult hsc_env pass extra_hdr binds
   | not (gopt Opt_DoCoreLinting dflags)
   = return ()
   | otherwise
-  = do { let (warns, errs) = lintCoreBindings dflags pass (interactiveInScope hsc_env) binds
-       ; Err.showPass dflags ("Core Linted result of " ++ showSDoc dflags (ppr pass <+> extra_hdr))
+  = do { let (warns, errs) = lintCoreBindings dflags pass
+                               (interactiveInScope hsc_env) binds
+       ; Err.showPass dflags $
+           "Core Linted result of " ++ showSDoc dflags (ppr pass <+> extra_hdr)
        ; displayLintResults dflags pass extra_hdr warns errs binds  }
   where
     dflags = hsc_dflags hsc_env
@@ -285,7 +287,8 @@ displayLintResults :: DynFlags -> CoreToDo -> SDoc
 displayLintResults dflags pass extra_hdr warns errs binds
   | not (isEmptyBag errs)
   = do { log_action dflags dflags NoReason Err.SevDump noSrcSpan defaultDumpStyle
-           (vcat [ lint_banner "errors" (ppr pass <+> extra_hdr), Err.pprMessageBag errs
+           (vcat [ lint_banner "errors" (ppr pass <+> extra_hdr)
+                 , Err.pprMessageBag errs
                  , text "*** Offending Program ***"
                  , pprCoreBindings binds
                  , text "*** End of Offense ***" ])
@@ -294,8 +297,9 @@ displayLintResults dflags pass extra_hdr warns errs binds
   | not (isEmptyBag warns)
   , not opt_NoDebugOutput
   , showLintWarnings pass
-  = log_action dflags dflags NoReason Err.SevDump noSrcSpan defaultDumpStyle
-        (lint_banner "warnings" (ppr pass <+> extra_hdr) $$ Err.pprMessageBag warns)
+  = log_action dflags dflags NoReason Err.SevDump noSrcSpan defaultDumpStyle $
+        lint_banner "warnings" (ppr pass <+> extra_hdr) $$
+        Err.pprMessageBag warns
 
   | otherwise = return ()
   where
@@ -572,7 +576,8 @@ lintRhs bndr rhs
     = lint_join_lams arity rhs
     | (binders0, rhs') <- collectTyBinders rhs
     , Just (fun, args) <- collectStaticPtrSatArgs rhs'
-    = markAllJoinsBad $ flip fix binders0 $ \loopBinders binders -> case binders of
+    = markAllJoinsBad $
+      flip fix binders0 $ \loopBinders binders -> case binders of
         -- imitate @lintCoreExpr (Lam ...)@
         var : vars -> addLoc (LambdaBodyOf var) $
                       lintBinder var $ \var' ->
@@ -790,8 +795,8 @@ lintCoreApp var args
         ; when (not (null args) && lf_check_static_ptrs lf) $
           case isDataConId_maybe var of
             Just con | dataConName con == staticPtrDataConName
-              -> failWithL $ text "Found StaticPtr nested in an expression: " <+>
-                             ppr (foldl App (Var var) args)
+              -> failWithL $ text "Found StaticPtr nested in an expression: "
+                               <+> ppr (foldl App (Var var) args)
             _ -> return ()
 
         ; checkDeadIdOcc var
@@ -1690,10 +1695,14 @@ data LintEnv
        }
 
 data LintFlags
-  = LF { lf_check_global_ids           :: Bool -- See Note [Checking for global Ids]
-       , lf_check_inline_loop_breakers :: Bool -- See Note [Checking for INLINE loop breakers]
-       , lf_check_static_ptrs          :: Bool -- See Note [Checking StaticPtrs]
-       , lf_check_join_id_occ_mismatch :: Bool -- See Note [Checking join id occurrences]
+  = LF { lf_check_global_ids           :: Bool
+           -- See Note [Checking for global Ids]
+       , lf_check_inline_loop_breakers :: Bool
+           -- See Note [Checking for INLINE loop breakers]
+       , lf_check_static_ptrs          :: Bool
+           -- See Note [Checking StaticPtrs]
+       , lf_check_join_id_occ_mismatch :: Bool
+           -- See Note [Checking join id occurrences]
     }
 
 defaultLintFlags :: LintFlags
@@ -1959,7 +1968,8 @@ lookupIdInScope id
     out_of_scope = pprBndr LetBind id <+> text "is out of scope"
 
 isBadJoin :: Id -> LintM Bool
-isBadJoin id = LintM $ \env errs -> (Just (id `elemVarSet` le_bad_joins env), errs)
+isBadJoin id = LintM $ \env errs -> (Just (id `elemVarSet` le_bad_joins env),
+                                     errs)
 
 lintTyCoVarInScope :: Var -> LintM ()
 lintTyCoVarInScope v = lintInScope (text "is out of scope") v

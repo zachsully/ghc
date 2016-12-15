@@ -28,7 +28,8 @@ firstEvenIsPositive2 xs =
 
 firstEvenIsPositive3 :: [Int] -> Bool
 firstEvenIsPositive3 xs =
-  case let {-join-} go xs = case xs of x:xs' -> if even x then Just x else go xs'
+  case let {-join-} go xs = case xs of x:xs' -> if even x then Just x
+                                                          else go xs'
                                        []    -> Nothing
        in go xs of
     Just n  -> n > 0

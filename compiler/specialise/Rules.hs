@@ -730,7 +730,7 @@ match renv subst e1 (Var v2)      -- Note [Expanding variables]
 match renv subst e1 (Let bind e2)
   | -- pprTrace "match:Let" (vcat [ppr bind, ppr $ okToFloat (rv_lcl renv) (bindFreeVars bind)]) $
     not (isJoinBind bind) -- can't float join point out of argument position
-  , okToFloat (rv_lcl renv) (bindFreeVars bind)        -- See Note [Matching lets]
+  , okToFloat (rv_lcl renv) (bindFreeVars bind) -- See Note [Matching lets]
   = match (renv { rv_fltR = flt_subst' })
           (subst { rs_binds = rs_binds subst . Let bind'
                  , rs_bndrs = extendVarSetList (rs_bndrs subst) new_bndrs })

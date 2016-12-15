@@ -140,7 +140,8 @@ pprSimplEnv env
   where
    id_subst_doc = pprUniqFM ppr_id_subst (seIdSubst env)
    ppr_id_subst (m_ar, sr) = arity_part <+> ppr sr
-     where arity_part = case m_ar of Just ar -> brackets (text "join" <+> int ar)
+     where arity_part = case m_ar of Just ar -> brackets $
+                                                  text "join" <+> int ar
                                      Nothing -> empty
 
    in_scope_vars_doc = pprVarSet (getInScopeVars (seInScope env))
@@ -447,7 +448,7 @@ emptyFloats = Floats nilOL FltLifted
 
 unitFloat :: OutBind -> Floats
 -- This key function constructs a singleton float with the right form
-unitFloat bind = ASSERT (all (\v -> not (isId v && isJoinId v)) (bindersOf bind))
+unitFloat bind = ASSERT(all (\v -> not (isId v && isJoinId v)) (bindersOf bind))
                  Floats (unitOL bind) (flag bind)
   where
     flag (Rec {})                = FltLifted
@@ -473,7 +474,7 @@ addNonRec env id rhs
 extendFloats :: SimplEnv -> OutBind -> SimplEnv
 -- Add these bindings to the floats, and extend the in-scope env too
 extendFloats env bind
-  = ASSERT (all (not . isJoinId) (bindersOf bind))
+  = ASSERT(all (not . isJoinId) (bindersOf bind))
     env { seFloats  = seFloats env `addFlts` unitFloat bind,
           seInScope = extendInScopeSetList (seInScope env) bndrs }
   where
@@ -669,7 +670,8 @@ substNonCoVarIdBndr
 --      the type of id_subst differs
 --      all fragile info is zapped
 substNonCoVarIdBndr new_res_ty
-                    env@(SimplEnv { seInScope = in_scope, seIdSubst = id_subst })
+                    env@(SimplEnv { seInScope = in_scope
+                                  , seIdSubst = id_subst })
                     old_id
   = ASSERT2( not (isCoVar old_id), ppr old_id )
     (env { seInScope = in_scope `extendInScopeSet` new_id,
@@ -688,7 +690,8 @@ substNonCoVarIdBndr new_res_ty
         -- or there's some useful occurrence information
         -- See the notes with substTyVarBndr for the delSubstEnv
     new_subst | new_id /= old_id
-              = extendVarEnv id_subst old_id (isJoinId_maybe new_id, DoneId new_id)
+              = extendVarEnv id_subst old_id
+                             (isJoinId_maybe new_id, DoneId new_id)
               | otherwise
               = delVarEnv id_subst old_id
 
@@ -752,7 +755,8 @@ the letrec.
 -}
 
 getTCvSubst :: SimplEnv -> TCvSubst
-getTCvSubst (SimplEnv { seInScope = in_scope, seTvSubst = tv_env, seCvSubst = cv_env })
+getTCvSubst (SimplEnv { seInScope = in_scope, seTvSubst = tv_env
+                      , seCvSubst = cv_env })
   = mkTCvSubst in_scope (tv_env, cv_env)
 
 substTy :: SimplEnv -> Type -> Type

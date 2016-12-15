@@ -312,7 +312,8 @@ simplRecJoinBind env0 cont pairs0
   = do  { (env_with_info, triples) <- mapAccumLM add_rules env0 pairs0
         ; go env_with_info triples nilOL }
   where
-    add_rules :: SimplEnv -> (InBndr,InExpr) -> SimplM (SimplEnv, (InBndr, OutBndr, InExpr))
+    add_rules :: SimplEnv -> (InBndr,InExpr)
+              -> SimplM (SimplEnv, (InBndr, OutBndr, InExpr))
         -- Add the (substituted) rules to the binder
     add_rules env (bndr, rhs)
         = do { (env', bndr') <- addBndrRules env bndr (lookupRecBndr env bndr)
@@ -375,7 +376,8 @@ simplRecJoinPair env cont old_bndr new_bndr rhs
                     -- Check for unconditional inline
            then do tick (PreInlineUnconditionally old_bndr)
                    return (extendIdSubst env old_bndr (mkContEx env rhs), nilOL)
-           else simplJoinBind env NotTopLevel Recursive cont old_bndr new_bndr rhs env }
+           else simplJoinBind env NotTopLevel Recursive cont old_bndr new_bndr
+                              rhs env }
   where
     trace_bind dflags thing_inside
       | not (dopt Opt_D_verbose_core2core dflags)
@@ -474,12 +476,14 @@ simplJoinBind :: SimplEnv
               -> TopLevelFlag -> RecFlag
               -> SimplCont
               -> InId -> OutId          -- Binder, both pre-and post simpl
-                                        -- The OutId has IdInfo, except arity, unfolding
+                                        -- The OutId has IdInfo, except arity,
+                                        --   unfolding
               -> InExpr -> SimplEnv     -- The RHS and its environment
               -> SimplM (SimplEnv, OrdList OutBind)
 -- Precondition: rhs obeys the let/app invariant
 simplJoinBind env top_lvl is_rec cont bndr bndr1 rhs rhs_se
-  = -- pprTrace "simplLazyBind" ((ppr bndr <+> ppr bndr1) $$ ppr rhs $$ ppr (seIdSubst rhs_se)) $
+  = -- pprTrace "simplLazyBind" ((ppr bndr <+> ppr bndr1) $$
+    --                           ppr rhs $$ ppr (seIdSubst rhs_se)) $
     do  { let   rhs_env     = rhs_se `setInScope` env
 
         -- Simplify the RHS
@@ -804,7 +808,8 @@ completeBind env top_lvl is_rec old_bndr new_bndr new_rhs
       ; (new_arity, final_rhs) <- tryEtaExpandRhs env is_rec new_bndr new_rhs
 
         -- Simplify the unfolding
-      ; new_unfolding <- simplLetUnfolding env top_lvl Nothing old_bndr final_rhs old_unf
+      ; new_unfolding <- simplLetUnfolding env top_lvl Nothing old_bndr
+                                           final_rhs old_unf
 
       ; dflags <- getDynFlags
       ; if postInlineUnconditionally dflags env top_lvl new_bndr occ_info
@@ -871,10 +876,12 @@ completeJoinBind env top_lvl _is_rec cont old_bndr new_bndr final_rhs
             old_unf  = unfoldingInfo old_info
             occ_info = occInfo old_info
 
-      ; let new_arity = exprArity final_rhs -- Note [Don't eta-expand join points]
+      ; let new_arity = exprArity final_rhs
+                          -- Note [Don't eta-expand join points]
 
         -- Simplify the unfolding
-      ; new_unfolding <- simplLetUnfolding env top_lvl (Just cont) old_bndr final_rhs old_unf
+      ; new_unfolding <- simplLetUnfolding env top_lvl (Just cont) old_bndr
+                                           final_rhs old_unf
 
       ; dflags <- getDynFlags
       ; if postInlineUnconditionally dflags env top_lvl new_bndr occ_info
@@ -882,9 +889,11 @@ completeJoinBind env top_lvl _is_rec cont old_bndr new_bndr final_rhs
 
                         -- Inline and discard the binding
         then do  { tick (PostInlineUnconditionally old_bndr)
-                 ; return (extendIdSubst env old_bndr (DoneEx final_rhs), nilOL) }
+                 ; return (extendIdSubst env old_bndr (DoneEx final_rhs),
+                           nilOL) }
                 -- Use the substitution to make quite, quite sure that the
-                -- substitution will happen, since we are going to discard the binding
+                -- substitution will happen, since we are going to discard the
+                -- binding
         else
    do { let info1 = idInfo new_bndr `setArityInfo` new_arity
 
@@ -895,7 +904,8 @@ completeJoinBind env top_lvl _is_rec cont old_bndr new_bndr final_rhs
               --
               -- We also have to nuke demand info if for some reason
               -- eta-expansion *reduces* the arity of the binding to less
-              -- than that of the strictness sig. This can happen: see Note [Arity decrease].
+              -- than that of the strictness sig. This can happen: see
+              -- Note [Arity decrease].
             info3 | isEvaldUnfolding new_unfolding
                     || (case strictnessInfo info2 of
                           StrictSig dmd_ty -> new_arity < dmdTypeDepth dmd_ty)
@@ -906,7 +916,8 @@ completeJoinBind env top_lvl _is_rec cont old_bndr new_bndr final_rhs
             final_id = new_bndr `setIdInfo` info3
 
       ; --pprTrace "Binding" (pprBndr LetBind final_id $$ ppr final_rhs) $
-        return (modifyInScope env final_id, unitOL (NonRec final_id final_rhs)) } }
+        return (modifyInScope env final_id,
+                unitOL (NonRec final_id final_rhs)) } }
 
 ------------------------------
 addPolyBind :: TopLevelFlag -> SimplEnv -> OutBind -> SimplM SimplEnv
@@ -924,12 +935,14 @@ addPolyBind :: TopLevelFlag -> SimplEnv -> OutBind -> SimplM SimplEnv
 -- INVARIANT: the arity is correct on the incoming binders
 
 addPolyBind top_lvl env (NonRec poly_id rhs)
-  = do  { unfolding <- simplLetUnfolding env top_lvl Nothing poly_id rhs noUnfolding
+  = do  { unfolding <- simplLetUnfolding env top_lvl Nothing poly_id rhs
+                                         noUnfolding
                         -- Assumes that poly_id did not have an INLINE prag
                         -- which is perhaps wrong.  ToDo: think about this
         ; let final_id = setIdInfo poly_id $
                          idInfo poly_id `setUnfoldingInfo` unfolding
-        --; pprTrace "Binding (addPolyBind)" (pprBndr LetBind final_id $$ ppr rhs) $ return ()
+        --; pprTrace "Binding (addPolyBind)"
+        --           (pprBndr LetBind final_id $$ ppr rhs) $ return ()
         ; return (addNonRec env final_id rhs) }
 
 addPolyBind _ env bind@(Rec _)
@@ -954,12 +967,14 @@ addJoinBind :: TopLevelFlag -> SimplEnv -> OutBind -> SimplM SimplEnv
 -- INVARIANT: the arity is correct on the incoming binders
 
 addJoinBind top_lvl env (NonRec poly_id rhs)
-  = do  { unfolding <- simplLetUnfolding env top_lvl Nothing poly_id rhs noUnfolding
+  = do  { unfolding <- simplLetUnfolding env top_lvl Nothing poly_id rhs
+                                         noUnfolding
                         -- Assumes that poly_id did not have an INLINE prag
                         -- which is perhaps wrong.  ToDo: think about this
         ; let final_id = setIdInfo poly_id $
                          idInfo poly_id `setUnfoldingInfo` unfolding
-        --; pprTrace "Binding (addPolyBind)" (pprBndr LetBind final_id $$ ppr rhs) $ return ()
+        --; pprTrace "Binding (addPolyBind)"
+        --           (pprBndr LetBind final_id $$ ppr rhs) $ return ()
         ; return (modifyInScope env final_id) }
 
 addJoinBind _ env bind@(Rec _)
@@ -1047,11 +1062,11 @@ join point is fraught with issues like how to deal with a cast:
 
 The cast here can't be pushed inside the lambda (since it's not casting to a
 function type), so the lambda has to stay, but it can't because it contains a
-reference to a join point. In fact, $j2 can't be eta-expanded at all. Rather than
-try and detect this situation (and whatever other situations crop up!), we don't
-bother; again, any surrounding eta-expansion will improve these join points
-anyway, since an outer cast can *always* be pushed inside. By the time CorePrep
-comes around, the code is very likely to look more like this:
+reference to a join point. In fact, $j2 can't be eta-expanded at all. Rather
+than try and detect this situation (and whatever other situations crop up!), we
+don't bother; again, any surrounding eta-expansion will improve these join
+points anyway, since an outer cast can *always* be pushed inside. By the time
+CorePrep comes around, the code is very likely to look more like this:
 
     let join $j1 :: State# RealWorld -> (# State# RealWorld, ())
              $j1 = (...) eta
@@ -1200,7 +1215,8 @@ simplExprF1 env (Let (NonRec bndr rhs) body) cont
 --   \x1 .. xn -> e => \x1 .. xn -> E[e]
 -- Note that we need the arity of the join point, since e may be a lambda
 -- (though this is unlikely). See Note [Case-of-case and join points].
-simplJoinRhsF :: SimplEnv -> SimplCont -> InId -> InExpr -> SimplM (SimplEnv, OutExpr)
+simplJoinRhsF :: SimplEnv -> SimplCont -> InId -> InExpr
+              -> SimplM (SimplEnv, OutExpr)
 simplJoinRhsF env cont bndr expr
   | Just arity <- isJoinId_maybe bndr
   = simpl_join_lams arity
@@ -1211,7 +1227,8 @@ simplJoinRhsF env cont bndr expr
       = do { (env', join_bndrs') <- simplLamBndrs env join_bndrs
            ; join_body' <- simplExprC env' join_body cont
            ; let lam_cont = mkRhsStop (exprType join_body')
-               -- Only purpose of lam_cont is to prevent mkLam from eta-expanding
+               -- Only purpose of lam_cont is to prevent mkLam from
+               -- eta-expanding
            ; new_join <- mkLam join_bndrs' join_body' lam_cont
            ; return (env', new_join) }
       where
@@ -1630,7 +1647,8 @@ simplNonRecE env bndr (rhs, rhs_se) (bndrs, body) cont
          _ | preInlineUnconditionally dflags env NotTopLevel bndr rhs
            -> do { tick (PreInlineUnconditionally bndr)
                  ; -- pprTrace "preInlineUncond" (ppr bndr <+> ppr rhs) $
-                  simplLam (extendIdSubst env bndr (mkContEx rhs_se rhs)) bndrs body cont }
+                   simplLam (extendIdSubst env bndr (mkContEx rhs_se rhs))
+                            bndrs body cont }
 
            | isStrictId bndr          -- Includes coercions
            , not (isJoinId bndr)
@@ -1641,7 +1659,8 @@ simplNonRecE env bndr (rhs, rhs_se) (bndrs, body) cont
            -> ASSERT( not (isTyVar bndr) )
               do { (env1, bndr1) <- simplNonRecBndr env bndr
                  ; (env2, bndr2) <- addBndrRules env1 bndr bndr1
-                 ; env3 <- simplLazyBind env2 NotTopLevel NonRecursive bndr bndr2 rhs rhs_se
+                 ; env3 <- simplLazyBind env2 NotTopLevel NonRecursive
+                                         bndr bndr2 rhs rhs_se
                  ; simplLam env3 bndrs body cont }
 
 ------------------
@@ -1659,22 +1678,28 @@ simplNonRecJoinE env bndr (rhs, rhs_se) body cont
          _ | preInlineUnconditionally dflags env NotTopLevel bndr rhs
            -> do { tick (PreInlineUnconditionally bndr)
                  ; -- pprTrace "preInlineUncond" (ppr bndr <+> ppr rhs) $
-                  simplExprF (extendIdSubst env bndr (mkContEx rhs_se rhs)) body cont }
+                   simplExprF (extendIdSubst env bndr (mkContEx rhs_se rhs))
+                              body cont }
 
            | otherwise
            -> ASSERT( not (isTyVar bndr) )
-              do { let cont_dup_res_ty = resultTypeOfDupableCont (getMode env) [bndr] cont
+              do { let cont_dup_res_ty = resultTypeOfDupableCont (getMode env)
+                                           [bndr] cont
                  ; (env1, bndr1) <- simplNonRecJoinBndr env cont_dup_res_ty bndr
                  ; (env2, bndr2) <- addBndrRules env1 bndr bndr1
-                 ; (env3, joins1, cont_dup, cont_nodup) <- prepareLetCont env2 [bndr] cont
+                 ; (env3, joins1, cont_dup, cont_nodup)
+                     <- prepareLetCont env2 [bndr] cont
                  ; MASSERT2(cont_dup_res_ty `eqType` contResultType cont_dup,
                      ppr cont_dup_res_ty $$ blankLine $$
                      ppr cont $$ blankLine $$
                      ppr cont_dup $$ blankLine $$
                      ppr cont_nodup)
-                 ; (env4, joins2) <- simplJoinBind env3 NotTopLevel NonRecursive cont_dup bndr bndr2 rhs rhs_se
+                 ; (env4, joins2) <- simplJoinBind env3 NotTopLevel NonRecursive
+                                                   cont_dup bndr bndr2
+                                                   rhs rhs_se
                  ; (env5, expr) <- simplExprF env4 body cont_dup
-                 ; rebuild env5 (foldrOL Let expr (joins1 `appOL` joins2)) cont_nodup }
+                 ; rebuild env5 (foldrOL Let expr (joins1 `appOL` joins2))
+                           cont_nodup }
 
 ------------------
 simplRecE :: SimplEnv
@@ -2749,9 +2774,12 @@ prepareCaseCont :: SimplEnv
 -- When case-of-case is off, just make the entire continuation non-dupable
 
 prepareCaseCont env alts cont
-  | not (sm_case_case (getMode env)) = return (env, nilOL, mkBoringStop (contHoleType cont), cont)
-  | not (altsWouldDup alts)          = return (env, nilOL, cont, mkBoringStop (contResultType cont))
-  | otherwise                        = mkDupableCont env cont
+  | not (sm_case_case (getMode env))
+  = return (env, nilOL, mkBoringStop (contHoleType cont), cont)
+  | not (altsWouldDup alts)
+  = return (env, nilOL, cont, mkBoringStop (contResultType cont))
+  | otherwise
+  = mkDupableCont env cont
 
 prepareLetCont :: SimplEnv
                -> [InBndr] -> SimplCont
@@ -2765,8 +2793,8 @@ prepareLetCont :: SimplEnv
 -- where the js are join points. This will turn into
 --     Knodup[let { j1 = Kdup[r1]; ...; jn = Kdup[rn] } in Kdup[_]].
 --
--- When case-of-case is off and there are join points, just make the entire continuation
--- non-dupable. This is necessary because otherwise
+-- When case-of-case is off and there are join points, just make the entire
+-- continuation non-dupable. This is necessary because otherwise
 --     case (let j = ... in case e of { A -> j 1; ... }) of { B -> ... }
 -- becomes
 --     let j = case ... of { B -> ... } in
@@ -2774,9 +2802,12 @@ prepareLetCont :: SimplEnv
 -- and the reference to j is invalid.
 
 prepareLetCont env bndrs cont
-  | not (any isJoinId bndrs)             = return (env, nilOL, cont, mkBoringStop (contResultType cont))
-  | not (sm_case_case (getMode env))     = return (env, nilOL, mkBoringStop (contHoleType cont), cont)
-  | otherwise                            = mkDupableCont env cont
+  | not (any isJoinId bndrs)
+  = return (env, nilOL, cont, mkBoringStop (contResultType cont))
+  | not (sm_case_case (getMode env))
+  = return (env, nilOL, mkBoringStop (contHoleType cont), cont)
+  | otherwise
+  = mkDupableCont env cont
 
 -- Predict the result type of the dupable cont returned by prepareLetCont (= the
 -- hole type of the non-dupable part). Ugly, but sadly necessary so that we can
@@ -2858,7 +2889,8 @@ mkDupableCont env (StrictArg info cci cont)
         -- See Note [Duplicating StrictArg]
   = do { (env', jbinds, dup, nodup) <- mkDupableCont env cont
        ; (env'', args')     <- mapAccumLM makeTrivialArg env' (ai_args info)
-       ; return (env'', jbinds, StrictArg (info { ai_args = args' }) cci dup, nodup) }
+       ; return (env'', jbinds,
+                 StrictArg (info { ai_args = args' }) cci dup, nodup) }
 
 mkDupableCont env cont@(ApplyToTy { sc_cont = tail })
   = do  { (env', jbinds, dup_cont, nodup_cont) <- mkDupableCont env tail
@@ -2940,7 +2972,8 @@ mkDupableAlts env case_bndr' the_alts
              ; return (env2, jbinds1 `appOL` jbinds2, alt' : alts') }
 
 mkDupableAlt :: SimplEnv -> OutId -> (AltCon, [CoreBndr], CoreExpr)
-              -> SimplM (SimplEnv, OrdList OutBind, (AltCon, [CoreBndr], CoreExpr))
+             -> SimplM (SimplEnv, OrdList OutBind,
+                        (AltCon, [CoreBndr], CoreExpr))
 mkDupableAlt env case_bndr (con, bndrs', rhs') = do
   dflags <- getDynFlags
   if exprIsDupable dflags rhs'  -- Note [Small alternative rhs]
@@ -2963,8 +2996,9 @@ mkDupableAlt env case_bndr (con, bndrs', rhs') = do
                            -- The case binder is alive but trivial, so why has
                            -- it not been substituted away?
 
-              final_bndrs' | isDeadBinder case_bndr = filter abstract_over bndrs'
-                           | otherwise              = bndrs' ++ [case_bndr_w_unf]
+              final_bndrs'
+                | isDeadBinder case_bndr = filter abstract_over bndrs'
+                | otherwise              = bndrs' ++ [case_bndr_w_unf]
 
               abstract_over bndr
                   | isTyVar bndr = True -- Abstract over all type variables just in case
@@ -3365,7 +3399,8 @@ simplLetUnfolding env top_lvl cont_mb id new_rhs unf
   where
     bottoming = isBottomingId id
 
-simplUnfolding :: SimplEnv-> TopLevelFlag -> Maybe SimplCont -> InId -> Unfolding -> SimplM Unfolding
+simplUnfolding :: SimplEnv -> TopLevelFlag -> Maybe SimplCont -> InId
+               -> Unfolding -> SimplM Unfolding
 -- Note [Setting the new unfolding]
 simplUnfolding env top_lvl cont_mb id unf
   = case unf of
@@ -3382,8 +3417,9 @@ simplUnfolding env top_lvl cont_mb id unf
         | isStableSource src
         -> do { expr' <- if isJoinId id
                             then do { let Just cont = cont_mb
-                                    ; (env', expr') <- simplJoinRhsF (zapFloats rule_env)
-                                                                     cont id expr
+                                    ; (env', expr')
+                                        <- simplJoinRhsF (zapFloats rule_env)
+                                                         cont id expr
                                     ; return $ wrapFloats env' expr' }
                             else simplExpr rule_env expr
               ; case guide of
@@ -3485,8 +3521,10 @@ simplLocalRules env mb_new_nm mb_join_arity rules
            ; let rhs_ty = substTy env' (exprType rhs)
            ; (env'', eta_bndrs, eta_args, rule_cont)
                 <- case mb_join_arity of
-                     Just join_arity -> etaExpandRule env' join_arity rhs_ty args
-                     Nothing         -> return (env', [], [], mkBoringStop rhs_ty)
+                     Just join_arity -> etaExpandRule env' join_arity rhs_ty
+                                                      args
+                     Nothing         -> return (env', [], [],
+                                                mkBoringStop rhs_ty)
            ; let rule_env = updMode updModeForRules env''
            ; args' <- mapM (simplExpr rule_env) args
            ; rhs'  <- simplExprC rule_env rhs rule_cont

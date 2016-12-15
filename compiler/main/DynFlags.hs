@@ -478,13 +478,18 @@ data GeneralFlag
    | Opt_WorkerWrapper
 
    | Opt_LLF        -- ^ Enable the late lambda lift pass
-   | Opt_LLF_AbsUnsat        -- ^ allowed to abstract undersaturated applied let-bound variables?
-   | Opt_LLF_AbsSat        -- ^ allowed to abstract      saturated applied let-bound variables?
-   | Opt_LLF_AbsOversat       -- ^ allowed to abstract  oversaturated applied let-bound variables?
-   | Opt_LLF_CreatePAPs        -- ^ allowed to float function bindings that occur unapplied
-   | Opt_LLF_Simpl        -- ^ follow the late lambda lift with a simplification pass?
+   | Opt_LLF_AbsUnsat    -- ^ allowed to abstract undersaturated applied
+                         --   let-bound variables?
+   | Opt_LLF_AbsSat      -- ^ allowed to abstract      saturated applied
+                         --   let-bound variables?
+   | Opt_LLF_AbsOversat  -- ^ allowed to abstract  oversaturated applied
+                         --   let-bound variables?
+   | Opt_LLF_CreatePAPs  -- ^ allowed to float function bindings that occur
+                         --   unapplied
+   | Opt_LLF_Simpl       -- ^ follow the late lambda lift with a simplification
+                         --   pass?
    | Opt_LLF_Stabilize
-   | Opt_LLF_UseStr        -- ^ use strictness in the late lambda float
+   | Opt_LLF_UseStr      -- ^ use strictness in the late lambda float
    | Opt_LLF_FloatNullaryJoinPoints -- ^ float zero-arity join points
    | Opt_LLF_OneShot
    | Opt_LLF_LeaveJoinPoints
@@ -726,10 +731,19 @@ data DynFlags = DynFlags {
   floatLamArgs          :: Maybe Int,   -- ^ Arg count for lambda floating
                                         --   See CoreMonad.FloatOutSwitches
 
-  lateFloatNonRecLam    :: Maybe Int,   -- ^ Limit on # abstracted variables for *late* non-recursive function floating (Nothing => all, Just 0 => none)
-  lateFloatRecLam       :: Maybe Int,   -- ^   "    " "     "          "     for *late*     recursive function floating
-  lateFloatIfInClo      :: Maybe Int,   -- ^ Limit on # abstracted variables for floating a binding that occurs in a closure
-  lateFloatCloGrowth    :: Maybe Int,   -- ^ Limit on # additional free variables for closures in which the function occurs
+  lateFloatNonRecLam    :: Maybe Int,   -- ^ Limit on # abstracted variables for
+                                        --   *late* non-recursive function
+                                        --   floating (Nothing => all,
+                                        --   Just 0 => none)
+  lateFloatRecLam       :: Maybe Int,   -- ^   "    " "     "          "     for
+                                        --   *late*     recursive function
+                                        --   floating
+  lateFloatIfInClo      :: Maybe Int,   -- ^ Limit on # abstracted variables for
+                                        --   floating a binding that occurs in a
+                                        --   closure
+  lateFloatCloGrowth    :: Maybe Int,   -- ^ Limit on # additional free
+                                        --   variables for closures in which the
+                                        --   function occurs
   lateFloatCloGrowthInLam :: Maybe Int,
 
   historySize           :: Int,         -- ^ Simplification history size

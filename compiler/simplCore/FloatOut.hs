@@ -198,12 +198,14 @@ floatBind (Rec pairs)
     do_pair (TB name spec, rhs)
       | isTopLvl dest_lvl  -- See Note [floatBind for top level]
       = case (floatRhs name rhs) of { (fs, rhs_floats, rhs') ->
-        (fs, emptyFloats, ([], addTopFloatPairs (flattenTopFloats rhs_floats) [(name, rhs')]))}
+        (fs, emptyFloats, ([], addTopFloatPairs (flattenTopFloats rhs_floats)
+                                                [(name, rhs')]))}
       | otherwise         -- Note [Floating out of Rec rhss]
       = case (floatRhs name rhs) of { (fs, rhs_floats, rhs') ->
         case (partitionByLevel dest_lvl rhs_floats) of { (rhs_floats', heres) ->
         case (splitRecFloats heres) of { (ul_pairs, pairs, case_heres) ->
-        (fs, rhs_floats', (ul_pairs, (name, installUnderLambdas case_heres rhs') : pairs)) }}}
+        let pairs' = (name, installUnderLambdas case_heres rhs') : pairs in
+        (fs, rhs_floats', (ul_pairs, pairs')) }}}
       where
         dest_lvl = floatSpecLevel spec
 
@@ -222,8 +224,10 @@ splitRecFloats fs
                                                | otherwise
                                                = go ul_prs ((b,r):prs) fs
     go ul_prs prs (FloatLet (Rec prs')   : fs) = go ul_prs (prs' ++ prs) fs
-    go ul_prs prs fs                           = (reverse ul_prs, prs, listToBag fs)
-                                                   -- Order only matters for non-rec
+    go ul_prs prs fs                           = (reverse ul_prs, prs,
+                                                  listToBag fs)
+                                                   -- Order only matters for
+                                                   -- non-rec
 
 installUnderLambdas :: Bag FloatBind -> CoreExpr -> CoreExpr
 -- Note [Floating out of Rec rhss]
@@ -444,7 +448,8 @@ floatRhs bndr rhs
   = case bndrs of
       []                -> floatExpr rhs
       (TB _ lam_spec):_ ->
-        case floatBody (floatSpecLevel lam_spec) body of { (fs, floats, body') ->
+        let lvl = floatSpecLevel lam_spec in
+        case floatBody lvl body of { (fs, floats, body') ->
         (fs, floats, mkLams [b | TB b _ <- bndrs] body') }
   | otherwise
   = atJoinCeiling $ floatExpr rhs
@@ -560,7 +565,7 @@ type MinorEnv = M.IntMap (Bag FloatBind)  -- Keyed by minor level
 
 data FloatBinds  = FB !(Bag FloatLet)           -- Destined for top level
                       !(Bag FloatBind)          -- Destined for join ceiling
-                      !MajorEnv                 -- Levels other than top, ceiling
+                      !MajorEnv                 -- Other levels
      -- See Note [Representation of FloatBinds]
 
 instance Outputable FloatBinds where
@@ -605,7 +610,8 @@ unitLetFloat :: Level -> FloatLet -> FloatBinds
 unitLetFloat lvl@(Level major minor t) b
   | isTopLvl lvl     = FB (unitBag b) emptyBag M.empty
   | t == JoinCeilLvl = FB emptyBag floats M.empty
-  | otherwise        = FB emptyBag emptyBag (M.singleton major (M.singleton minor floats))
+  | otherwise        = FB emptyBag emptyBag (M.singleton major
+                                              (M.singleton minor floats))
   where
     floats = unitBag (FloatLet b)
 
@@ -679,7 +685,8 @@ atJoinCeiling (fs, floats, expr')
 
 wrapTick :: Tickish Id -> FloatBinds -> FloatBinds
 wrapTick t (FB tops ceils defns)
-  = FB (mapBag wrap_bind tops) (wrap_defns ceils) (M.map (M.map wrap_defns) defns)
+  = FB (mapBag wrap_bind tops) (wrap_defns ceils)
+       (M.map (M.map wrap_defns) defns)
   where
     wrap_defns = mapBag wrap_one
 

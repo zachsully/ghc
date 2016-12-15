@@ -205,7 +205,8 @@ corePrepTopBinds initialCorePrepEnv binds
   = go initialCorePrepEnv binds
   where
     go _   []             = return emptyFloats
-    go env (bind : binds) = do (env', bind', maybe_wrap) <- cpeBind TopLevel env bind
+    go env (bind : binds) = do (env', bind', maybe_wrap)
+                                 <- cpeBind TopLevel env bind
                                MASSERT(isNothing maybe_wrap)
                                binds' <- go env' binds
                                return (bind' `appendFloats` binds')

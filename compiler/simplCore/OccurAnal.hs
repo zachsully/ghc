@@ -104,17 +104,21 @@ occurAnalysePgm this_mod active_rule imp_rules vects vectVars binds
         = (final_usage, bind' ++ binds')
         where
            (bs_usage, binds')   = go env binds
-           (final_usage, bind') = occAnalBind env TopLevel imp_rule_edges bind bs_usage
+           (final_usage, bind') = occAnalBind env TopLevel imp_rule_edges bind
+                                              bs_usage
 
 occurAnalyseExpr :: CoreExpr -> CoreExpr
         -- Do occurrence analysis, and discard occurrence info returned
-occurAnalyseExpr = occurAnalyseExpr' True False -- do binder swap, no joins
+occurAnalyseExpr = occurAnalyseExpr' True False
+  -- do binder swap, no joins
 
 occurAnalyseExpr_NoBinderSwap :: CoreExpr -> CoreExpr
-occurAnalyseExpr_NoBinderSwap = occurAnalyseExpr' False False -- no swap, no joins
+occurAnalyseExpr_NoBinderSwap = occurAnalyseExpr' False False
+  -- no swap, no joins
 
 occurAnalyseExpr_WithJoinPoints :: CoreExpr -> CoreExpr
-occurAnalyseExpr_WithJoinPoints = occurAnalyseExpr' True True -- do swap and joins
+occurAnalyseExpr_WithJoinPoints = occurAnalyseExpr' True True
+  -- do swap and joins
   -- Note [Finding join points]
 
 occurAnalyseExpr' :: Bool -> Bool -> CoreExpr -> CoreExpr
@@ -759,7 +763,8 @@ occAnalRec :: TopLevelFlag
            -> (UsageDetails, [CoreBind])
 
         -- The NonRec case is just like a Let (NonRec ...) above
-occAnalRec lvl (AcyclicSCC (ND { nd_bndr = bndr, nd_rhs = rhs, nd_uds = rhs_uds}))
+occAnalRec lvl (AcyclicSCC (ND { nd_bndr = bndr, nd_rhs = rhs
+                               , nd_uds = rhs_uds}))
            (body_uds, binds)
   | not (bndr `usedIn` body_uds)
   = (body_uds, binds)           -- See Note [Dead code]
@@ -772,7 +777,8 @@ occAnalRec lvl (AcyclicSCC (ND { nd_bndr = bndr, nd_rhs = rhs, nd_uds = rhs_uds}
     (final_bndr, rhs')
       = asJoinIdIfPossible body_uds lvl tagged_bndr rhs
           `orElse` (tagged_bndr, rhs)
-    rhs_uds' = adjustRhsUsage (isJoinId_maybe final_bndr) NonRecursive rhs' rhs_uds
+    rhs_uds' = adjustRhsUsage (isJoinId_maybe final_bndr) NonRecursive rhs'
+                              rhs_uds
 
         -- The Rec case is the interesting one
         -- See Note [Recursive bindings: the grand plan]
@@ -799,7 +805,8 @@ occAnalRec lvl (CyclicSCC details_s) (body_uds, binds)
     add_uds usage_so_far nd = usage_so_far +++ nd_uds nd
 
     orig_pairs = [ (nd_bndr nd, nd_rhs nd) | nd <- details_s ]
-    final_details_s = case asJoinIdsIfPossible total_uds lvl Recursive orig_pairs of
+    mb_pairs_as_joins = asJoinIdsIfPossible total_uds lvl Recursive orig_pairs
+    final_details_s = case mb_pairs_as_joins of
                         Just pairs' -> [ nd { nd_bndr = bndr', nd_rhs = rhs' }
                                        | nd <- details_s
                                        | (bndr', rhs') <- pairs' ]
@@ -807,8 +814,10 @@ occAnalRec lvl (CyclicSCC details_s) (body_uds, binds)
     rhs_uds'     = foldl add_adjusted_uds emptyDetails final_details_s
     total_uds'   = body_uds +++ rhs_uds'
     final_uds    = total_uds' `minusDetails` bndr_set
-    add_adjusted_uds usage_so_far (ND { nd_bndr = bndr', nd_rhs = rhs', nd_uds = uds })
-      = usage_so_far +++ adjustRhsUsage (isJoinId_maybe bndr') Recursive rhs' uds
+    add_adjusted_uds usage_so_far
+                     (ND { nd_bndr = bndr', nd_rhs = rhs', nd_uds = uds })
+      = usage_so_far +++
+        adjustRhsUsage (isJoinId_maybe bndr') Recursive rhs' uds
 
     ------------------------------
         -- See Note [Choosing loop breakers] for loop_breaker_nodes
@@ -1661,9 +1670,9 @@ occAnal env (Case scrut bndr ty alts)
 
     occ_anal_scrut (Var v) (alt1 : other_alts)
         | not (null other_alts) || not (isDefaultAlt alt1)
-        = (mkOneOcc env v True 0, Var v)  -- The 'True' says that the variable occurs
-                                          -- in an interesting context; the case has
-                                          -- at least one non-default alternative
+        = (mkOneOcc env v True 0, Var v)
+            -- The 'True' says that the variable occurs in an interesting
+            -- context; the case has at least one non-default alternative
     occ_anal_scrut (Tick t e) alts
         | t `tickishScopesLike` SoftScope
           -- No reason to not look through all ticks here, but only
@@ -1675,9 +1684,10 @@ occAnal env (Case scrut bndr ty alts)
         = occAnal (vanillaCtxt env) scrut    -- No need for rhsCtxt
 
 occAnal env (Let bind body)
-  = case occAnal env body                               of { (body_usage, body') ->
+  = case occAnal env body                of { (body_usage, body') ->
     case occAnalBind env NotTopLevel
-                     noImpRuleEdges bind body_usage     of { (final_usage, new_binds) ->
+                     noImpRuleEdges bind
+                     body_usage          of { (final_usage, new_binds) ->
        (final_usage, mkLets new_binds body') }}
 
 occAnalArgs :: OccEnv -> [CoreExpr] -> [OneShots] -> (UsageDetails, [CoreExpr])
@@ -1761,7 +1771,8 @@ occAnalApp env (fun, args, ticks)
 markManyIf :: Bool              -- If this is true
            -> UsageDetails      -- Then do markMany on this
            -> UsageDetails
-markManyIf True  uds = uds { ud_occ_info = mapVarEnv markMany (ud_occ_info uds) }
+markManyIf True  uds = uds { ud_occ_info = mapVarEnv markMany
+                                                     (ud_occ_info uds) }
 markManyIf False uds = uds
 
 {-

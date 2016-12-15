@@ -155,7 +155,8 @@ mkWwBodies dflags fam_envs rhs_fvs fun_ty demands res_info
 
         ; if isWorkerSmallEnough dflags work_args
              && (useful1 && not only_one_void_argument || useful2)
-          then return (Just (worker_args_dmds, length work_call_args, wrapper_body, worker_body))
+          then return (Just (worker_args_dmds, length work_call_args,
+                       wrapper_body, worker_body))
           else return Nothing
         }
         -- We use an INLINE unconditionally, even if the wrapper turns out to be

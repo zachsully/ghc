@@ -733,9 +733,10 @@ coreToStgLet let_no_escape bind body = do
                   hang (text "Interesting!  CoreToStg says not a join var") 2
                        (ppr binders) ) -- shouldn't happen
             WARN( no_binder_escapes && not (isJoinId (head binders)),
-                  hang (text "Interesting!  A let-no-escape that's not a join var") 2
+                  hang (text ("Interesting!  A let-no-escape that's not a " ++
+                              "join var")) 2
                        (ppr binders) ) -- see Test.isValidJoinPointType for
-                                       -- one possibility
+                                        -- one possibility
             no_binder_escapes
 
                 -- Mustn't depend on the passed-in let_no_escape flag, since

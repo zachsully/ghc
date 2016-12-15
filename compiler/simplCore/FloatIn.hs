@@ -316,8 +316,10 @@ fiExpr dflags to_drop (_,AnnLet (AnnNonRec id rhs) body)
     rhs_fvs  = freeVarsOf rhs
 
     rule_fvs = idRuleAndUnfoldingVarsDSet id        -- See Note [extra_fvs (2): free variables of rules]
-    extra_fvs | noFloatIntoRhs is_join is_rec rhs = rule_fvs `unionDVarSet` freeVarsOf rhs
-              | otherwise                         = rule_fvs
+    extra_fvs | noFloatIntoRhs is_join is_rec rhs
+              = rule_fvs `unionDVarSet` freeVarsOf rhs
+              | otherwise
+              = rule_fvs
         -- See Note [extra_fvs (1): avoid floating into RHS]
         -- No point in floating in only to float straight out again
         -- *Can't* float into ok-for-speculation unlifted RHSs
@@ -429,7 +431,8 @@ fiExpr dflags to_drop (_, AnnCase scrut case_bndr ty alts)
 
         -- Float into the alts with the is_case flag set
     (drop_here2 : alts_drops_s)
-      = sepBindsByDropPoint dflags True False alts_fvs all_alts_ty_fvs alts_drops
+      = sepBindsByDropPoint dflags True False alts_fvs all_alts_ty_fvs
+                            alts_drops
 
     scrut_fvs       = freeVarsOf scrut
     alts_fvs        = map alt_fvs alts
