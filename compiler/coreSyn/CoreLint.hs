@@ -508,7 +508,7 @@ lintSingleBinding top_lvl_flag rec_flag (binder,rhs)
            (mkNonTopExternalNameMsg binder)
 
        ; flags <- getLintFlags
-           
+
         -- Check that if the binder is top-level, it's not a join point
        ; checkL (not (isJoinId binder && isTopLevel top_lvl_flag))
            (mkTopJoinMsg binder)
@@ -1756,7 +1756,7 @@ does not update the occurrence sites, since it's usually run just before the
 simplifier anyway, and the simplifier always propagates binders to their
 occurrences. Since we would like to debug the occurrence analyser, we thus drop
 this invariant when linting its output. (Join points must still be correct in
-other ways, for instance in being only tail-called.) 
+other ways, for instance in being only tail-called.)
 
 Note [Type substitution]
 ~~~~~~~~~~~~~~~~~~~~~~~~

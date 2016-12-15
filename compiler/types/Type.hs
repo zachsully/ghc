@@ -2363,4 +2363,3 @@ setJoinResTy :: Int  -- Number of binders to skip
 -- INVARIANT: Same as for modifyJoinResTy
 setJoinResTy ar new_res_ty ty
   = modifyJoinResTy ar (const new_res_ty) ty
-

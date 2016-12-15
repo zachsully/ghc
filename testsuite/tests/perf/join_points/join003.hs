@@ -8,7 +8,7 @@
 module Main (
   firstMultIsPositive1, firstMultIsPositive2, firstMultIsPositive3,
   firstMultIsPositive4,
-  
+
   main
 ) where
 

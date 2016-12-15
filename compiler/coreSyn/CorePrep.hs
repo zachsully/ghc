@@ -1535,4 +1535,3 @@ wrapTicks (Floats flag floats0) expr = (Floats flag floats1, expr')
                                              (ppr other)
         wrapBind t (NonRec binder rhs) = NonRec binder (mkTick t rhs)
         wrapBind t (Rec pairs)         = Rec (mapSnd (mkTick t) pairs)
-

@@ -1544,7 +1544,7 @@ newPolyBndrs dest_lvl
       ; return (env', new_bndrs) }
   where
     bndrs = map unTag sorted_bndrs
-    
+
     add_subst env (v, v') = extendIdSubst env v (mkVarApps (Var v') abs_vars)
     add_id    env (v, v') = extendVarEnv env v (v',abs_vars)
 
@@ -1966,7 +1966,7 @@ type FVM = Identity
 -- see Note [FVUp] for semantics of E, F, and E'
 data FVUp = FVUp {
   fvu_fvs :: DVarSet,  -- free vars of E
-  
+
   fvu_floats :: FIFloats, -- the floats, F
 
   fvu_silt :: FISilt, -- the things that did not float, E'

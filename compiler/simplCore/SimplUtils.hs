@@ -182,7 +182,7 @@ continuations, whereas floating values go outside of them.
 We might view the Simplifier's view of the program like this:
 
   Fv[E[Fj[e]]]
-  
+
 Here, Fv is the context containing the value floats in the environment, E is the
 continuation, Fj is the context with the join floats, and e is the expression
 being considered. While the value floats rise above the strict context, the join
@@ -716,7 +716,7 @@ lintCont hdr doc env e orig_cont
   where
     orig_ty = substTy env $ case e of Type ty -> typeKind ty; _ -> exprType e
     (fun, _) = collectArgs e
-    
+
     go :: OutType -> SimplCont -> Bool
     go ty (Stop ty' _)
       = check_ty (text "Stopped at") ty ty' True
@@ -759,15 +759,15 @@ lintCont hdr doc env e orig_cont
       = die (text "Not a function type:" <+> ppr (ai_type ai))
     go ty (TickIt _ k)
       = go ty k
-    
+
     check_ty msg exp act next
       = check (act `eqType` exp)
           (sep [msg <+> ppr act <> char ';', text "expected" <+> ppr exp])
           next
-    
+
     check cond msg next
       = if cond then next else die msg
-      
+
     die msg
       = pprPanic hdr $
         vcat [ text "Error in continuation"
