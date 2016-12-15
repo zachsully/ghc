@@ -811,6 +811,7 @@ tcInstDecl2 (InstInfo { iSpec = ispec, iBinds = ibinds })
                                   , ic_wanted = mkImplicWC sc_meth_implics
                                   , ic_status = IC_Unsolved
                                   , ic_binds  = dfun_ev_binds_var
+                                  , ic_needed = emptyVarSet
                                   , ic_env    = env
                                   , ic_info   = InstSkol }
 
@@ -1024,6 +1025,7 @@ checkInstConstraints thing_inside
                              , ic_wanted = wanted
                              , ic_status = IC_Unsolved
                              , ic_binds  = ev_binds_var
+                             , ic_needed = emptyVarSet
                              , ic_env    = env
                              , ic_info   = InstSkol }
 
@@ -1293,7 +1295,7 @@ tcMethods dfun_id clas tyvars dfun_ev_vars inst_tys
                                 [ getRuntimeRep "tcInstanceMethods.tc_default" meth_tau
                                 , meth_tau])
                               nO_METHOD_BINDING_ERROR_ID
-        error_msg dflags = L inst_loc (HsLit (HsStringPrim ""
+        error_msg dflags = L inst_loc (HsLit (HsStringPrim NoSourceText
                                               (unsafeMkByteString (error_string dflags))))
         meth_tau     = funResultTy (piResultTys (idType sel_id) inst_tys)
         error_string dflags = showSDoc dflags

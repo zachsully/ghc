@@ -27,6 +27,7 @@
 #include "Sanity.h"
 #include "Capability.h"
 #include "LdvProfile.h"
+#include "Hash.h"
 
 #include "sm/MarkWeak.h"
 
@@ -98,6 +99,61 @@ scavengeTSO (StgTSO *tso)
     tso->dirty = gct->failed_to_evac;
 
     gct->eager_promotion = saved_eager;
+}
+
+/* ----------------------------------------------------------------------------
+   Scavenging compact objects
+   ------------------------------------------------------------------------- */
+
+typedef struct {
+    // We must save gct when calling mapHashTable(), which is compiled
+    // without GCThread.h and so uses a different calling convention.
+    // See also GC.c:mark_root where we do a similar thing.
+    gc_thread *saved_gct;
+    HashTable *newHash;
+} MapHashData;
+
+static void
+evacuate_hash_entry(MapHashData *dat, StgWord key, const void *value)
+{
+    StgClosure *p = (StgClosure*)key;
+#ifdef THREADED_RTS
+    gc_thread *old_gct = gct;
+#endif
+
+    SET_GCT(dat->saved_gct);
+    evacuate(&p);
+    insertHashTable(dat->newHash, (StgWord)p, value);
+    SET_GCT(old_gct);
+}
+
+static void
+scavenge_compact(StgCompactNFData *str)
+{
+    bool saved_eager;
+    saved_eager = gct->eager_promotion;
+    gct->eager_promotion = false;
+
+    if (str->hash) {
+        MapHashData dat;
+        dat.saved_gct = gct;
+        HashTable *newHash = allocHashTable();
+        dat.newHash = newHash;
+        mapHashTable(str->hash, (void*)&dat, (MapHashFn)evacuate_hash_entry);
+        freeHashTable(str->hash, NULL);
+        str->hash = newHash;
+    }
+
+    debugTrace(DEBUG_compact,
+               "compact alive @%p, gen %d, %" FMT_Word " bytes",
+               str, Bdescr((P_)str)->gen_no, str->totalW * sizeof(W_))
+
+    gct->eager_promotion = saved_eager;
+    if (gct->failed_to_evac) {
+        ((StgClosure *)str)->header.info = &stg_COMPACT_NFDATA_DIRTY_info;
+    } else {
+        ((StgClosure *)str)->header.info = &stg_COMPACT_NFDATA_CLEAN_info;
+    }
 }
 
 /* -----------------------------------------------------------------------------
@@ -795,13 +851,6 @@ scavenge_block (bdescr *bd)
         p += sizeofW(StgTRecChunk);
         break;
       }
-
-    case COMPACT_NFDATA:
-        // CompactNFData blocks live in compact lists, which we don't
-        // scavenge, because there nothing to scavenge in them
-        // so we should never ever see them
-        barf("scavenge: found unexpected Compact structure");
-        break;
 
     default:
         barf("scavenge: unimplemented/strange closure type %d @ %p",
@@ -1557,6 +1606,10 @@ scavenge_one(StgPtr p)
 #endif
       break;
 
+    case COMPACT_NFDATA:
+        scavenge_compact((StgCompactNFData*)p);
+        break;
+
     default:
         barf("scavenge_one: strange object %d", (int)(info->type));
     }
@@ -1974,11 +2027,18 @@ scavenge_large (gen_workspace *ws)
         ws->todo_large_objects = bd->link;
 
         ACQUIRE_SPIN_LOCK(&ws->gen->sync);
-        dbl_link_onto(bd, &ws->gen->scavenged_large_objects);
-        ws->gen->n_scavenged_large_blocks += bd->blocks;
+        if (bd->flags & BF_COMPACT) {
+            dbl_link_onto(bd, &ws->gen->live_compact_objects);
+            StgCompactNFData *str = ((StgCompactNFDataBlock*)bd->start)->owner;
+            ws->gen->n_live_compact_blocks += str->totalW / BLOCK_SIZE_W;
+            p = (StgPtr)str;
+        } else {
+            dbl_link_onto(bd, &ws->gen->scavenged_large_objects);
+            ws->gen->n_scavenged_large_blocks += bd->blocks;
+            p = bd->start;
+        }
         RELEASE_SPIN_LOCK(&ws->gen->sync);
 
-        p = bd->start;
         if (scavenge_one(p)) {
             if (ws->gen->no > 0) {
                 recordMutableGen_GC((StgClosure *)p, ws->gen->no);

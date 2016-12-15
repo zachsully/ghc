@@ -102,6 +102,8 @@ initGeneration (generation *gen, int g)
     gen->n_new_large_words = 0;
     gen->compact_objects = NULL;
     gen->n_compact_blocks = 0;
+    gen->compact_blocks_in_import = NULL;
+    gen->n_compact_blocks_in_import = 0;
     gen->scavenged_large_objects = NULL;
     gen->n_scavenged_large_blocks = 0;
     gen->live_compact_objects = NULL;
@@ -1291,6 +1293,28 @@ calcNeeded (bool force_major, memcount *blocks_needed)
         *blocks_needed = needed;
     }
     return N;
+}
+
+StgWord calcTotalLargeObjectsW (void)
+{
+    uint32_t g;
+    StgWord totalW = 0;
+
+    for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
+        totalW += generations[g].n_large_words;
+    }
+    return totalW;
+}
+
+StgWord calcTotalCompactW (void)
+{
+    uint32_t g;
+    StgWord totalW = 0;
+
+    for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
+        totalW += generations[g].n_compact_blocks * BLOCK_SIZE_W;
+    }
+    return totalW;
 }
 
 /* ----------------------------------------------------------------------------

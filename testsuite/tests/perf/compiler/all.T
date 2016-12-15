@@ -767,7 +767,7 @@ test('T9872c',
 test('T9872d',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 506691240, 5),
+          [(wordsize(64), 478169352, 5),
           # 2014-12-18    796071864   Initally created
           # 2014-12-18    739189056   Reduce type families even more eagerly
           # 2015-01-07    687562440   TrieMap leaf compression
@@ -775,6 +775,8 @@ test('T9872d',
           # 2015-12-11    566134504   TypeInType; see #11196
           # 2016-02-08    534693648   Improved a bit by tyConRolesRepresentational
           # 2016-03-18    506691240   optimize Unify & zonking
+          # 2016-12-05    478169352   using tyConIsTyFamFree, I think, but only
+          #                           a 1% improvement 482 -> 478
            (wordsize(32), 264566040, 5)
           # some date     328810212
           # 2015-07-11    350369584
@@ -872,3 +874,37 @@ test('T12227',
      compile,
      # Use `-M1G` to prevent memory thrashing with ghc-8.0.1.
      ['-O2 -ddump-hi -ddump-to-file +RTS -M1G'])
+
+test('T12425',
+     [ only_ways(['optasm']),
+       compiler_stats_num_field('bytes allocated',
+          [(wordsize(64), 125831400, 5),
+          # initial:    125831400
+          ]),
+     ],
+     compile,
+     [''])
+
+test('T12234',
+     [ only_ways(['optasm']),
+       compiler_stats_num_field('bytes allocated',
+          [(wordsize(64), 72958288, 5),
+          # initial:    72958288
+          ]),
+     ],
+     compile,
+     [''])
+
+test('T12877',
+     [ stats_num_field('bytes allocated',
+          [(wordsize(64), 197582248, 5),
+          # initial:      197582248 (Linux)
+          ])
+     , compiler_stats_num_field('bytes allocated',
+          [(wordsize(64), 135979000, 5),
+          # initial:      135979000 (Linux)
+          ]),
+     ],
+     compile_and_run,
+     ['-O2'])
+

@@ -171,10 +171,13 @@ mkByteStringCLit :: Unique -> [Word8] -> (CmmLit, GenCmmDecl CmmStatics info stm
 -- We have to make a top-level decl for the string,
 -- and return a literal pointing to it
 mkByteStringCLit uniq bytes
-  = (CmmLabel lbl, CmmData sec $ Statics lbl [CmmString bytes])
+  = (CmmLabel lbl, CmmData (Section sec lbl)  $ Statics lbl [CmmString bytes])
   where
     lbl = mkStringLitLabel uniq
-    sec = Section ReadOnlyData lbl
+    -- This can not happen for String literals (as there \NUL is replaced by
+    -- C0 80). However, it can happen with Addr# literals.
+    sec = if 0 `elem` bytes then ReadOnlyData else CString
+
 mkDataLits :: Section -> CLabel -> [CmmLit] -> GenCmmDecl CmmStatics info stmt
 -- Build a data-segment data block
 mkDataLits section lbl lits
@@ -473,13 +476,13 @@ mkLiveness dflags (reg:regs)
 modifyGraph :: (Graph n C C -> Graph n' C C) -> GenCmmGraph n -> GenCmmGraph n'
 modifyGraph f g = CmmGraph {g_entry=g_entry g, g_graph=f (g_graph g)}
 
-toBlockMap :: CmmGraph -> BlockEnv CmmBlock
+toBlockMap :: CmmGraph -> LabelMap CmmBlock
 toBlockMap (CmmGraph {g_graph=GMany NothingO body NothingO}) = body
 
-ofBlockMap :: BlockId -> BlockEnv CmmBlock -> CmmGraph
+ofBlockMap :: BlockId -> LabelMap CmmBlock -> CmmGraph
 ofBlockMap entry bodyMap = CmmGraph {g_entry=entry, g_graph=GMany NothingO bodyMap NothingO}
 
-insertBlock :: CmmBlock -> BlockEnv CmmBlock -> BlockEnv CmmBlock
+insertBlock :: CmmBlock -> LabelMap CmmBlock -> LabelMap CmmBlock
 insertBlock block map =
   ASSERT(isNothing $ mapLookup id map)
   mapInsert id block map

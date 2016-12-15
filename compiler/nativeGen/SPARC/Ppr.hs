@@ -39,7 +39,7 @@ import PprBase
 import Cmm hiding (topInfoTable)
 import PprCmm()
 import CLabel
-import BlockId
+import Hoopl
 
 import Unique           ( Uniquable(..), pprUnique )
 import Outputable
@@ -87,7 +87,7 @@ dspSection :: Section
 dspSection = Section Text $
     panic "subsections-via-symbols doesn't combine with split-sections"
 
-pprBasicBlock :: BlockEnv CmmStatics -> NatBasicBlock Instr -> SDoc
+pprBasicBlock :: LabelMap CmmStatics -> NatBasicBlock Instr -> SDoc
 pprBasicBlock info_env (BasicBlock blockid instrs)
   = maybe_infotable $$
     pprLabel (mkAsmTempLabel (getUnique blockid)) $$
@@ -339,6 +339,9 @@ pprAlignForSection seg =
                         -> sLit ".align 8"
       UninitialisedData -> sLit ".align 8"
       ReadOnlyData16    -> sLit ".align 16"
+      -- TODO: This is copied from the ReadOnlyData case, but it can likely be
+      -- made more efficient.
+      CString           -> sLit ".align 8"
       OtherSection _    -> panic "PprMach.pprSectionHeader: unknown section")
 
 -- | Pretty print a data item.

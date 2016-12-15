@@ -30,12 +30,13 @@ module BasicTypes(
 
         FunctionOrData(..),
 
-        WarningTxt(..), StringLiteral(..),
+        WarningTxt(..), pprWarningTxtForMsg, StringLiteral(..),
 
         Fixity(..), FixityDirection(..),
         defaultFixity, maxPrecedence, minPrecedence,
         negateFixity, funTyFixity,
         compareFixity,
+        LexicalFixity(..),
 
         RecFlag(..), isRec, isNonRec, boolToRecFlag,
         Origin(..), isGenerated,
@@ -90,21 +91,24 @@ module BasicTypes(
         inlinePragmaSpec, inlinePragmaSat,
         inlinePragmaActivation, inlinePragmaRuleMatchInfo,
         setInlinePragmaActivation, setInlinePragmaRuleMatchInfo,
+        pprInline, pprInlineDebug,
 
         SuccessFlag(..), succeeded, failed, successIf,
 
         FractionalLit(..), negateFractionalLit, integralFractionalLit,
 
-        SourceText,
+        SourceText(..), pprWithSourceText,
 
-        IntWithInf, infinity, treatZeroAsInf, mkIntWithInf, intGtLimit
+        IntWithInf, infinity, treatZeroAsInf, mkIntWithInf, intGtLimit,
+
+        SpliceExplicitFlag(..)
    ) where
 
 import FastString
 import Outputable
 import SrcLoc ( Located,unLoc )
 import StaticFlags( opt_PprStyle_Debug )
-import Data.Data hiding (Fixity)
+import Data.Data hiding (Fixity, Prefix, Infix)
 import Data.Function (on)
 
 {-
@@ -318,6 +322,9 @@ data StringLiteral = StringLiteral
 instance Eq StringLiteral where
   (StringLiteral _ a) == (StringLiteral _ b) = a == b
 
+instance Outputable StringLiteral where
+  ppr sl = pprWithSourceText (sl_st sl) (ftext $ sl_fs sl)
+
 -- | Warning Text
 --
 -- reason/explanation from a WARNING or DEPRECATED pragma
@@ -328,11 +335,30 @@ data WarningTxt = WarningTxt (Located SourceText)
     deriving (Eq, Data)
 
 instance Outputable WarningTxt where
-    ppr (WarningTxt    _ ws)
-                         = doubleQuotes (vcat (map (ftext . sl_fs . unLoc) ws))
-    ppr (DeprecatedTxt _ ds)
-                         = text "Deprecated:" <+>
-                           doubleQuotes (vcat (map (ftext . sl_fs . unLoc) ds))
+    ppr (WarningTxt    lsrc ws)
+      = case unLoc lsrc of
+          NoSourceText   -> pp_ws ws
+          SourceText src -> text src <+> pp_ws ws <+> text "#-}"
+
+    ppr (DeprecatedTxt lsrc  ds)
+      = case unLoc lsrc of
+          NoSourceText   -> pp_ws ds
+          SourceText src -> text src <+> pp_ws ds <+> text "#-}"
+
+pp_ws :: [Located StringLiteral] -> SDoc
+pp_ws [l] = ppr $ unLoc l
+pp_ws ws
+  = text "["
+    <+> vcat (punctuate comma (map (ppr . unLoc) ws))
+    <+> text "]"
+
+
+pprWarningTxtForMsg :: WarningTxt -> SDoc
+pprWarningTxtForMsg (WarningTxt    _ ws)
+                     = doubleQuotes (vcat (map (ftext . sl_fs . unLoc) ws))
+pprWarningTxtForMsg (DeprecatedTxt _ ds)
+                     = text "Deprecated:" <+>
+                       doubleQuotes (vcat (map (ftext . sl_fs . unLoc) ds))
 
 {-
 ************************************************************************
@@ -381,12 +407,12 @@ maxPrecedence = 9
 minPrecedence = 0
 
 defaultFixity :: Fixity
-defaultFixity = Fixity (show maxPrecedence) maxPrecedence InfixL
+defaultFixity = Fixity NoSourceText maxPrecedence InfixL
 
 negateFixity, funTyFixity :: Fixity
 -- Wired-in fixities
-negateFixity = Fixity "6" 6 InfixL  -- Fixity of unary negate
-funTyFixity  = Fixity "0" 0 InfixR  -- Fixity of '->'
+negateFixity = Fixity NoSourceText 6 InfixL  -- Fixity of unary negate
+funTyFixity  = Fixity NoSourceText 0 InfixR  -- Fixity of '->'
 
 {-
 Consider
@@ -413,6 +439,15 @@ compareFixity (Fixity _ prec1 dir1) (Fixity _ prec2 dir2)
     right        = (False, True)
     left         = (False, False)
     error_please = (True,  False)
+
+-- |Captures the fixity of declarations as they are parsed. This is not
+-- necessarily the same as the fixity declaration, as the normal fixity may be
+-- overridden using parens or backticks.
+data LexicalFixity = Prefix | Infix deriving (Typeable,Data,Eq)
+
+instance Outputable LexicalFixity where
+  ppr Prefix = text "Prefix"
+  ppr Infix  = text "Infix"
 
 {-
 ************************************************************************
@@ -519,18 +554,19 @@ instance Outputable Origin where
 -- | Which technique the user explicitly requested when deriving an instance.
 data DerivStrategy
   -- See Note [Deriving strategies] in TcDeriv
-  = DerivStock    -- ^ GHC's \"standard\" strategy, which is to implement a
-                  --   custom instance for the data type. This only works for
-                  --   certain types that GHC knows about (e.g., 'Eq', 'Show',
-                  --   'Functor' when @-XDeriveFunctor@ is enabled, etc.)
-  | DerivAnyclass -- ^ @-XDeriveAnyClass@
-  | DerivNewtype  -- ^ @-XGeneralizedNewtypeDeriving@
+  = StockStrategy    -- ^ GHC's \"standard\" strategy, which is to implement a
+                     --   custom instance for the data type. This only works
+                     --   for certain types that GHC knows about (e.g., 'Eq',
+                     --   'Show', 'Functor' when @-XDeriveFunctor@ is enabled,
+                     --   etc.)
+  | AnyclassStrategy -- ^ @-XDeriveAnyClass@
+  | NewtypeStrategy  -- ^ @-XGeneralizedNewtypeDeriving@
   deriving (Eq, Data)
 
 instance Outputable DerivStrategy where
-    ppr DerivStock    = text "stock"
-    ppr DerivAnyclass = text "anyclass"
-    ppr DerivNewtype  = text "newtype"
+    ppr StockStrategy    = text "stock"
+    ppr AnyclassStrategy = text "anyclass"
+    ppr NewtypeStrategy  = text "newtype"
 
 {-
 ************************************************************************
@@ -662,7 +698,7 @@ pprSafeOverlap False = empty
 ************************************************************************
 -}
 
-data TyPrec   -- See Note [Prededence in types]
+data TyPrec   -- See Note [Precedence in types] in TyCoRep.hs
   = TopPrec         -- No parens
   | FunPrec         -- Function args; no parens for tycon apps
   | TyOpPrec        -- Infix operator
@@ -985,8 +1021,21 @@ For OverLitVal
   HsIsString      "\x41nd" == "And"
 -}
 
-type SourceText = String -- Note [Literal source text],[Pragma source text]
+ -- Note [Literal source text],[Pragma source text]
+data SourceText = SourceText String
+                | NoSourceText -- ^ For when code is generated, e.g. TH,
+                               -- deriving. The pretty printer will then make
+                               -- its own representation of the item.
+                deriving (Data, Show, Eq )
 
+instance Outputable SourceText where
+  ppr (SourceText s) = text "SourceText" <+> text s
+  ppr NoSourceText   = text "NoSourceText"
+
+-- | Special combinator for showing string literals.
+pprWithSourceText :: SourceText -> SDoc -> SDoc
+pprWithSourceText NoSourceText     d = d
+pprWithSourceText (SourceText src) _ = text src
 
 {-
 ************************************************************************
@@ -1123,7 +1172,7 @@ isEmptyInlineSpec _               = False
 
 defaultInlinePragma, alwaysInlinePragma, neverInlinePragma, dfunInlinePragma
   :: InlinePragma
-defaultInlinePragma = InlinePragma { inl_src = "{-# INLINE"
+defaultInlinePragma = InlinePragma { inl_src = SourceText "{-# INLINE"
                                    , inl_act = AlwaysActive
                                    , inl_rule = FunLike
                                    , inl_inline = EmptyInlineSpec
@@ -1181,8 +1230,8 @@ setInlinePragmaRuleMatchInfo :: InlinePragma -> RuleMatchInfo -> InlinePragma
 setInlinePragmaRuleMatchInfo prag info = prag { inl_rule = info }
 
 instance Outputable Activation where
-   ppr AlwaysActive       = brackets (text "ALWAYS")
-   ppr NeverActive        = brackets (text "NEVER")
+   ppr AlwaysActive       = empty
+   ppr NeverActive        = brackets (text "~")
    ppr (ActiveBefore _ n) = brackets (char '~' <> int n)
    ppr (ActiveAfter  _ n) = brackets (int n)
 
@@ -1197,10 +1246,21 @@ instance Outputable InlineSpec where
    ppr EmptyInlineSpec = empty
 
 instance Outputable InlinePragma where
-  ppr (InlinePragma { inl_inline = inline, inl_act = activation
-                    , inl_rule = info, inl_sat = mb_arity })
-    = ppr inline <> pp_act inline activation <+> pp_sat <+> pp_info
+  ppr = pprInline
+
+pprInline :: InlinePragma -> SDoc
+pprInline = pprInline' True
+
+pprInlineDebug :: InlinePragma -> SDoc
+pprInlineDebug = pprInline' False
+
+pprInline' :: Bool -> InlinePragma -> SDoc
+pprInline' emptyInline (InlinePragma { inl_inline = inline, inl_act = activation
+                                    , inl_rule = info, inl_sat = mb_arity })
+    = pp_inl inline <> pp_act inline activation <+> pp_sat <+> pp_info
     where
+      pp_inl x = if emptyInline then empty else ppr x
+
       pp_act Inline   AlwaysActive = empty
       pp_act NoInline NeverActive  = empty
       pp_act _        act          = ppr act
@@ -1362,3 +1422,8 @@ treatZeroAsInf n = Int n
 -- | Inject any integer into an 'IntWithInf'
 mkIntWithInf :: Int -> IntWithInf
 mkIntWithInf = Int
+
+data SpliceExplicitFlag
+          = ExplicitSplice | -- ^ <=> $(f x y)
+            ImplicitSplice   -- ^ <=> f x y,  i.e. a naked top level expression
+    deriving Data

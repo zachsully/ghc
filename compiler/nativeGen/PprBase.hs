@@ -98,15 +98,19 @@ pprGNUSectionHeader t suffix = sdocWithDynFlags $ \dflags ->
   let splitSections = gopt Opt_SplitSections dflags
       subsection | splitSections = char '.' <> ppr suffix
                  | otherwise     = empty
-  in  text ".section " <> ptext header <> subsection
+  in  text ".section " <> ptext (header dflags) <> subsection
   where
-    header = case t of
+    header dflags = case t of
       Text -> sLit ".text"
       Data -> sLit ".data"
       ReadOnlyData -> sLit ".rodata"
       RelocatableReadOnlyData -> sLit ".data.rel.ro"
       UninitialisedData -> sLit ".bss"
       ReadOnlyData16 -> sLit ".rodata.cst16"
+      CString
+        | OSMinGW32 <- platformOS (targetPlatform dflags)
+          -> sLit ".rdata,\"dr\""
+        | otherwise -> sLit ".rodata.str1.1,\"aMS\",@progbits,1"
       OtherSection _ ->
         panic "PprBase.pprGNUSectionHeader: unknown section type"
 
@@ -119,6 +123,7 @@ pprXcoffSectionHeader t = text $ case t of
      ReadOnlyData            -> ".csect .text[PR] # ReadOnlyData"
      RelocatableReadOnlyData -> ".csect .text[PR] # RelocatableReadOnlyData"
      ReadOnlyData16          -> ".csect .text[PR] # ReadOnlyData16"
+     CString                 -> ".csect .text[PR] # CString"
      UninitialisedData       -> ".csect .data[BS]"
      OtherSection _          ->
        panic "PprBase.pprXcoffSectionHeader: unknown section type"
@@ -132,5 +137,6 @@ pprDarwinSectionHeader t =
      RelocatableReadOnlyData -> sLit ".const_data"
      UninitialisedData -> sLit ".data"
      ReadOnlyData16 -> sLit ".const"
+     CString -> sLit ".section\t__TEXT,__cstring,cstring_literals"
      OtherSection _ ->
        panic "PprBase.pprDarwinSectionHeader: unknown section type"

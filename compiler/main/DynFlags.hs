@@ -28,6 +28,7 @@ module DynFlags (
         FatalMessager, LogAction, FlushOut(..), FlushErr(..),
         ProfAuto(..),
         glasgowExtsFlags,
+        warningGroups, warningHierarchies,
         dopt, dopt_set, dopt_unset,
         gopt, gopt_set, gopt_unset, setGeneralFlag', unSetGeneralFlag',
         wopt, wopt_set, wopt_unset,
@@ -220,7 +221,6 @@ import System.Console.Terminfo (SetupTermError, Terminal, getCapability,
                                 setupTermFromEnv, termColors)
 import System.Posix (queryTerminal, stdError)
 #elif defined mingw32_HOST_OS
-import Foreign (Ptr, with, peek)
 import System.Environment (lookupEnv)
 import qualified Graphics.Win32 as Win32
 #endif
@@ -232,6 +232,13 @@ import qualified Data.IntSet as IntSet
 
 import GHC.Foreign (withCString, peekCString)
 import qualified GHC.LanguageExtensions as LangExt
+
+#if __GLASGOW_HASKELL__ >= 709
+import Foreign
+#else
+import Foreign.Safe
+#endif
+
 
 -- Note [Updating flag description in the User's Guide]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -446,6 +453,7 @@ data GeneralFlag
    | Opt_IgnoreAsserts
    | Opt_DoEtaReduction
    | Opt_CaseMerge
+   | Opt_CaseFolding                    -- Constant folding through case-expressions
    | Opt_UnboxStrictFields
    | Opt_UnboxSmallStrictFields
    | Opt_DictsCheap
@@ -1816,7 +1824,7 @@ defaultLogAction dflags reason severity srcSpan style msg
       SevInfo        -> printErrs msg style
       SevFatal       -> printErrs msg style
       _              -> do hPutChar stderr '\n'
-                           printErrs message style
+                           printErrs message (setStyleColoured True style)
                            -- careful (#2302): printErrs prints in UTF-8,
                            -- whereas converting to string first and using
                            -- hPutStr would just emit the low 8 bits of
@@ -3620,6 +3628,7 @@ fFlagsDeps = [
   flagSpec "building-cabal-package"           Opt_BuildingCabalPackage,
   flagSpec "call-arity"                       Opt_CallArity,
   flagSpec "case-merge"                       Opt_CaseMerge,
+  flagSpec "case-folding"                     Opt_CaseFolding,
   flagSpec "cmm-elim-common-blocks"           Opt_CmmElimCommonBlocks,
   flagSpec "cmm-sink"                         Opt_CmmSink,
   flagSpec "cse"                              Opt_CSE,
@@ -4083,6 +4092,7 @@ optLevelFlags -- see Note [Documenting optimisation flags]
 
     , ([1,2],   Opt_CallArity)
     , ([1,2],   Opt_CaseMerge)
+    , ([1,2],   Opt_CaseFolding)
     , ([1,2],   Opt_CmmElimCommonBlocks)
     , ([1,2],   Opt_CmmSink)
     , ([1,2],   Opt_CSE)
@@ -5209,7 +5219,15 @@ defaultGlobalDynFlags =
   where
     settings = panic "v_unsafeGlobalDynFlags: not initialised"
 
+#if STAGE < 2
 GLOBAL_VAR(v_unsafeGlobalDynFlags, defaultGlobalDynFlags, DynFlags)
+#else
+SHARED_GLOBAL_VAR( v_unsafeGlobalDynFlags
+                 , getOrSetLibHSghcGlobalDynFlags
+                 , "getOrSetLibHSghcGlobalDynFlags"
+                 , defaultGlobalDynFlags
+                 , DynFlags )
+#endif
 
 unsafeGlobalDynFlags :: DynFlags
 unsafeGlobalDynFlags = unsafePerformIO $ readIORef v_unsafeGlobalDynFlags

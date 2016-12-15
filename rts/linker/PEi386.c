@@ -68,10 +68,12 @@ static UChar *cstring_from_COFF_symbol_name(
     UChar* name,
     UChar* strtab);
 
+#if defined(x86_64_HOST_ARCH)
 static size_t makeSymbolExtra_PEi386(
     ObjectCode* oc,
     size_t s,
     char* symbol);
+#endif
 
 static void addDLLHandle(
     pathchar* dll_name,
@@ -1156,7 +1158,7 @@ ocGetNames_PEi386 ( ObjectCode* oc )
       if (addr != NULL || isWeak == HS_BOOL_TRUE) {
 
          /* debugBelch("addSymbol %p `%s' Weak:%lld \n", addr, sname, isWeak); */
-         IF_DEBUG(linker, debugBelch("addSymbol %p `%s'\n", addr,sname);)
+         IF_DEBUG(linker, debugBelch("addSymbol %p `%s'\n", addr,sname));
          ASSERT(i >= 0 && i < oc->n_symbols);
          /* cstring_from_COFF_symbol_name always succeeds. */
          oc->symbols[i] = (SymbolName*)sname;

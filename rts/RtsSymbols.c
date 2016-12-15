@@ -70,6 +70,27 @@
 #define RTS_WIN64_ONLY(X) /**/
 #endif
 
+/*
+ * Note [Symbols for MinGW's printf]
+ * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ *
+ * The printf offered by Microsoft's libc implementation, msvcrt, is quite
+ * incomplete, lacking support for even %ull. Consequently mingw-w64 offers its
+ * own implementation which we enable. However, to be thread-safe the
+ * implementation uses _lock_file. This would be fine except msvcrt.dll doesn't
+ * export _lock_file, only numbered versions do (e.g. msvcrt90.dll).
+ *
+ * To work around this mingw-w64 packages a static archive of msvcrt which
+ * includes their own implementation of _lock_file. However, this means that
+ * the archive contains things which the dynamic library does not; consequently
+ * we need to ensure that the runtime linker provides this symbol.
+ *
+ * It's all just so terrible.
+ *
+ * See also:
+ * https://sourceforge.net/p/mingw-w64/wiki2/gnu%20printf/
+ * https://sourceforge.net/p/mingw-w64/discussion/723797/thread/55520785/
+ */
 #define RTS_MINGW_ONLY_SYMBOLS                           \
       SymI_HasProto(stg_asyncReadzh)                     \
       SymI_HasProto(stg_asyncWritezh)                    \
@@ -84,7 +105,10 @@
       RTS_WIN32_ONLY(SymI_HasProto(_imp___environ))      \
       RTS_WIN64_ONLY(SymI_HasProto(__imp__environ))      \
       RTS_WIN32_ONLY(SymI_HasProto(_imp___iob))          \
-      RTS_WIN64_ONLY(SymI_HasProto(__iob_func))
+      RTS_WIN64_ONLY(SymI_HasProto(__iob_func))          \
+      /* see Note [Symbols for MinGW's printf] */        \
+      SymI_HasProto(_lock_file)                          \
+      SymI_HasProto(_unlock_file)
 
 #define RTS_MINGW_COMPAT_SYMBOLS                         \
       SymI_HasProto_deprecated(access)                   \
@@ -533,8 +557,9 @@
       SymI_HasProto(stg_catchSTMzh)                                     \
       SymI_HasProto(stg_checkzh)                                        \
       SymI_HasProto(stg_clearCCSzh)                                     \
+      SymI_HasProto(stg_compactAddWithSharingzh)                        \
+      SymI_HasProto(stg_compactAddzh)                                   \
       SymI_HasProto(stg_compactNewzh)                                   \
-      SymI_HasProto(stg_compactAppendzh)                                \
       SymI_HasProto(stg_compactResizzezh)                               \
       SymI_HasProto(stg_compactContainszh)                              \
       SymI_HasProto(stg_compactContainsAnyzh)                           \
@@ -542,6 +567,7 @@
       SymI_HasProto(stg_compactGetNextBlockzh)                          \
       SymI_HasProto(stg_compactAllocateBlockzh)                         \
       SymI_HasProto(stg_compactFixupPointerszh)                         \
+      SymI_HasProto(stg_compactSizzezh)                                 \
       SymI_HasProto(closure_flags)                                      \
       SymI_HasProto(cmp_thread)                                         \
       SymI_HasProto(createAdjustor)                                     \
@@ -567,8 +593,13 @@
       SymI_HasProto(getOrSetSystemTimerThreadEventManagerStore)         \
       SymI_HasProto(getOrSetSystemTimerThreadIOManagerThreadStore)      \
       SymI_HasProto(getOrSetLibHSghcFastStringTable)                    \
-      SymI_HasProto(getGCStats)                                         \
-      SymI_HasProto(getGCStatsEnabled)                                  \
+      SymI_HasProto(getRTSStats)                                        \
+      SymI_HasProto(getRTSStatsEnabled)                                 \
+      SymI_HasProto(getOrSetLibHSghcPersistentLinkerState)              \
+      SymI_HasProto(getOrSetLibHSghcInitLinkerDone)                     \
+      SymI_HasProto(getOrSetLibHSghcGlobalDynFlags)                     \
+      SymI_HasProto(getOrSetLibHSghcStaticOptions)                      \
+      SymI_HasProto(getOrSetLibHSghcStaticOptionsReady)                 \
       SymI_HasProto(genericRaise)                                       \
       SymI_HasProto(getProgArgv)                                        \
       SymI_HasProto(getFullProgArgv)                                    \

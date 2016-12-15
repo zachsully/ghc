@@ -421,12 +421,6 @@ closure_sizeW_ (const StgClosure *p, const StgInfoTable *info)
         return bco_sizeW((StgBCO *)p);
     case TREC_CHUNK:
         return sizeofW(StgTRecChunk);
-    case COMPACT_NFDATA:
-        // Nothing should ever call closure_sizeW() on a StgCompactNFData
-        // because CompactNFData is a magical object/list-of-objects that
-        // requires special paths pretty much everywhere in the GC
-        barf("closure_sizeW() called on a StgCompactNFData. "
-             "This should never happen.");
     default:
         return sizeW_fromITBL(info);
     }
@@ -526,8 +520,17 @@ INLINE_HEADER StgWord8 *mutArrPtrsCard (StgMutArrPtrs *a, W_ n)
 
    -------------------------------------------------------------------------- */
 
-#define ZERO_SLOP_FOR_LDV_PROF     (defined(PROFILING))
-#define ZERO_SLOP_FOR_SANITY_CHECK (defined(DEBUG) && !defined(THREADED_RTS))
+#if defined(PROFILING)
+#define ZERO_SLOP_FOR_LDV_PROF 1
+#else
+#define ZERO_SLOP_FOR_LDV_PROF 0
+#endif
+
+#if defined(DEBUG) && !defined(THREADED_RTS)
+#define ZERO_SLOP_FOR_SANITY_CHECK 1
+#else
+#define ZERO_SLOP_FOR_SANITY_CHECK 0
+#endif
 
 #if ZERO_SLOP_FOR_LDV_PROF || ZERO_SLOP_FOR_SANITY_CHECK
 #define OVERWRITING_CLOSURE(c) overwritingClosure(c)

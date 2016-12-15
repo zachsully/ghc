@@ -34,6 +34,8 @@ module Module
         unitIdKey,
         IndefUnitId(..),
         IndefModule(..),
+        indefUnitIdToUnitId,
+        indefModuleToModule,
         InstalledUnitId(..),
         toInstalledUnitId,
         ShHoleSubst,
@@ -619,6 +621,20 @@ newIndefUnitId cid insts =
      fs = hashUnitId cid sorted_insts
      sorted_insts = sortBy (stableModuleNameCmp `on` fst) insts
 
+-- | Injects an 'IndefUnitId' (indefinite library which
+-- was on-the-fly instantiated) to a 'UnitId' (either
+-- an indefinite or definite library).
+indefUnitIdToUnitId :: DynFlags -> IndefUnitId -> UnitId
+indefUnitIdToUnitId dflags iuid =
+    -- NB: suppose that we want to compare the indefinite
+    -- unit id p[H=impl:H] against p+abcd (where p+abcd
+    -- happens to be the existing, installed version of
+    -- p[H=impl:H].  If we *only* wrap in p[H=impl:H]
+    -- IndefiniteUnitId, they won't compare equal; only
+    -- after improvement will the equality hold.
+    improveUnitId (getPackageConfigMap dflags) $
+        IndefiniteUnitId iuid
+
 data IndefModule = IndefModule {
         indefModuleUnitId :: IndefUnitId,
         indefModuleName   :: ModuleName
@@ -627,6 +643,12 @@ data IndefModule = IndefModule {
 instance Outputable IndefModule where
   ppr (IndefModule uid m) =
     ppr uid <> char ':' <> ppr m
+
+-- | Injects an 'IndefModule' to 'Module' (see also
+-- 'indefUnitIdToUnitId'.
+indefModuleToModule :: DynFlags -> IndefModule -> Module
+indefModuleToModule dflags (IndefModule iuid mod_name) =
+    mkModule (indefUnitIdToUnitId dflags iuid) mod_name
 
 -- | An installed unit identifier identifies a library which has
 -- been installed to the package database.  These strings are
@@ -690,21 +712,10 @@ instance Outputable IndefUnitId where
       ppr cid <>
         (if not (null insts) -- pprIf
           then
-            -- TODO: Print an instantiation if (1) we would not have qualified
-            -- the module and (2) the module name and module agree
-            let -- is_wanted (mod_name, mod) = qualModule sty mod
-                --                         || mod_name /= moduleName mod
-                (wanted, unwanted) = (insts, [])
-                    {-
-                    -- This was more annoying than helpful
-                    | debugStyle sty = (insts, [])
-                    | otherwise = partition is_wanted insts
-                    -}
-            in brackets (hsep
+            brackets (hcat
                 (punctuate comma $
                     [ ppr modname <> text "=" <> ppr m
-                    | (modname, m) <- wanted] ++
-                    if not (null unwanted) then [text "..."] else []))
+                    | (modname, m) <- insts]))
           else empty)
      where
       cid   = indefUnitIdComponentId uid

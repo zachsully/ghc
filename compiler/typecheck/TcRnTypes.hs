@@ -87,7 +87,7 @@ module TcRnTypes(
         isDroppableDerivedLoc, insolubleImplic,
         arisesFromGivens,
 
-        Implication(..), ImplicStatus(..), isInsolubleStatus,
+        Implication(..), ImplicStatus(..), isInsolubleStatus, isSolvedStatus,
         SubGoalDepth, initialSubGoalDepth, maxSubGoalDepth,
         bumpSubGoalDepth, subGoalDepthExceeded,
         CtLoc(..), ctLocSpan, ctLocEnv, ctLocLevel, ctLocOrigin,
@@ -1740,8 +1740,22 @@ tyCoFVsOfBag tvs_of = foldrBag (unionFV . tvs_of) emptyFV
 
 --------------------------
 dropDerivedSimples :: Cts -> Cts
-dropDerivedSimples simples = filterBag isWantedCt simples
-                             -- simples are all Wanted or Derived
+-- Drop all Derived constraints, but make [W] back into [WD],
+-- so that if we re-simplify these constraints we will get all
+-- the right derived constraints re-generated.  Forgetting this
+-- step led to #12936
+dropDerivedSimples simples = mapMaybeBag dropDerivedCt simples
+
+dropDerivedCt :: Ct -> Maybe Ct
+dropDerivedCt ct
+  = case ctEvFlavour ev of
+      Wanted WOnly -> Just (ct { cc_ev = ev_wd })
+      Wanted _     -> Just ct
+      _            -> ASSERT( isDerivedCt ct ) Nothing
+                      -- simples are all Wanted or Derived
+  where
+    ev    = ctEvidence ct
+    ev_wd = ev { ctev_nosh = WDeriv }
 
 dropDerivedInsols :: Cts -> Cts
 -- See Note [Dropping derived constraints]
@@ -2087,6 +2101,10 @@ dropDerivedWC wc@(WC { wc_simple = simples, wc_insol = insols })
        , wc_insol  = dropDerivedInsols insols }
     -- The wc_impl implications are already (recursively) filtered
 
+isSolvedStatus :: ImplicStatus -> Bool
+isSolvedStatus (IC_Solved {}) = True
+isSolvedStatus _              = False
+
 isInsolubleStatus :: ImplicStatus -> Bool
 isInsolubleStatus IC_Insoluble = True
 isInsolubleStatus _            = False
@@ -2160,12 +2178,16 @@ data Implication
       ic_binds  :: EvBindsVar,    -- Points to the place to fill in the
                                   -- abstraction and bindings.
 
+      ic_needed   :: VarSet,      -- Union of the ics_need fields of any /discarded/
+                                  -- solved implications in ic_wanted
+
       ic_status   :: ImplicStatus
     }
 
 data ImplicStatus
   = IC_Solved     -- All wanteds in the tree are solved, all the way down
-       { ics_need :: VarSet     -- Evidence variables needed by this implication
+       { ics_need :: VarSet     -- Evidence variables bound further out,
+                                -- but needed by this solved implication
        , ics_dead :: [EvVar] }  -- Subset of ic_given that are not needed
          -- See Note [Tracking redundant constraints] in TcSimplify
 
@@ -2177,7 +2199,7 @@ instance Outputable Implication where
   ppr (Implic { ic_tclvl = tclvl, ic_skols = skols
               , ic_given = given, ic_no_eqs = no_eqs
               , ic_wanted = wanted, ic_status = status
-              , ic_binds = binds, ic_info = info })
+              , ic_binds = binds, ic_needed = needed , ic_info = info })
    = hang (text "Implic" <+> lbrace)
         2 (sep [ text "TcLevel =" <+> ppr tclvl
                , text "Skolems =" <+> pprTyVars skols
@@ -2186,6 +2208,7 @@ instance Outputable Implication where
                , hang (text "Given =")  2 (pprEvVars given)
                , hang (text "Wanted =") 2 (ppr wanted)
                , text "Binds =" <+> ppr binds
+               , text "Needed =" <+> ppr needed
                , pprSkolInfo info ] <+> rbrace)
 
 instance Outputable ImplicStatus where
