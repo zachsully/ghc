@@ -10,7 +10,7 @@ module CoreMonad (
     -- * Configuration of the core-to-core passes
     CoreToDo(..), runWhen, runMaybe,
     SimplifierMode(..),
-    FloatOutSwitches(..), FinalPassSwitches(..),
+    FloatOutSwitches(..),
     pprPassDetails,
 
     -- * Plugins
@@ -204,49 +204,14 @@ data FloatOutSwitches = FloatOutSwitches {
                                    --    iff it has no free vars
 
   floatOutConstants :: Bool,       -- ^ True <=> float constants to top level,
-                                   --            even if they do not escape a
-                                   --            lambda
-  floatOutOverSatApps :: Bool,     -- ^ True <=> float out over-saturated
-                                   --            applications based on arity
-                                   --            information.
-                                   -- See Note [Floating over-saturated
-                                   -- applications] in SetLevels
-  floatToTopLevelOnly :: Bool,     -- ^ Allow floating to the top level only.
-  finalPass_        :: Maybe FinalPassSwitches
-  -- ^ Nothing <=> not the final pass, behave like normal
+                                   --            even if they do not escape a lambda
+  floatOutOverSatApps :: Bool,
+                             -- ^ True <=> float out over-saturated applications
+                             --            based on arity information.
+                             -- See Note [Floating over-saturated applications]
+                             -- in SetLevels
+  floatToTopLevelOnly :: Bool      -- ^ Allow floating to the top level only.
   }
-
-data FinalPassSwitches = FinalPassSwitches
-  { fps_rec            :: !(Maybe Int)
-  -- ^ used as floatOutLambdas for recursive lambdas
-  , fps_absUnsatVar    :: !Bool
-  -- ^ abstract over undersaturated applied variables?
-  , fps_absSatVar      :: !Bool
-  -- ^ abstract over exactly saturated applied variables?
-  , fps_absOversatVar  :: !Bool
-  --   Doing so might lose some fast entries
-  -- ^ abstracting over oversaturated applied variables?
-  , fps_createPAPs     :: !Bool
-  -- ^ allowed to float functions occuring unapplied
-  , fps_cloGrowth    :: !(Maybe Int)
-  -- ^ limits the number of free variables added to closures using the floated
-  --   function
-  , fps_ifInClo        :: !(Maybe Int)
-  -- ^ limits the number of abstracted variables allowed if the binder occurs in
-  --   a closure
-  , fps_stabilizeFirst   :: !Bool
-  -- ^ stabilizes an unstable unfolding before floating things out of
-  -- it, since floating out precludes specialization at the call-site
-  , fps_cloGrowthInLam :: !(Maybe Int)
-  -- ^ disallow the floating of a binding if it occurs in closure that
-  -- is allocated inside a lambda
-  , fps_trace             :: !Bool
-  , fps_strictness        :: !Bool
-  , fps_floatNullaryJoins :: !Bool
-  , fps_oneShot           :: !Bool
-  , fps_leaveJoins        :: !Bool
-  }
-
 instance Outputable FloatOutSwitches where
     ppr = pprFloatOutSwitches
 
@@ -256,22 +221,7 @@ pprFloatOutSwitches sw
      sep $ punctuate comma $
      [ text "Lam ="    <+> ppr (floatOutLambdas sw)
      , text "Consts =" <+> ppr (floatOutConstants sw)
-     , text "OverSatApps ="   <+> ppr (floatOutOverSatApps sw)
-     , ptext (sLit "Late =")   <+> ppr (finalPass_ sw)])
-
-instance Outputable FinalPassSwitches where
-    ppr = pprFinalPassSwitches
-
-pprFinalPassSwitches :: FinalPassSwitches -> SDoc
-pprFinalPassSwitches sw = sep $ punctuate comma $
-  [ ptext (sLit "Rec =")    <+> ppr (fps_rec sw)
-  , ptext (sLit "AbsUnsatVar =") <+> ppr (fps_absUnsatVar sw)
-  , ptext (sLit "AbsSatVar =") <+> ppr (fps_absSatVar sw)
-  , ptext (sLit "AbsOversatVar =") <+> ppr (fps_absOversatVar sw)
-  , ptext (sLit "ClosureGrowth =") <+> ppr (fps_cloGrowth sw)
-  , ptext (sLit "ClosureGrowthInLam =") <+> ppr (fps_cloGrowthInLam sw)
-  , ptext (sLit "StabilizeFirst =") <+> ppr (fps_stabilizeFirst sw)
-  ]
+     , text "OverSatApps ="   <+> ppr (floatOutOverSatApps sw) ])
 
 -- The core-to-core pass ordering is derived from the DynFlags:
 runWhen :: Bool -> CoreToDo -> CoreToDo

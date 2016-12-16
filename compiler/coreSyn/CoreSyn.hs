@@ -58,7 +58,7 @@ module CoreSyn (
         maybeUnfoldingTemplate, otherCons,
         isValueUnfolding, isEvaldUnfolding, isCheapUnfolding,
         isExpandableUnfolding, isConLikeUnfolding, isCompulsoryUnfolding,
-        isStableUnfolding, isUnstableUnfolding,
+        isStableUnfolding,
         isClosedUnfolding, hasSomeUnfolding,
         isBootUnfolding,
         canUnfold, neverUnfoldGuidance, isStableSource,
@@ -1268,10 +1268,6 @@ isStableUnfolding :: Unfolding -> Bool
 isStableUnfolding (CoreUnfolding { uf_src = src }) = isStableSource src
 isStableUnfolding (DFunUnfolding {})               = True
 isStableUnfolding _                                = False
-
-isUnstableUnfolding :: Unfolding -> Bool
-isUnstableUnfolding (CoreUnfolding { uf_src = src }) = not (isStableSource src)
-isUnstableUnfolding _                                = False
 
 isClosedUnfolding :: Unfolding -> Bool          -- No free variables
 isClosedUnfolding (CoreUnfolding {}) = False

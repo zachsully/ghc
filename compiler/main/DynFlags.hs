@@ -399,7 +399,6 @@ data DumpFlag
    | Opt_D_dump_hi_diffs
    | Opt_D_dump_mod_cycles
    | Opt_D_dump_mod_map
-   | Opt_D_dump_late_float
    | Opt_D_dump_view_pattern_commoning
    | Opt_D_verbose_core2core
    | Opt_D_dump_debug
@@ -476,23 +475,6 @@ data GeneralFlag
    | Opt_Loopification                  -- See Note [Self-recursive tail calls]
    | Opt_CprAnal
    | Opt_WorkerWrapper
-
-   | Opt_LLF        -- ^ Enable the late lambda lift pass
-   | Opt_LLF_AbsUnsat    -- ^ allowed to abstract undersaturated applied
-                         --   let-bound variables?
-   | Opt_LLF_AbsSat      -- ^ allowed to abstract      saturated applied
-                         --   let-bound variables?
-   | Opt_LLF_AbsOversat  -- ^ allowed to abstract  oversaturated applied
-                         --   let-bound variables?
-   | Opt_LLF_CreatePAPs  -- ^ allowed to float function bindings that occur
-                         --   unapplied
-   | Opt_LLF_Simpl       -- ^ follow the late lambda lift with a simplification
-                         --   pass?
-   | Opt_LLF_Stabilize
-   | Opt_LLF_UseStr      -- ^ use strictness in the late lambda float
-   | Opt_LLF_FloatNullaryJoinPoints -- ^ float zero-arity join points
-   | Opt_LLF_OneShot
-   | Opt_LLF_LeaveJoinPoints
 
    -- Interface files
    | Opt_IgnoreInterfacePragmas
@@ -730,21 +712,6 @@ data DynFlags = DynFlags {
   liberateCaseThreshold :: Maybe Int,   -- ^ Threshold for LiberateCase
   floatLamArgs          :: Maybe Int,   -- ^ Arg count for lambda floating
                                         --   See CoreMonad.FloatOutSwitches
-
-  lateFloatNonRecLam    :: Maybe Int,   -- ^ Limit on # abstracted variables for
-                                        --   *late* non-recursive function
-                                        --   floating (Nothing => all,
-                                        --   Just 0 => none)
-  lateFloatRecLam       :: Maybe Int,   -- ^   "    " "     "          "     for
-                                        --   *late*     recursive function
-                                        --   floating
-  lateFloatIfInClo      :: Maybe Int,   -- ^ Limit on # abstracted variables for
-                                        --   floating a binding that occurs in a
-                                        --   closure
-  lateFloatCloGrowth    :: Maybe Int,   -- ^ Limit on # additional free
-                                        --   variables for closures in which the
-                                        --   function occurs
-  lateFloatCloGrowthInLam :: Maybe Int,
 
   historySize           :: Int,         -- ^ Simplification history size
 
@@ -1632,13 +1599,6 @@ defaultDynFlags mySettings =
         specConstrCount         = Just 3,
         specConstrRecursive     = 3,
         liberateCaseThreshold   = Just 2000,
-
-        lateFloatNonRecLam      = Just 0,
-        lateFloatRecLam         = Just 0,
-        lateFloatIfInClo        = Nothing,
-        lateFloatCloGrowth      = Just 0,
-        lateFloatCloGrowthInLam = Just 0,
-
         floatLamArgs            = Just 0, -- Default: float only if no fvs
 
         historySize             = 20,
@@ -1979,7 +1939,6 @@ dopt f dflags = (fromEnum f `IntSet.member` dumpFlags dflags)
           enableIfVerbose Opt_D_dump_mod_cycles             = False
           enableIfVerbose Opt_D_dump_mod_map                = False
           enableIfVerbose Opt_D_dump_ec_trace               = False
-          enableIfVerbose Opt_D_dump_late_float             = False
           enableIfVerbose _                                 = True
 
 -- | Set a 'DumpFlag'
@@ -2992,8 +2951,6 @@ dynamic_flags_deps = [
         (setDumpFlag Opt_D_dump_mod_cycles)
   , make_ord_flag defGhcFlag "ddump-mod-map"
         (setDumpFlag Opt_D_dump_mod_map)
-  , make_ord_flag defGhcFlag "ddump-llf"
-        (setDumpFlag Opt_D_dump_late_float)
   , make_ord_flag defGhcFlag "ddump-view-pattern-commoning"
         (setDumpFlag Opt_D_dump_view_pattern_commoning)
   , make_ord_flag defGhcFlag "ddump-to-file"
@@ -3149,36 +3106,6 @@ dynamic_flags_deps = [
       (intSuffix (\n d -> d { floatLamArgs = Just n }))
   , make_ord_flag defFlag "ffloat-all-lams"
       (noArg (\d -> d { floatLamArgs = Nothing }))
-  , make_ord_flag defFlag "fllf-nonrec-lam-limit"
-      (intSuffix (\n d -> d{ lateFloatNonRecLam = Just n }))
-  , make_ord_flag defFlag "fllf-nonrec-lam-any"
-      (noArg       (\d -> d{ lateFloatNonRecLam = Nothing }))
-  , make_ord_flag defFlag "fno-llf-nonrec-lam"
-      (noArg       (\d -> d{ lateFloatNonRecLam = Just 0 }))
-  , make_ord_flag defFlag "fllf-rec-lam-limit"
-      (intSuffix (\n d -> d{ lateFloatRecLam = Just n }))
-  , make_ord_flag defFlag "fllf-rec-lam-any"
-      (noArg       (\d -> d{ lateFloatRecLam = Nothing }))
-  , make_ord_flag defFlag "fno-llf-rec-lam"
-      (noArg       (\d -> d{ lateFloatRecLam = Just 0 }))
-  , make_ord_flag defFlag "fllf-clo-growth-limit"
-      (intSuffix (\n d -> d{ lateFloatCloGrowth = Just n }))
-  , make_ord_flag defFlag "fllf-clo-growth-any"
-      (noArg       (\d -> d{ lateFloatCloGrowth = Nothing }))
-  , make_ord_flag defFlag "fno-llf-clo-growth"
-      (noArg       (\d -> d{ lateFloatCloGrowth = Just 0 }))
-  , make_ord_flag defFlag "fllf-in-clo-limit"
-      (intSuffix (\n d -> d{ lateFloatIfInClo = Just n }))
-  , make_ord_flag defFlag "fllf-in-clo-any"
-      (noArg       (\d -> d{ lateFloatIfInClo = Nothing }))
-  , make_ord_flag defFlag "fno-llf-in-clo"
-      (noArg       (\d -> d{ lateFloatIfInClo = Just 0 }))
-  , make_ord_flag defFlag "fllf-clo-growth-in-lam-limit"
-      (intSuffix (\n d -> d{ lateFloatCloGrowthInLam = Just n }))
-  , make_ord_flag defFlag "fllf-clo-growth-in-lam-any"
-      (noArg       (\d -> d{ lateFloatCloGrowthInLam = Nothing }))
-  , make_ord_flag defFlag "fno-llf-clo-growth-in-lam"
-      (noArg       (\d -> d{ lateFloatCloGrowthInLam = Just 0 }))
   , make_ord_flag defFlag "fhistory-size"
       (intSuffix (\n d -> d { historySize = n }))
   , make_ord_flag defFlag "funfolding-creation-threshold"
@@ -3727,19 +3654,7 @@ fFlagsDeps = [
   flagSpec "version-macros"                   Opt_VersionMacros,
   flagSpec "worker-wrapper"                   Opt_WorkerWrapper,
   flagSpec "show-warning-groups"              Opt_ShowWarnGroups,
-  flagSpec "hide-source-paths"                Opt_HideSourcePaths,
-
-  flagSpec "llf"                              Opt_LLF,
-  flagSpec "llf-abstract-undersat"            Opt_LLF_AbsUnsat,
-  flagSpec "llf-abstract-sat"                 Opt_LLF_AbsSat,
-  flagSpec "llf-abstract-oversat"             Opt_LLF_AbsOversat,
-  flagSpec "llf-create-PAPs"                  Opt_LLF_CreatePAPs,
-  flagSpec "llf-simpl"                        Opt_LLF_Simpl,
-  flagSpec "llf-stabilize"                    Opt_LLF_Stabilize,
-  flagSpec "llf-use-strictness"               Opt_LLF_UseStr,
-  flagSpec "llf-float-nullary-join-points"    Opt_LLF_FloatNullaryJoinPoints,
-  flagSpec "llf-oneshot"                      Opt_LLF_OneShot,
-  flagSpec "llf-leave-join-points"            Opt_LLF_LeaveJoinPoints
+  flagSpec "hide-source-paths"                Opt_HideSourcePaths
   ]
 
 -- | These @-f\<blah\>@ flags can all be reversed with @-fno-\<blah\>@

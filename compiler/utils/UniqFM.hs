@@ -84,6 +84,7 @@ import Data.Semigroup   ( Semigroup )
 import qualified Data.Semigroup as Semigroup
 #endif
 
+
 newtype UniqFM ele = UFM (M.IntMap ele)
   deriving (Data, Eq, Functor, Typeable)
   -- We used to derive Traversable and Foldable, but they were nondeterministic

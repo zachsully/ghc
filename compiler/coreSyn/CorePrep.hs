@@ -9,7 +9,6 @@ Core pass to saturate constructors and PrimOps
 
 module CorePrep (
       corePrepPgm, corePrepExpr, cvtLitInteger,
-      OkToSpec(..), combineOkToSpec,
       lookupMkIntegerName, lookupIntegerSDataConName
   ) where
 
@@ -1205,9 +1204,6 @@ appendFloats (Floats spec1 floats1) (Floats spec2 floats2)
 
 concatFloats :: [Floats] -> OrdList FloatingBind
 concatFloats = foldr (\ (Floats _ bs1) bs2 -> appOL bs1 bs2) nilOL
-
-combineOkToSpec :: OkToSpec -> OkToSpec -> OkToSpec
-combineOkToSpec = combine
 
 combine :: OkToSpec -> OkToSpec -> OkToSpec
 combine NotOkToSpec _ = NotOkToSpec

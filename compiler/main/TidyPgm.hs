@@ -7,8 +7,7 @@
 {-# LANGUAGE CPP, ViewPatterns #-}
 
 module TidyPgm (
-       mkBootModDetailsTc, tidyProgram, globaliseAndTidyId,
-       addExternal
+       mkBootModDetailsTc, tidyProgram, globaliseAndTidyId
    ) where
 
 #include "HsVersions.h"
