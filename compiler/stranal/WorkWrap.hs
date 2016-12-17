@@ -359,7 +359,7 @@ tryWW dflags fam_envs is_rec fn_id rhs
         -- See Note [Zapping DmdEnv after Demand Analyzer] and
         -- See Note [Zapping Used Once info in WorkWrap]
 
-    is_fun    = notNull wrap_dmds
+    is_fun    = notNull wrap_dmds || isJoinId fn_id
     is_thunk  = not is_fun && not (exprIsHNF rhs) && not (isJoinId fn_id)
                            && not (isUnliftedType (idType fn_id))
 
