@@ -671,14 +671,20 @@ lintCoreExpr (Cast expr co)
        ; ensureEqTys from_ty expr_ty (mkCastErr expr co' from_ty expr_ty)
        ; return to_ty }
 
-lintCoreExpr (Tick (Breakpoint _ ids) expr)
-  = do forM_ ids $ \id -> do
-         checkDeadIdOcc id
-         lookupIdInScope id
-       markAllJoinsBad $ lintCoreExpr expr
-
-lintCoreExpr (Tick _other_tickish expr)
-  = markAllJoinsBad $ lintCoreExpr expr
+lintCoreExpr (Tick tickish expr)
+  = do case tickish of
+         Breakpoint _ ids -> forM_ ids $ \id -> do
+                               checkDeadIdOcc id
+                               lookupIdInScope id
+         _                -> return ()
+       markAllJoinsBadIf block_joins $ lintCoreExpr expr
+  where
+    block_joins = not (tickish `tickishScopesLike` SoftScope)
+      -- TODO Consider whether this is the correct rule. It is consistent with
+      -- the simplifier's behaviour - cost-centre-scoped ticks become part of
+      -- the continuation, and thus they behave like part of an evaluation
+      -- context, but soft-scoped and non-scoped ticks simply wrap the result
+      -- (see Simplify.simplTick).
 
 lintCoreExpr (Let (NonRec tv (Type ty)) body)
   | isTyVar tv
@@ -1278,7 +1284,7 @@ lintCoreRule fun fun_ty (Rule { ru_name = name, ru_bndrs = bndrs
                             = join_arity - length args
                             | otherwise
                             = 0
-       ; rhs_ty <- markAllJoinsBadUnlessJoin fun $
+       ; rhs_ty <- markAllJoinsBadIf (not (isJoinId fun)) $
                    withAmbientArgs n_ambient_args $
                    lintCoreExpr rhs
        ; ensureEqTys lhs_ty rhs_ty $
@@ -1928,10 +1934,9 @@ markAllJoinsBad m
         is_join bndr = isId bndr && isJoinId bndr
         in_set = getInScopeVars (getTCvInScope (le_subst env))
 
-markAllJoinsBadUnlessJoin :: Var -> LintM a -> LintM a
-markAllJoinsBadUnlessJoin bndr m
-  | isJoinId bndr = m
-  | otherwise     = markAllJoinsBad m
+markAllJoinsBadIf :: Bool -> LintM a -> LintM a
+markAllJoinsBadIf True  m = markAllJoinsBad m
+markAllJoinsBadIf False m = m
 
 withAmbientArgs :: Int -> LintM a -> LintM a
 withAmbientArgs n m
