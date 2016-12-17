@@ -121,6 +121,7 @@ mkWwBodies :: DynFlags
            -> FamInstEnvs
            -> VarSet         -- Free vars of RHS
                              -- See Note [Freshen WW arguments]
+           -> Maybe JoinArity -- Just ar <=> is join point with join arity ar
            -> Type           -- Type of original function
            -> [Demand]       -- Strictness of original function
            -> DmdResult      -- Info about function result
@@ -137,7 +138,7 @@ mkWwBodies :: DynFlags
 --                        let x = (a,b) in
 --                        E
 
-mkWwBodies dflags fam_envs rhs_fvs fun_ty demands res_info
+mkWwBodies dflags fam_envs rhs_fvs mb_join_arity fun_ty demands res_info
   = do  { let empty_subst = mkEmptyTCvSubst (mkInScopeSet rhs_fvs)
                 -- See Note [Freshen WW arguments]
 
@@ -154,6 +155,7 @@ mkWwBodies dflags fam_envs rhs_fvs fun_ty demands res_info
               worker_body = mkLams work_lam_args. work_fn_str . work_fn_cpr . work_fn_args
 
         ; if isWorkerSmallEnough dflags work_args
+             && not (too_many_args_for_join_point wrap_args)
              && (useful1 && not only_one_void_argument || useful2)
           then return (Just (worker_args_dmds, length work_call_args,
                        wrapper_body, worker_body))
@@ -173,6 +175,17 @@ mkWwBodies dflags fam_envs rhs_fvs fun_ty demands res_info
       , Just (arg_ty1, _) <- splitFunTy_maybe fun_ty
       , isAbsDmd d && isVoidTy arg_ty1
       = True
+      | otherwise
+      = False
+
+    -- Note [Join points returning functions]
+    too_many_args_for_join_point wrap_args
+      | Just join_arity <- mb_join_arity
+      , wrap_args `lengthExceeds` join_arity
+      = WARN(True, text "Unable to worker/wrapper join point with arity " <+>
+                     int join_arity <+> text "but" <+>
+                     int (length wrap_args) <+> text "args")
+        True
       | otherwise
       = False
 
@@ -297,6 +310,37 @@ occurrences, so $wj2 here is wrong. But of course, this is easy enough to fix:
 
 Hence we simply do the beta-reduction here. (This would be harder if we had to
 worry about hygiene, but luckily wy is freshly generated.)
+
+Note [Join points returning functions]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+It is crucial that the arity of a join point depends on its *callers,* not its
+own syntax. What this means is that a join point can have "extra lambdas":
+
+f :: Int -> Int -> (Int, Int) -> Int
+f x y = join j (z, w) = \(u, v) -> ...
+        in jump j (x, y)
+
+Typically this happens with functions that are seen as computing functions,
+rather than being curried. (The real-life example was GraphOps.addConflicts.)
+
+When we create the wrapper, it *must* be in "eta-contracted" form so that the
+jump has the right number of arguments:
+
+f x y = join $wj z' w' = \u' v' -> let {z = z'; w = w'; u = u'; v = v'} in ...
+             j (z, w)  = jump $wj z w
+
+(See Note [Join points and beta-redexes] for where the lets come from.) If j
+were a function, we would instead say
+
+f x y = let $wj = \z' w' u' v' -> let {z = z'; w = w'; u = u'; v = v'} in ...
+            j (z, w) (u, v) = $wj z w u v
+
+Notice that the worker ends up with the same lambdas; it's only the wrapper we
+have to be concerned about.
+
+FIXME Currently the functionality to produce "eta-contracted" wrappers is
+unimplemented; we simply give up.
 
 ************************************************************************
 *                                                                      *
