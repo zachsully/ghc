@@ -163,7 +163,7 @@ isVoidTy ty
   | Just (con, args) <- splitTyConApp_maybe ty
   , isUnboxedTupleTyCon con
   = all isVoidTy args
-  | Just (con, args) <- splitTyConApp_maybe ty
+  | Just (con, _) <- splitTyConApp_maybe ty
   , isUnboxedSumTyCon con
   = False
   | otherwise -- It's a UnaryType; can call typePrimRep
