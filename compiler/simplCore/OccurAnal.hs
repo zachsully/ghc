@@ -783,46 +783,45 @@ occAnalRec lvl (AcyclicSCC (ND { nd_bndr = bndr, nd_rhs = rhs
         -- The Rec case is the interesting one
         -- See Note [Recursive bindings: the grand plan]
         -- See Note [Loop breaking]
-occAnalRec lvl (CyclicSCC details_s) (body_uds, binds)
+occAnalRec lvl (CyclicSCC orig_details_s) (body_uds, binds)
   | not (any (`usedIn` body_uds) bndrs) -- NB: look at body_uds, not total_uds
   = (body_uds, binds)                   -- See Note [Dead code]
 
   | otherwise   -- At this point we always build a single Rec
   = -- pprTrace "occAnalRec" (vcat
     --  [ text "weak_fvs" <+> ppr weak_fvs
-    --  , text "tagged details" <+> ppr final_uds
+    --  , text "tagged details" <+> ppr tagged_details_s
     --  , text "lb nodes" <+> ppr loop_breaker_nodes])
     (final_uds, Rec pairs : binds)
 
   where
-    bndrs    = map nd_bndr details_s
+    bndrs    = map nd_bndr orig_details_s
+    orig_pairs = [ (nd_bndr nd, nd_rhs nd) | nd <- orig_details_s ]
     bndr_set = mkVarSet bndrs
 
     ----------------------------
     -- Compute usage details
-    rhs_uds      = foldl add_uds emptyDetails details_s
-    total_uds    = body_uds +++ rhs_uds
+    orig_total_uds = foldl add_uds body_uds orig_details_s
+
+    mb_pairs_as_joins = asJoinIdsIfPossible orig_total_uds lvl Recursive
+                                            orig_pairs
+    details_s1 = case mb_pairs_as_joins of
+                   Just pairs' -> [ nd { nd_bndr = bndr', nd_rhs = rhs' }
+                                  | nd <- orig_details_s
+                                  | (bndr', rhs') <- pairs' ]
+                   Nothing    -> orig_details_s
+    details_s = map adjust details_s1
+    total_uds = foldl add_uds body_uds details_s
+    final_uds = total_uds `minusDetails` bndr_set
     add_uds usage_so_far nd = usage_so_far +++ nd_uds nd
 
-    orig_pairs = [ (nd_bndr nd, nd_rhs nd) | nd <- details_s ]
-    mb_pairs_as_joins = asJoinIdsIfPossible total_uds lvl Recursive orig_pairs
-    final_details_s = case mb_pairs_as_joins of
-                        Just pairs' -> [ nd { nd_bndr = bndr', nd_rhs = rhs' }
-                                       | nd <- details_s
-                                       | (bndr', rhs') <- pairs' ]
-                        Nothing    -> details_s
-    rhs_uds'     = foldl add_adjusted_uds emptyDetails final_details_s
-    total_uds'   = body_uds +++ rhs_uds'
-    final_uds    = total_uds' `minusDetails` bndr_set
-    add_adjusted_uds usage_so_far
-                     (ND { nd_bndr = bndr', nd_rhs = rhs', nd_uds = uds })
-      = usage_so_far +++
-        adjustRhsUsage (isJoinId_maybe bndr') Recursive rhs' uds
+    adjust nd@(ND { nd_bndr = bndr', nd_rhs = rhs', nd_uds = uds })
+      = nd { nd_uds = adjustRhsUsage (isJoinId_maybe bndr') Recursive rhs' uds }
 
     ------------------------------
         -- See Note [Choosing loop breakers] for loop_breaker_nodes
     loop_breaker_nodes :: [LetrecNode]
-    loop_breaker_nodes = mkLoopBreakerNodes bndr_set total_uds final_details_s
+    loop_breaker_nodes = mkLoopBreakerNodes bndr_set total_uds details_s
 
     ------------------------------
     weak_fvs :: VarSet
