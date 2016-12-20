@@ -110,7 +110,7 @@ test('T4918',
 # result of -ddump-simpl, which is never advertised to
 # be very stable
 test('T4945',
-     expect_broken(4945),
+     normal,
      run_command,
      ['$MAKE -s --no-print-directory T4945'])
 

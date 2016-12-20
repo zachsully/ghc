@@ -423,10 +423,11 @@ test('T9203',
                       [ (wordsize(32), 84345136 , 5)
                       # was
                       # 2016-04-06     84345136 (i386/Debian) not sure
-                      , (wordsize(64), 95451192, 5) ]),
+                      , (wordsize(64), 84620888, 5) ]),
                       # was            95747304
                       # 2019-09-10     94547280 post-AMP cleanup
                       # 2015-10-28     95451192 emit Typeable at definition site
+                      # 2016-12-19     84620888 Join points
       only_ways(['normal'])],
      compile_and_run,
      ['-O2'])

@@ -437,9 +437,10 @@ test('T5631',
 test('parsing001',
      [compiler_stats_num_field('bytes allocated',
           [(wordsize(32), 274000576, 10),
-           (wordsize(64), 581551384, 5)]),
+           (wordsize(64), 493730288, 5)]),
         # expected value: 587079016 (amd64/Linux)
         # 2016-09-01:     581551384 (amd64/Linux) Restore w/w limit (#11565)
+        # 2016-12-19:     493730288 (amd64/Linux) Join points (#12988)
        only_ways(['normal']),
       ],
      compile_fail, [''])
@@ -563,7 +564,7 @@ test('T5642',
             # 2014-12-10:  641085256 Improvements in constraints solver
             # 2016-04-06:  462677300
 
-            (wordsize(64),  838316496, 10)])
+            (wordsize(64), 1156587832, 10)])
             # prev:        1300000000
             # 2014-07-17:  1358833928 (general round of updates)
             # 2014-08-07:  1402242360 (caused by 1fc60ea)
@@ -580,6 +581,8 @@ test('T5642',
             # 2016-05-12:  1300685592 Make Generic1 poly-kinded
             # 2016-06-05:   916484672 Refactor derived Generic instances to reduce allocations
             # 2016-09-03:   838316496 Derive the Generic instance in perf/compiler/T5642
+            # 2016-12-19:  1156587832 Join points (not clear why; prof fingers
+            #                          simplifier)
       ],
       compile,['-O'])
 
@@ -789,7 +792,7 @@ test('T9872d',
 test('T9961',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 537297968, 5),
+          [(wordsize(64), 623666064, 5),
           # 2015-01-12    807117816   Initally created
           # 2015-spring   772510192   Got better
           # 2015-05-22    663978160   Fix for #10370 improves it more
@@ -798,6 +801,7 @@ test('T9961',
           # 2016-03-20    519436672   x64_64/Linux   Don't use build desugaring for large lists (#11707)
           # 2016-03-24    568526784   x64_64/Linux   Add eqInt* variants (#11688)
           # 2016-09-01    537297968   x64_64/Linux   Restore w/w limit (#11565)
+          # 2016-12-19    623666064   x64_64/Linux   Join points (#12988)
            (wordsize(32), 275264188, 5)
           # was           375647160
           # 2016-04-06    275264188   x86/Linux
@@ -809,10 +813,11 @@ test('T9961',
 test('T9233',
     [ only_ways(['normal']),
       compiler_stats_num_field('bytes allocated',
-        [(wordsize(64), 984268712, 5),
+        [(wordsize(64), 1073084136, 5),
          # 2015-08-04    999826288     initial value
          # 2016-04-14   1066246248     Final demand analyzer run
          # 2016-06-18    984268712     shuffling around of Data.Functor.Identity
+         # 2016-12-19   1073084136     Join points (#12988)
          (wordsize(32),  515672240, 5)   # Put in your value here if you hit this
          # 2016-04-06    515672240     (x86/Linux) initial value
         ]),
@@ -878,8 +883,9 @@ test('T12227',
 test('T12425',
      [ only_ways(['optasm']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 125831400, 5),
+          [(wordsize(64), 133084944, 5),
           # initial:    125831400
+          # 2016-12-19  133084944  x86_64/Linux  Join points (#12988)
           ]),
      ],
      compile,
