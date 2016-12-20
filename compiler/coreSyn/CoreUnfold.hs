@@ -707,6 +707,13 @@ callSize
  -> Int
 callSize n_val_args voids = 10 * (1 + n_val_args - voids)
 
+-- | The size of a jump to a join point
+jumpSize
+ :: Int  -- ^ number of value args
+ -> Int  -- ^ number of value args that are void
+ -> Int
+jumpSize n_val_args voids = 2 * (1 + n_val_args - voids)
+
 funSize :: DynFlags -> [Id] -> Id -> Int -> Int -> ExprSize
 -- Size for functions that are not constructors or primops
 -- Note [Function applications]
@@ -718,7 +725,7 @@ funSize dflags top_args fun n_val_args voids
     some_val_args = n_val_args > 0
     is_join = isJoinId fun
 
-    size | is_join              = 0
+    size | is_join              = jumpSize n_val_args voids
          | not some_val_args    = 0
          | otherwise            = callSize n_val_args voids
         -- The 1+ is for the function itself
