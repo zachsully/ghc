@@ -382,8 +382,7 @@ lintCoreBindings dflags pass local_in_scope binds
   where
     flags = LF { lf_check_global_ids = check_globals
                , lf_check_inline_loop_breakers = check_lbs
-               , lf_check_static_ptrs = check_static_ptrs
-               , lf_check_join_id_occ_mismatch = check_join_occs }
+               , lf_check_static_ptrs = check_static_ptrs }
 
     -- See Note [Checking for global Ids]
     check_globals = case pass of
@@ -404,11 +403,6 @@ lintCoreBindings dflags pass local_in_scope binds
                           CoreTidy              -> True
                           CorePrep              -> True
                           _                     -> False
-
-    -- See Note [Checking join id occurrences]
-    check_join_occs = case pass of
-                        CoreOccurAnal -> False
-                        _             -> True
 
     binders = bindersOfBinds binds
     (_, dups) = removeDups compare binders
@@ -810,13 +804,22 @@ lintCoreApp var args
         ; var' <- lookupIdInScope var
         ; let ty' = idType var'
         ; ensureEqTys ty ty' $ mkBndrOccTypeMismatchMsg var' var ty' ty
-        ; case isJoinId_maybe var' of
+        ; mb_join_arity
+            <- case isJoinId_maybe var' of
+                 Just join_arity ->
+                   do  { checkL (isJoinId_maybe var == Just join_arity) $
+                           mkJoinBndrOccMismatchMsg var' var
+                       ; return $ Just join_arity }
+                 Nothing ->
+                   case tailCallInfo (idInfo var') of
+                     AlwaysTailCalled join_arity -> return $ Just join_arity
+                       -- This function will be turned into a join point by the
+                       -- simplifier; typecheck it as if it already were one
+                     NoTailCallInfo              -> return $ Nothing
+        ; case mb_join_arity of
             Just join_arity ->
               do  { bad <- isBadJoin var'
                   ; checkL (not bad) $ mkJoinOutOfScopeMsg var'
-                  ; when (lf_check_join_id_occ_mismatch lf) $
-                    checkL (isJoinId_maybe var == Just join_arity) $
-                      mkJoinBndrOccMismatchMsg var' var
                   ; n_ambient_args <- getAmbientArgs
                   ; checkL (length args + n_ambient_args == join_arity) $
                       mkBadJoinCallMsg var' join_arity (length args) }
@@ -1707,15 +1710,12 @@ data LintFlags
            -- See Note [Checking for INLINE loop breakers]
        , lf_check_static_ptrs          :: Bool
            -- See Note [Checking StaticPtrs]
-       , lf_check_join_id_occ_mismatch :: Bool
-           -- See Note [Checking join id occurrences]
     }
 
 defaultLintFlags :: LintFlags
 defaultLintFlags = LF { lf_check_global_ids = False
                       , lf_check_inline_loop_breakers = True
                       , lf_check_static_ptrs = False
-                      , lf_check_join_id_occ_mismatch = True
                       }
 
 newtype LintM a =

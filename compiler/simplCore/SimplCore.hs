@@ -17,7 +17,7 @@ import CSE              ( cseProgram )
 import Rules            ( mkRuleBase, unionRuleBase,
                           extendRuleBaseList, ruleCheckProgram, addRuleInfo, )
 import PprCore          ( pprCoreBindings, pprCoreExpr )
-import OccurAnal        ( occurAnalysePgm, occurAnalyseExpr_WithJoinPoints )
+import OccurAnal        ( occurAnalysePgm, occurAnalyseExpr )
 import IdInfo
 import CoreStats        ( coreBindsSize, coreBindsStats, exprSize )
 import CoreUtils        ( mkTicks, stripTicksTop )
@@ -608,8 +608,8 @@ simplExprGently :: SimplEnv -> CoreExpr -> SimplM CoreExpr
 -- but only if -O is on.
 
 simplExprGently env expr = do
-    expr1 <- simplExpr env (occurAnalyseExpr_WithJoinPoints expr)
-    simplExpr env (occurAnalyseExpr_WithJoinPoints expr1)
+    expr1 <- simplExpr env (occurAnalyseExpr expr)
+    simplExpr env (occurAnalyseExpr expr1)
 
 {-
 ************************************************************************

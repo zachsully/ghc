@@ -11,11 +11,10 @@ The occurrence analyser re-typechecks a core expression, returning a new
 core expression with (hopefully) improved usage information.
 -}
 
-{-# LANGUAGE CPP, BangPatterns, ParallelListComp #-}
+{-# LANGUAGE CPP, BangPatterns #-}
 
 module OccurAnal (
-        occurAnalysePgm, occurAnalyseExpr, occurAnalyseExpr_NoBinderSwap,
-        occurAnalyseExpr_WithJoinPoints
+        occurAnalysePgm, occurAnalyseExpr, occurAnalyseExpr_NoBinderSwap
     ) where
 
 #include "HsVersions.h"
@@ -25,6 +24,7 @@ import CoreFVs
 import CoreUtils        ( exprIsTrivial, isDefaultAlt, isExpandableApp,
                           stripTicksTopE, mkTicks )
 import Id
+import IdInfo
 import Name( localiseName )
 import BasicTypes
 import Module( Module )
@@ -69,8 +69,8 @@ occurAnalysePgm this_mod active_rule imp_rules vects vectVars binds
                    2 (ppr (ud_occ_info final_usage) ) )
     occ_anald_glommed_binds
   where
-    init_env = initOccEnv active_rule -- Finding joins enabled by default
-                                      -- Note [Finding join points]
+    init_env = initOccEnv active_rule
+
     (final_usage, occ_anald_binds) = go init_env binds
     (_, occ_anald_glommed_binds)   = occAnalRecBind init_env TopLevel
                                                     imp_rule_edges
@@ -109,24 +109,16 @@ occurAnalysePgm this_mod active_rule imp_rules vects vectVars binds
 
 occurAnalyseExpr :: CoreExpr -> CoreExpr
         -- Do occurrence analysis, and discard occurrence info returned
-occurAnalyseExpr = occurAnalyseExpr' True False
-  -- do binder swap, no joins
+occurAnalyseExpr = occurAnalyseExpr' True -- do binder swap
 
 occurAnalyseExpr_NoBinderSwap :: CoreExpr -> CoreExpr
-occurAnalyseExpr_NoBinderSwap = occurAnalyseExpr' False False
-  -- no swap, no joins
+occurAnalyseExpr_NoBinderSwap = occurAnalyseExpr' False  -- no swap
 
-occurAnalyseExpr_WithJoinPoints :: CoreExpr -> CoreExpr
-occurAnalyseExpr_WithJoinPoints = occurAnalyseExpr' True True
-  -- do swap and joins
-  -- Note [Finding join points]
-
-occurAnalyseExpr' :: Bool -> Bool -> CoreExpr -> CoreExpr
-occurAnalyseExpr' enable_binder_swap find_join_points expr
+occurAnalyseExpr' :: Bool -> CoreExpr -> CoreExpr
+occurAnalyseExpr' enable_binder_swap expr
   = snd (occAnal env expr)
   where
-    env = (initOccEnv all_active_rules) { occ_binder_swap = enable_binder_swap
-                                        , occ_find_joins  = find_join_points }
+    env = (initOccEnv all_active_rules) { occ_binder_swap = enable_binder_swap }
     -- To be conservative, we say that all inlines and rules are active
     all_active_rules = \_ -> True
 
@@ -141,20 +133,6 @@ BuiltinRule doesn't have any of that stuff.
 
 So we simply assume that BuiltinRules have no dependencies, and filter
 them out from the imp_rule_edges comprehension.
-
-Note [Finding join points]
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-The occurrence analyser is in charge of finding join points by changing the
-IdDetails of suitable let-bound identifiers to JoinId (rather than VanillaId).
-Notably, the occurrence analyser itself only changes the *binding* site, not the
-occurrences. This is perfectly okay when the occurrence analyser is invoked by
-the simplifier or by the Very Simple Optimiser, since either of those always
-propagates each binder to each of its occurrences. Other uses of the occurrence
-analyser assume that its output is typesafe, however, and Core Lint checks that
-each join point is marked correctly at each occurrence, so in these cases we run
-the occurrence analysis with join-point discovery disabled.
-
 -}
 
 {-
@@ -700,10 +678,9 @@ occAnalNonRecBind env lvl imp_rule_edges binder rhs body_usage
   = (body_usage' +++ rhs_usage', [NonRec final_binder rhs'])
   where
     (body_usage', tagged_binder) = tagBinder body_usage binder
-    (final_binder, rhs1)         = asJoinIdIfPossible body_usage lvl
-                                                      tagged_binder rhs
-                                     `orElse` (tagged_binder, rhs)
-    (rhs_usage1, rhs')           = occAnalNonRecRhs env final_binder rhs1
+    final_binder       = addFinalTailCallInfo body_usage lvl tagged_binder rhs
+                           `orElse` tagged_binder
+    (rhs_usage1, rhs') = occAnalNonRecRhs env final_binder rhs
     rhs_usage2 = case occAnalUnfolding env NonRecursive binder of
                    Just unf_usage -> rhs_usage1 +++ unf_usage
                    Nothing        -> rhs_usage1
@@ -716,7 +693,7 @@ occAnalNonRecBind env lvl imp_rule_edges binder rhs body_usage
                  lookupVarEnv imp_rule_edges binder
        -- See Note [Preventing loops due to imported functions rules]
 
-    rhs_usage' = adjustRhsUsage (isJoinId_maybe final_binder) NonRecursive
+    rhs_usage' = adjustRhsUsage (willBeJoinId_maybe final_binder) NonRecursive
                                 rhs' rhs_usage4
 
 -----------------
@@ -771,14 +748,13 @@ occAnalRec lvl (AcyclicSCC (ND { nd_bndr = bndr, nd_rhs = rhs
 
   | otherwise                   -- It's mentioned in the body
   = (body_uds' +++ rhs_uds',
-     NonRec final_bndr rhs' : binds)
+     NonRec final_bndr rhs : binds)
   where
     (body_uds', tagged_bndr) = tagBinder body_uds bndr
-    (final_bndr, rhs')
-      = asJoinIdIfPossible body_uds lvl tagged_bndr rhs
-          `orElse` (tagged_bndr, rhs)
-    rhs_uds' = adjustRhsUsage (isJoinId_maybe final_bndr) NonRecursive rhs'
-                              rhs_uds
+    final_bndr = addFinalTailCallInfo body_uds lvl tagged_bndr rhs
+                   `orElse` tagged_bndr
+    rhs_uds' = adjustRhsUsage (willBeJoinId_maybe final_bndr) NonRecursive
+                              rhs rhs_uds
 
         -- The Rec case is the interesting one
         -- See Note [Recursive bindings: the grand plan]
@@ -803,12 +779,11 @@ occAnalRec lvl (CyclicSCC orig_details_s) (body_uds, binds)
     -- Compute usage details
     orig_total_uds = foldl add_uds body_uds orig_details_s
 
-    mb_pairs_as_joins = asJoinIdsIfPossible orig_total_uds lvl Recursive
-                                            orig_pairs
-    details_s1 = case mb_pairs_as_joins of
-                   Just pairs' -> [ nd { nd_bndr = bndr', nd_rhs = rhs' }
-                                  | nd <- orig_details_s
-                                  | (bndr', rhs') <- pairs' ]
+    mb_marked_bndrs = addFinalTailCallInfoRec orig_total_uds lvl Recursive
+                                              orig_pairs
+    details_s1 = case mb_marked_bndrs of
+                   Just bndrs' -> [ nd { nd_bndr = bndr' }
+                                  | (nd, bndr') <- orig_details_s `zip` bndrs' ]
                    Nothing    -> orig_details_s
     details_s = map adjust details_s1
     total_uds = foldl add_uds body_uds details_s
@@ -816,7 +791,8 @@ occAnalRec lvl (CyclicSCC orig_details_s) (body_uds, binds)
     add_uds usage_so_far nd = usage_so_far +++ nd_uds nd
 
     adjust nd@(ND { nd_bndr = bndr', nd_rhs = rhs', nd_uds = uds })
-      = nd { nd_uds = adjustRhsUsage (isJoinId_maybe bndr') Recursive rhs' uds }
+      = nd { nd_uds = adjustRhsUsage (willBeJoinId_maybe bndr') Recursive
+                                     rhs' uds }
 
     ------------------------------
         -- See Note [Choosing loop breakers] for loop_breaker_nodes
@@ -1884,7 +1860,6 @@ data OccEnv
              -- See Note [Finding rule RHS free vars]
            , occ_binder_swap :: !Bool -- enable the binder_swap
              -- See CorePrep Note [Dead code in CorePrep]
-           , occ_find_joins :: !Bool -- look for join points
     }
 
 type GlobalScruts = IdSet   -- See Note [Binder swap on GlobalId scrutinees]
@@ -1920,8 +1895,7 @@ initOccEnv active_rule
            , occ_one_shots = []
            , occ_gbl_scrut = emptyVarSet
            , occ_rule_act  = active_rule
-           , occ_binder_swap = True
-           , occ_find_joins  = True }
+           , occ_binder_swap = True }
 
 vanillaCtxt :: OccEnv -> OccEnv
 vanillaCtxt env = env { occ_encl = OccVanilla, occ_one_shots = [] }
@@ -2199,14 +2173,11 @@ mkAltEnv env@(OccEnv { occ_gbl_scrut = pe }) scrut case_bndr
 ************************************************************************
 -}
 
-type TailCallInfo = JoinArity -- Number of arguments at *each* occurrence, for
-                              -- an id that is consistently tail-called
-
 data UsageDetails
   = UD { ud_occ_info :: IdEnv OccInfo -- A finite map from ids to their usage
                 -- INVARIANT: never IAmDead
                 -- (Deadness is signalled by not being in the map at all)
-       , ud_tail_calls :: IdEnv TailCallInfo -- Ids only occurring as tail calls
+       , ud_tail_calls :: IdEnv JoinArity -- Ids only occurring as tail calls
                 -- INVARIANT: Subset of ud_occ_info
                 -- Kept separately so we can drop them all at once in O(1) time
        }
@@ -2229,7 +2200,7 @@ combineUsageDetailsWith plus_occ_info usage1 usage2
        , ud_tail_calls = combineTailCallInfo usage1 usage2
        }
 
-combineTailCallInfo :: UsageDetails -> UsageDetails -> IdEnv TailCallInfo
+combineTailCallInfo :: UsageDetails -> UsageDetails -> IdEnv JoinArity
 combineTailCallInfo (UD occs1 tails1) (UD occs2 tails2)
   = tails
   where
@@ -2239,7 +2210,7 @@ combineTailCallInfo (UD occs1 tails1) (UD occs2 tails2)
     -- Three ways for a variable to end up in the tail-called set:
     -- (1) There are tail calls on the left and *no* occurrences on the right
     -- (2) There are tail calls on the right and *no* occurrences on the left
-    -- (3) There are tail calls on both sides, with consistent TailCallInfo
+    -- (3) There are tail calls on both sides, with same # of type+value args
 
     -- Each variable in occs* but not tails* occurs in non-tail position
     nontails1 = occs1 `minusVarEnv` tails1
@@ -2416,38 +2387,52 @@ setBinderOcc usage bndr
   where
     occ_info = lookupVarEnv (ud_occ_info usage) bndr `orElse` IAmDead
 
-findTailCallInfo :: UsageDetails -> CoreBndr -> Maybe TailCallInfo
-findTailCallInfo usage bndr = ud_tail_calls usage `lookupVarEnv` bndr
+findTailCallInfo :: UsageDetails -> CoreBndr -> TailCallInfo
+findTailCallInfo usage bndr
+  = case ud_tail_calls usage `lookupVarEnv` bndr of
+      Just join_arity -> AlwaysTailCalled join_arity
+      Nothing         -> NoTailCallInfo
 
 -- | Decide whether some bindings should be made into join points or not.
 -- Returns `Nothing` if *either* they can't be join points *or* they already
--- are. Returns the pairs as join points if possible. Note that it's an
--- all-or-nothing decision, as the binders are assumed to be mutually recursive.
-asJoinIdsIfPossible :: UsageDetails -> TopLevelFlag -> RecFlag
-                    -> [(CoreBndr, CoreExpr)]
-                    -> Maybe [(CoreBndr, CoreExpr)]
-asJoinIdsIfPossible _ TopLevel _ _
+-- are. If they can be join points, returns the binders with AlwaysTailCalled n
+-- as their new tailCallInfo (for appropriate values n). Note that it's an
+-- all-or-nothing decision, as if multiple binders are given, they're assumed
+-- to be mutually recursive.
+--
+-- See Note [Invariants for join points] in IdInfo.
+addFinalTailCallInfoRec :: UsageDetails -> TopLevelFlag -> RecFlag
+                        -> [(CoreBndr, CoreExpr)]
+                        -> Maybe [CoreBndr]
+addFinalTailCallInfoRec _ TopLevel _ _
   = Nothing
-asJoinIdsIfPossible usage NotTopLevel rec_flag pairs
-  = mapM convert pairs
+addFinalTailCallInfoRec usage NotTopLevel rec_flag pairs
+  = mapM addInfo pairs
   where
-    convert (bndr, rhs)
+    addInfo (bndr, rhs)
       | isJoinId bndr
       = Nothing -- Already a join id (won't be in analysis anyway)
-      | Just arity <- findTailCallInfo usage bndr
+      | AlwaysTailCalled arity <- findTailCallInfo usage bndr
       , not (isRec rec_flag && arity /= lambda_count rhs)
           -- Recursive join points can't be partially applied
       , isValidJoinPointType arity (idType bndr)
-      = Just (bndr `asJoinId` arity, rhs)
+      = Just $ modifyIdInfo (`setTailCallInfo` AlwaysTailCalled arity) bndr
       | otherwise
       = Nothing
 
     lambda_count expr = length bndrs where (bndrs, _) = collectBinders expr
 
-asJoinIdIfPossible :: UsageDetails -> TopLevelFlag -> CoreBndr -> CoreExpr
-                   -> Maybe (CoreBndr, CoreExpr)
-asJoinIdIfPossible usage lvl bndr rhs
-  = fmap head $ asJoinIdsIfPossible usage lvl NonRecursive [(bndr, rhs)]
+addFinalTailCallInfo :: UsageDetails -> TopLevelFlag -> CoreBndr -> CoreExpr
+                     -> Maybe CoreBndr
+addFinalTailCallInfo usage lvl bndr rhs
+  = fmap head $ addFinalTailCallInfoRec usage lvl NonRecursive [(bndr, rhs)]
+
+willBeJoinId_maybe :: CoreBndr -> Maybe JoinArity
+willBeJoinId_maybe bndr
+  | AlwaysTailCalled arity <- tailCallInfo (idInfo bndr)
+  = Just arity
+  | otherwise
+  = isJoinId_maybe bndr
 
 {-
 ************************************************************************
@@ -2470,10 +2455,7 @@ mkOneOcc env id int_cxt arity
   where
     tails | isJoinId id = emptyVarEnv -- it's already a join point; no need to
                                       -- track tail calls
-          | disabled    = emptyVarEnv -- Note [Finding join points]
           | otherwise   = unitVarEnv id arity
-      where
-        disabled = not (occ_find_joins env)
 
 markMany, markInsideLam :: OccInfo -> OccInfo
 

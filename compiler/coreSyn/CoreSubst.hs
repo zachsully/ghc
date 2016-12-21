@@ -45,7 +45,7 @@ import CoreUtils
 import Literal  ( Literal(MachStr) )
 import MkCore
 import qualified Data.ByteString as BS
-import OccurAnal( occurAnalyseExpr_WithJoinPoints, occurAnalysePgm )
+import OccurAnal( occurAnalyseExpr, occurAnalysePgm )
 
 import qualified Type
 import qualified Coercion
@@ -888,9 +888,7 @@ simpleOptExpr expr
 
 simpleOptExprWith :: Subst -> InExpr -> OutExpr
 simpleOptExprWith subst expr
-  = simple_opt_expr subst (occurAnalyseExpr_WithJoinPoints expr)
-      -- Okay to look for join points now, since we're about to copy all binders
-      -- to their occurrence sites
+  = simple_opt_expr subst (occurAnalyseExpr expr)
 
 ----------------------
 simpleOptPgm :: DynFlags -> Module

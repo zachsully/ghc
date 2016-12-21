@@ -1198,16 +1198,45 @@ simplExprF1 env (Case scrut bndr _ alts) cont
                                  , sc_env = env, sc_cont = cont })
 
 simplExprF1 env (Let (Rec pairs) body) cont
-  | isJoinId (fst (head pairs))
-  = simplRecJoinsE env pairs body cont
+  | Just pairs' <- as_join_pairs pairs
+  = simplRecJoinsE env pairs' body cont
   | otherwise
   = simplRecE env pairs body cont
+  where
+    as_join_pairs pairs@((fst_bndr, _) : _)
+      | isJoinId fst_bndr
+      = Just pairs
+      | AlwaysTailCalled{} <- tailCallInfo (idInfo fst_bndr)
+      = Just [ (convertToJoinId bndr, rhs) | (bndr, rhs) <- pairs ]
+      | otherwise
+      = Nothing
+    as_join_pairs []
+      = panic "as_join_pairs"
 
 simplExprF1 env (Let (NonRec bndr rhs) body) cont
-  | isId bndr, isJoinId bndr
-  = simplNonRecJoinE env bndr (rhs, env) body cont
+  | Just bndr' <- as_join_bndr bndr
+  = simplNonRecJoinE env bndr' (rhs, env) body cont
   | otherwise
   = simplNonRecE env bndr (rhs, env) ([], body) cont
+  where
+    as_join_bndr bndr
+      | isTyVar bndr
+      = Nothing
+      | isJoinId bndr
+      = Just bndr
+      | AlwaysTailCalled{} <- tailCallInfo (idInfo bndr)
+      = Just (convertToJoinId bndr)
+      | otherwise
+      = Nothing
+
+convertToJoinId :: CoreBndr -> CoreBndr
+convertToJoinId bndr
+  = case tailCallInfo (idInfo bndr) of
+      AlwaysTailCalled join_arity
+        -> -- No point in keeping tailCallInfo around; very fragile
+           modifyIdInfo (`setTailCallInfo` vanillaTailCallInfo) $
+             bndr `asJoinId` join_arity
+      _ -> pprPanic "convertToJoinId" $ pprBndr LetBind bndr
 
 ---------------------------------
 -- Simplify a join point, adding the context.

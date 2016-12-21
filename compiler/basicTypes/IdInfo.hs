@@ -26,6 +26,7 @@ module IdInfo (
         -- ** Zapping various forms of Info
         zapLamInfo, zapFragileInfo,
         zapDemandInfo, zapUsageInfo, zapUsageEnvInfo, zapUsedOnceInfo,
+        zapTailCallInfo,
 
         -- ** The ArityInfo type
         ArityInfo,
@@ -64,6 +65,10 @@ module IdInfo (
         CafInfo(..),
         ppCafInfo, mayHaveCafRefs,
         cafInfo, setCafInfo,
+
+        -- ** Tail call info
+        TailCallInfo(..),
+        tailCallInfo, setTailCallInfo, vanillaTailCallInfo, pprTailCallInfo,
 
         -- ** Tick-box Info
         TickBoxOp(..), TickBoxId,
@@ -226,6 +231,34 @@ like as many functions as possible to become join points (see OccurAnal) and
 the type rules for join points ensure we preserve the properties that make them
 efficient.
 
+Note [Invariants on join points]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In order to be a join point, a binder must follow these invariants:
+
+  1. All occurrences must be tail calls. Each of these tail calls must pass the
+     same number of arguments, counting both types and values; we call this the
+     "join arity" (to distinguish from regular arity, which only counts values).
+  2. The binding's type must not be polymorphic in its return type. See
+     'Type.isValidJoinPointType'.
+  3. If the binding is recursive, then:
+       a. For a join arity n, the right-hand side must begin with exactly n
+          lambdas.
+       b. All other bindings in the recursive group must also be join points.
+
+Strictly speaking, invariant 3 is redundant, since the rigorous definition of
+"tail call" circumscribes the contexts in which a tail call may appear; the
+right-hand side of a non-join-point definition is not such a context, and
+neither would be the RHS of a join point with a number of lambdas not equal to
+its join arity. See (link on the wiki under SequentCore):
+
+  Luke Maurer, Paul Downen, Zena Ariola, and Simon Peyton Jones. "Compiling
+  without continuations." Submitted to PLDI'17.
+
+Core Lint will check these invariants, anticipating that any binder whose
+IdDetails includes AlwaysTailCalled as its tailCallInfo will become a join
+point as soon as the simplifier runs.
+
 ************************************************************************
 *                                                                      *
 \subsection{The main IdInfo type}
@@ -264,8 +297,10 @@ data IdInfo
         strictnessInfo  :: StrictSig,      --  ^ A strictness signature
 
         demandInfo      :: Demand,       -- ^ ID demand information
-        callArityInfo :: !ArityInfo    -- ^ How this is called.
+        callArityInfo   :: !ArityInfo,   -- ^ How this is called.
                                          -- n <=> all calls have at least n arguments
+        tailCallInfo    :: TailCallInfo  -- ^ Whether always tail-called, and if
+                                         -- so, how many args (value or type)
     }
 
 -- Setters
@@ -302,6 +337,9 @@ setDemandInfo info dd = dd `seq` info { demandInfo = dd }
 setStrictnessInfo :: IdInfo -> StrictSig -> IdInfo
 setStrictnessInfo info dd = dd `seq` info { strictnessInfo = dd }
 
+setTailCallInfo :: IdInfo -> TailCallInfo -> IdInfo
+setTailCallInfo info tci = tci `seq` info { tailCallInfo = tci }
+
 -- | Basic 'IdInfo' that carries no useful information whatsoever
 vanillaIdInfo :: IdInfo
 vanillaIdInfo
@@ -315,7 +353,8 @@ vanillaIdInfo
             occInfo             = NoOccInfo,
             demandInfo          = topDmd,
             strictnessInfo      = nopSig,
-            callArityInfo     = unknownArity
+            callArityInfo       = unknownArity,
+            tailCallInfo        = vanillaTailCallInfo
            }
 
 -- | More informative 'IdInfo' we can use when we know the 'Id' has no CAF references
@@ -489,6 +528,42 @@ ppCafInfo MayHaveCafRefs = empty
 {-
 ************************************************************************
 *                                                                      *
+        TailCallInfo
+*                                                                      *
+************************************************************************
+
+Note [TailCallInfo]
+~~~~~~~~~~~~~~~~~~~
+
+The occurrence analyser determines what can be made into a join point, but it
+doesn't change the binder into a JoinId because then it would be inconsistent
+with the occurrences. Thus it's left to the simplifier (or to simpleOptExpr) to
+change the IdDetails.
+
+The AlwaysTailCalled marker actually means slightly more than simply that the
+binder is always tail called. See Note [Invariants on join points].
+
+This info is quite fragile and should not be relied upon unless the occurrence
+analyser has *just* run. Use 'Id.isJoinId_maybe' for the permanent state of
+the join-point-hood of a binder.
+-}
+
+data TailCallInfo = AlwaysTailCalled JoinArity
+                  | NoTailCallInfo
+
+vanillaTailCallInfo :: TailCallInfo
+vanillaTailCallInfo = NoTailCallInfo
+
+pprTailCallInfo :: TailCallInfo -> SDoc
+pprTailCallInfo (AlwaysTailCalled ar) = sep [ text "Tail", int ar ]
+pprTailCallInfo _                     = empty
+
+instance Outputable TailCallInfo where
+  ppr = pprTailCallInfo
+
+{-
+************************************************************************
+*                                                                      *
 \subsection{Bulk operations on IdInfo}
 *                                                                      *
 ************************************************************************
@@ -546,6 +621,13 @@ zapFragileInfo info
                `setOccInfo` zapFragileOcc occ)
   where
     occ = occInfo info
+
+zapTailCallInfo :: IdInfo -> Maybe IdInfo
+zapTailCallInfo info
+  | AlwaysTailCalled{} <- tailCallInfo info
+  = Just $ info { tailCallInfo = NoTailCallInfo }
+  | otherwise
+  = Nothing
 
 {-
 ************************************************************************
