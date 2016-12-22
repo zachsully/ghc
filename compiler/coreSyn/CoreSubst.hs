@@ -867,6 +867,9 @@ simpleOptExpr :: CoreExpr -> CoreExpr
 -- We also inline bindings that bind a Eq# box: see
 -- See Note [Getting the map/coerce RULE to work].
 --
+-- Also we convert functions to join points where possible (as
+-- the occurrence analyser does most of the work anyway).
+--
 -- The result is NOT guaranteed occurrence-analysed, because
 -- in  (let x = y in ....) we substitute for x; so y's occ-info
 -- may change radically
@@ -1119,7 +1122,12 @@ subst_opt_id_bndr subst@(Subst in_scope id_subst tv_subst cv_subst) old_id
   where
     id1    = uniqAway in_scope old_id
     id2    = setIdType id1 (substTy subst (idType old_id))
-    new_id = zapFragileIdInfo id2       -- Zaps rules, worker-info, unfolding
+    id3    | AlwaysTailCalled join_arity <- tailCallInfo (idInfo id3)
+           = modifyIdInfo (`setTailCallInfo` vanillaTailCallInfo) $
+               id2 `asJoinId` join_arity
+           | otherwise
+           = id2
+    new_id = zapFragileIdInfo id3       -- Zaps rules, worker-info, unfolding
                                         -- and fragile OccInfo
     new_in_scope = in_scope `extendInScopeSet` new_id
 
