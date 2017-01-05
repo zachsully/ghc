@@ -64,13 +64,15 @@ module BasicTypes(
         noOneShotInfo, hasNoOneShotInfo, isOneShotInfo,
         bestOneShot, worstOneShot,
 
-        OccInfo(..), seqOccInfo, zapFragileOcc, isOneOcc,
+        OccInfo(..), noOccInfo, seqOccInfo, zapFragileOcc, isOneOcc,
         isDeadOcc, isStrongLoopBreaker, isWeakLoopBreaker, isNoOcc,
         strongLoopBreaker, weakLoopBreaker,
 
         InsideLam, insideLam, notInsideLam,
         OneBranch, oneBranch, notOneBranch,
         InterestingCxt,
+        TailCallInfo(..), tailCallInfo,
+        isAlwaysTailCalled, isAlwaysTailCalled_maybe,
 
         EP(..),
 
@@ -814,20 +816,23 @@ defn of OccInfo here, safely at the bottom
 
 -- | identifier Occurrence Information
 data OccInfo
-  = NoOccInfo           -- ^ There are many occurrences, or unknown occurrences
+  = ManyOccs            -- ^ There are many occurrences, or unknown occurrences
+      { occ_tail    :: !TailCallInfo }
 
   | IAmDead             -- ^ Marks unused variables.  Sometimes useful for
                         -- lambda and case-bound variables.
 
-  | OneOcc
-        !InsideLam
-        !OneBranch
-        !InterestingCxt -- ^ Occurs exactly once, not inside a rule
+  | OneOcc              -- ^ Occurs exactly once (per branch), not inside a rule
+      { occ_in_lam  :: !InsideLam
+      , occ_one_br  :: !OneBranch
+      , occ_int_cxt :: !InterestingCxt
+      , occ_tail    :: !TailCallInfo }
 
   -- | This identifier breaks a loop of mutually recursive functions. The field
   -- marks whether it is only a loop breaker due to a reference in a rule
   | IAmALoopBreaker     -- Note [LoopBreaker OccInfo]
-        !RulesOnly
+      { occ_rules_only :: !RulesOnly
+      , occ_tail       :: !TailCallInfo }
 
   deriving (Eq)
 
@@ -845,9 +850,12 @@ Note [LoopBreaker OccInfo]
 See OccurAnal Note [Weak loop breakers]
 -}
 
+noOccInfo :: OccInfo
+noOccInfo = ManyOccs { occ_tail = NoTailCallInfo }
+
 isNoOcc :: OccInfo -> Bool
-isNoOcc NoOccInfo = True
-isNoOcc _         = False
+isNoOcc ManyOccs{} = True
+isNoOcc _          = False
 
 seqOccInfo :: OccInfo -> ()
 seqOccInfo occ = occ `seq` ()
@@ -874,17 +882,42 @@ oneBranch, notOneBranch :: OneBranch
 oneBranch    = True
 notOneBranch = False
 
+-----------------
+data TailCallInfo = AlwaysTailCalled JoinArity -- See Note [TailCallInfo]
+                  | NoTailCallInfo
+  deriving (Eq)
+
+tailCallInfo :: OccInfo -> TailCallInfo
+tailCallInfo IAmDead   = NoTailCallInfo -- *could* convert but no point
+tailCallInfo other     = occ_tail other
+
+isAlwaysTailCalled :: OccInfo -> Bool
+isAlwaysTailCalled occ
+  = case tailCallInfo occ of AlwaysTailCalled{} -> True
+                             NoTailCallInfo     -> False
+
+isAlwaysTailCalled_maybe :: OccInfo -> Maybe JoinArity
+isAlwaysTailCalled_maybe occ
+  = case tailCallInfo occ of AlwaysTailCalled join_arity -> Just join_arity
+                             NoTailCallInfo              -> Nothing
+
+instance Outputable TailCallInfo where
+  ppr (AlwaysTailCalled ar) = sep [ text "Tail", int ar ]
+  ppr _                     = empty
+
+-----------------
 strongLoopBreaker, weakLoopBreaker :: OccInfo
-strongLoopBreaker = IAmALoopBreaker False
-weakLoopBreaker   = IAmALoopBreaker True
+strongLoopBreaker = IAmALoopBreaker False NoTailCallInfo
+weakLoopBreaker   = IAmALoopBreaker True  NoTailCallInfo
 
 isWeakLoopBreaker :: OccInfo -> Bool
-isWeakLoopBreaker (IAmALoopBreaker _) = True
+isWeakLoopBreaker (IAmALoopBreaker{}) = True
 isWeakLoopBreaker _                   = False
 
 isStrongLoopBreaker :: OccInfo -> Bool
-isStrongLoopBreaker (IAmALoopBreaker False) = True   -- Loop-breaker that breaks a non-rule cycle
-isStrongLoopBreaker _                       = False
+isStrongLoopBreaker (IAmALoopBreaker { occ_rules_only = False }) = True
+  -- Loop-breaker that breaks a non-rule cycle
+isStrongLoopBreaker _                                            = False
 
 isDeadOcc :: OccInfo -> Bool
 isDeadOcc IAmDead = True
@@ -895,16 +928,21 @@ isOneOcc (OneOcc {}) = True
 isOneOcc _           = False
 
 zapFragileOcc :: OccInfo -> OccInfo
-zapFragileOcc (OneOcc {}) = NoOccInfo
-zapFragileOcc occ         = occ
+zapFragileOcc (OneOcc {}) = noOccInfo
+zapFragileOcc IAmDead     = IAmDead
+zapFragileOcc occ         = occ { occ_tail = NoTailCallInfo }
 
 instance Outputable OccInfo where
   -- only used for debugging; never parsed.  KSW 1999-07
-  ppr NoOccInfo            = empty
-  ppr (IAmALoopBreaker ro) = text "LoopBreaker" <> if ro then char '!' else empty
+  ppr (ManyOccs tails)     = pprShortTailCallInfo tails
   ppr IAmDead              = text "Dead"
-  ppr (OneOcc inside_lam one_branch int_cxt)
-        = text "Once" <> pp_lam <> pp_br <> pp_args
+  ppr (IAmALoopBreaker rule_only tails)
+        = text "LoopBreaker" <> pp_ro <> pprShortTailCallInfo tails
+        where
+          pp_ro | rule_only = char '!'
+                | otherwise = empty
+  ppr (OneOcc inside_lam one_branch int_cxt tail_info)
+        = text "Once" <> pp_lam <> pp_br <> pp_args <> pp_tail
         where
           pp_lam | inside_lam = char 'L'
                  | otherwise  = empty
@@ -912,8 +950,43 @@ instance Outputable OccInfo where
                  | otherwise  = char '*'
           pp_args | int_cxt   = char '!'
                   | otherwise = empty
+          pp_tail             = pprShortTailCallInfo tail_info
+
+pprShortTailCallInfo :: TailCallInfo -> SDoc
+pprShortTailCallInfo (AlwaysTailCalled ar) = char 'T' <> brackets (int ar)
+pprShortTailCallInfo NoTailCallInfo        = empty
 
 {-
+Note [TailCallInfo]
+~~~~~~~~~~~~~~~~~~~
+The occurrence analyser determines what can be made into a join point, but it
+doesn't change the binder into a JoinId because then it would be inconsistent
+with the occurrences. Thus it's left to the simplifier (or to simpleOptExpr) to
+change the IdDetails.
+
+The AlwaysTailCalled marker actually means slightly more than simply that the
+function is always tail-called. See Note [Invariants on join points].
+
+This info is quite fragile and should not be relied upon unless the occurrence
+analyser has *just* run. Use 'Id.isJoinId_maybe' for the permanent state of
+the join-point-hood of a binder; a join id itself will not be marked
+AlwaysTailCalled.
+
+Note that there is a 'TailCallInfo' on a 'ManyOccs' value. One might expect that
+being tail-called would mean that the variable could only appear once per branch
+(thus getting a `OneOcc { occ_one_br = True }` occurrence info), but a join
+point can also be invoked from other join points, not just from case branches:
+
+  let j1 x = ...
+      j2 y = ... j1 z {- tail call -} ...
+  in case w of
+       A -> j1 v
+       B -> j2 u
+       C -> j2 q
+
+Here both 'j1' and 'j2' will get marked AlwaysTailCalled, but j1 will get
+ManyOccs and j2 will get `OneOcc { occ_one_br = True }`.
+
 ************************************************************************
 *                                                                      *
                 Default method specfication

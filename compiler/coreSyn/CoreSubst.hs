@@ -1091,8 +1091,10 @@ maybe_substitute subst b r
     safe_to_inline :: OccInfo -> Bool
     safe_to_inline (IAmALoopBreaker {})     = False
     safe_to_inline IAmDead                  = True
-    safe_to_inline (OneOcc in_lam one_br _) = (not in_lam && one_br) || trivial
-    safe_to_inline NoOccInfo                = trivial
+    safe_to_inline occ@(OneOcc {})          = (not (occ_in_lam occ) &&
+                                                occ_one_br occ)
+                                            || trivial
+    safe_to_inline (ManyOccs {})            = trivial
 
     trivial | exprIsTrivial r = True
             | (Var fun, args) <- collectArgs r
@@ -1122,9 +1124,8 @@ subst_opt_id_bndr subst@(Subst in_scope id_subst tv_subst cv_subst) old_id
   where
     id1    = uniqAway in_scope old_id
     id2    = setIdType id1 (substTy subst (idType old_id))
-    id3    | AlwaysTailCalled join_arity <- tailCallInfo (idInfo id3)
-           = modifyIdInfo (`setTailCallInfo` vanillaTailCallInfo) $
-               id2 `asJoinId` join_arity
+    id3    | AlwaysTailCalled join_arity <- tailCallInfo (idOccInfo id2)
+           = id2 `asJoinId` join_arity
            | otherwise
            = id2
     new_id = zapFragileIdInfo id3       -- Zaps rules, worker-info, unfolding

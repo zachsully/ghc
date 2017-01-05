@@ -54,6 +54,9 @@ module IdInfo (
         InsideLam, OneBranch,
         insideLam, notInsideLam, oneBranch, notOneBranch,
 
+        TailCallInfo(..),
+        tailCallInfo, isAlwaysTailCalled, isAlwaysTailCalled_maybe,
+
         -- ** The RuleInfo type
         RuleInfo(..),
         emptyRuleInfo,
@@ -65,10 +68,6 @@ module IdInfo (
         CafInfo(..),
         ppCafInfo, mayHaveCafRefs,
         cafInfo, setCafInfo,
-
-        -- ** Tail call info
-        TailCallInfo(..),
-        tailCallInfo, setTailCallInfo, vanillaTailCallInfo, pprTailCallInfo,
 
         -- ** Tick-box Info
         TickBoxOp(..), TickBoxId,
@@ -297,10 +296,8 @@ data IdInfo
         strictnessInfo  :: StrictSig,      --  ^ A strictness signature
 
         demandInfo      :: Demand,       -- ^ ID demand information
-        callArityInfo   :: !ArityInfo,   -- ^ How this is called.
+        callArityInfo :: !ArityInfo    -- ^ How this is called.
                                          -- n <=> all calls have at least n arguments
-        tailCallInfo    :: TailCallInfo  -- ^ Whether always tail-called, and if
-                                         -- so, how many args (value or type)
     }
 
 -- Setters
@@ -337,9 +334,6 @@ setDemandInfo info dd = dd `seq` info { demandInfo = dd }
 setStrictnessInfo :: IdInfo -> StrictSig -> IdInfo
 setStrictnessInfo info dd = dd `seq` info { strictnessInfo = dd }
 
-setTailCallInfo :: IdInfo -> TailCallInfo -> IdInfo
-setTailCallInfo info tci = tci `seq` info { tailCallInfo = tci }
-
 -- | Basic 'IdInfo' that carries no useful information whatsoever
 vanillaIdInfo :: IdInfo
 vanillaIdInfo
@@ -350,11 +344,10 @@ vanillaIdInfo
             unfoldingInfo       = noUnfolding,
             oneShotInfo         = NoOneShotInfo,
             inlinePragInfo      = defaultInlinePragma,
-            occInfo             = NoOccInfo,
+            occInfo             = noOccInfo,
             demandInfo          = topDmd,
             strictnessInfo      = nopSig,
-            callArityInfo       = unknownArity,
-            tailCallInfo        = vanillaTailCallInfo
+            callArityInfo     = unknownArity
            }
 
 -- | More informative 'IdInfo' we can use when we know the 'Id' has no CAF references
@@ -528,42 +521,6 @@ ppCafInfo MayHaveCafRefs = empty
 {-
 ************************************************************************
 *                                                                      *
-        TailCallInfo
-*                                                                      *
-************************************************************************
-
-Note [TailCallInfo]
-~~~~~~~~~~~~~~~~~~~
-
-The occurrence analyser determines what can be made into a join point, but it
-doesn't change the binder into a JoinId because then it would be inconsistent
-with the occurrences. Thus it's left to the simplifier (or to simpleOptExpr) to
-change the IdDetails.
-
-The AlwaysTailCalled marker actually means slightly more than simply that the
-binder is always tail called. See Note [Invariants on join points].
-
-This info is quite fragile and should not be relied upon unless the occurrence
-analyser has *just* run. Use 'Id.isJoinId_maybe' for the permanent state of
-the join-point-hood of a binder.
--}
-
-data TailCallInfo = AlwaysTailCalled JoinArity
-                  | NoTailCallInfo
-
-vanillaTailCallInfo :: TailCallInfo
-vanillaTailCallInfo = NoTailCallInfo
-
-pprTailCallInfo :: TailCallInfo -> SDoc
-pprTailCallInfo (AlwaysTailCalled ar) = sep [ text "Tail", int ar ]
-pprTailCallInfo _                     = empty
-
-instance Outputable TailCallInfo where
-  ppr = pprTailCallInfo
-
-{-
-************************************************************************
-*                                                                      *
 \subsection{Bulk operations on IdInfo}
 *                                                                      *
 ************************************************************************
@@ -583,12 +540,16 @@ zapLamInfo info@(IdInfo {occInfo = occ, demandInfo = demand})
   where
         -- The "unsafe" occ info is the ones that say I'm not in a lambda
         -- because that might not be true for an unsaturated lambda
-    is_safe_occ (OneOcc in_lam _ _) = in_lam
-    is_safe_occ _other              = True
+    is_safe_occ occ | isAlwaysTailCalled occ     = False
+    is_safe_occ (OneOcc { occ_in_lam = in_lam }) = in_lam
+    is_safe_occ _other                           = True
 
     safe_occ = case occ of
-                 OneOcc _ once int_cxt -> OneOcc insideLam once int_cxt
-                 _other                -> occ
+                 OneOcc{} -> occ { occ_in_lam = True
+                                 , occ_tail   = NoTailCallInfo }
+                 IAmALoopBreaker{}
+                          -> occ { occ_tail   = NoTailCallInfo }
+                 _other   -> occ
 
     is_safe_dmd dmd = not (isStrictDmd dmd)
 
@@ -624,10 +585,11 @@ zapFragileInfo info
 
 zapTailCallInfo :: IdInfo -> Maybe IdInfo
 zapTailCallInfo info
-  | AlwaysTailCalled{} <- tailCallInfo info
-  = Just $ info { tailCallInfo = NoTailCallInfo }
-  | otherwise
-  = Nothing
+  = case occInfo info of
+      occ | isAlwaysTailCalled occ -> Just (info `setOccInfo` safe_occ)
+        where
+          safe_occ = occ { occ_tail = NoTailCallInfo }
+      _                            -> Nothing
 
 {-
 ************************************************************************

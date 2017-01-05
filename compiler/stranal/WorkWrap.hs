@@ -472,7 +472,7 @@ splitFun dflags fam_envs fn_id fn_info wrap_dmds res_info rhs
 
             wrap_id   = fn_id `setIdUnfolding`  mkWwInlineRule wrap_rhs arity
                               `setInlinePragma` wrap_prag
-                              `setIdOccInfo`    NoOccInfo
+                              `setIdOccInfo`    noOccInfo
                                 -- Zap any loop-breaker-ness, to avoid bleating from Lint
                                 -- about a loop breaker with an INLINE rule
 

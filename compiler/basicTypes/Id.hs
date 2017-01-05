@@ -696,7 +696,7 @@ setIdOccInfo :: Id -> OccInfo -> Id
 setIdOccInfo id occ_info = modifyIdInfo (`setOccInfo` occ_info) id
 
 zapIdOccInfo :: Id -> Id
-zapIdOccInfo b = b `setIdOccInfo` NoOccInfo
+zapIdOccInfo b = b `setIdOccInfo` noOccInfo
 
 {-
         ---------------------------------

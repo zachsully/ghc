@@ -811,7 +811,7 @@ lintCoreApp var args
                            mkJoinBndrOccMismatchMsg var' var
                        ; return $ Just join_arity }
                  Nothing ->
-                   case tailCallInfo (idInfo var') of
+                   case tailCallInfo (idOccInfo var') of
                      AlwaysTailCalled join_arity -> return $ Just join_arity
                        -- This function will be turned into a join point by the
                        -- simplifier; typecheck it as if it already were one

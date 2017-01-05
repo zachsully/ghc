@@ -35,7 +35,6 @@ import VarSet
 import VarEnv
 import Var
 import Demand           ( argOneShots, argsOneShots )
-import Maybes           ( orElse )
 import Digraph          ( SCC(..), Node
                         , stronglyConnCompFromEdgedVerticesUniq
                         , stronglyConnCompFromEdgedVerticesUniqR )
@@ -66,7 +65,7 @@ occurAnalysePgm this_mod active_rule imp_rules vects vectVars binds
 
   | otherwise   -- See Note [Glomming]
   = WARN( True, hang (text "Glomming in" <+> ppr this_mod <> colon)
-                   2 (ppr (ud_occ_info final_usage) ) )
+                   2 (ppr final_usage) )
     occ_anald_glommed_binds
   where
     init_env = initOccEnv active_rule
@@ -112,13 +111,13 @@ occurAnalyseExpr :: CoreExpr -> CoreExpr
 occurAnalyseExpr = occurAnalyseExpr' True -- do binder swap
 
 occurAnalyseExpr_NoBinderSwap :: CoreExpr -> CoreExpr
-occurAnalyseExpr_NoBinderSwap = occurAnalyseExpr' False  -- no swap
+occurAnalyseExpr_NoBinderSwap = occurAnalyseExpr' False -- do not do binder swap
 
 occurAnalyseExpr' :: Bool -> CoreExpr -> CoreExpr
 occurAnalyseExpr' enable_binder_swap expr
   = snd (occAnal env expr)
   where
-    env = (initOccEnv all_active_rules) { occ_binder_swap = enable_binder_swap }
+    env = (initOccEnv all_active_rules) {occ_binder_swap = enable_binder_swap}
     -- To be conservative, we say that all inlines and rules are active
     all_active_rules = \_ -> True
 
@@ -675,12 +674,12 @@ occAnalNonRecBind env lvl imp_rule_edges binder rhs body_usage
   = (body_usage, [])
 
   | otherwise                   -- It's mentioned in the body
-  = (body_usage' +++ rhs_usage', [NonRec final_binder rhs'])
+  = (body_usage' +++ rhs_usage', [NonRec tagged_binder rhs'])
   where
-    (body_usage', tagged_binder) = tagBinder body_usage binder
-    final_binder       = addFinalTailCallInfo body_usage lvl tagged_binder rhs
-                           `orElse` tagged_binder
-    (rhs_usage1, rhs') = occAnalNonRecRhs env final_binder rhs
+    make_join = canBecomeJoinPoints lvl NonRecursive body_usage
+                  [(binder, rhs)]
+    (body_usage', tagged_binder) = tagBinder make_join body_usage binder
+    (rhs_usage1, rhs') = occAnalNonRecRhs env tagged_binder rhs
     rhs_usage2 = case occAnalUnfolding env NonRecursive binder of
                    Just unf_usage -> rhs_usage1 +++ unf_usage
                    Nothing        -> rhs_usage1
@@ -693,7 +692,7 @@ occAnalNonRecBind env lvl imp_rule_edges binder rhs body_usage
                  lookupVarEnv imp_rule_edges binder
        -- See Note [Preventing loops due to imported functions rules]
 
-    rhs_usage' = adjustRhsUsage (willBeJoinId_maybe final_binder) NonRecursive
+    rhs_usage' = adjustRhsUsage (willBeJoinId_maybe tagged_binder) NonRecursive
                                 rhs' rhs_usage4
 
 -----------------
@@ -748,12 +747,11 @@ occAnalRec lvl (AcyclicSCC (ND { nd_bndr = bndr, nd_rhs = rhs
 
   | otherwise                   -- It's mentioned in the body
   = (body_uds' +++ rhs_uds',
-     NonRec final_bndr rhs : binds)
+     NonRec tagged_bndr rhs : binds)
   where
-    (body_uds', tagged_bndr) = tagBinder body_uds bndr
-    final_bndr = addFinalTailCallInfo body_uds lvl tagged_bndr rhs
-                   `orElse` tagged_bndr
-    rhs_uds' = adjustRhsUsage (willBeJoinId_maybe final_bndr) NonRecursive
+    make_join = canBecomeJoinPoints lvl NonRecursive body_uds [(bndr, rhs)]
+    (body_uds', tagged_bndr) = tagBinder make_join body_uds bndr
+    rhs_uds' = adjustRhsUsage (willBeJoinId_maybe tagged_bndr) NonRecursive
                               rhs rhs_uds
 
         -- The Rec case is the interesting one
@@ -777,27 +775,31 @@ occAnalRec lvl (CyclicSCC orig_details_s) (body_uds, binds)
 
     ----------------------------
     -- Compute usage details
-    orig_total_uds = foldl add_uds body_uds orig_details_s
+    zapped_body_uds = forceZapping body_uds -- Going to reuse; don't zap twice!
+    orig_total_uds = foldl add_uds zapped_body_uds orig_details_s
 
-    mb_marked_bndrs = addFinalTailCallInfoRec orig_total_uds lvl Recursive
-                                              orig_pairs
-    details_s1 = case mb_marked_bndrs of
-                   Just bndrs' -> [ nd { nd_bndr = bndr' }
-                                  | (nd, bndr') <- orig_details_s `zip` bndrs' ]
-                   Nothing    -> orig_details_s
-    details_s = map adjust details_s1
-    total_uds = foldl add_uds body_uds details_s
+    make_joins = canBecomeJoinPoints lvl Recursive orig_total_uds orig_pairs
+    details_s = map adjust orig_details_s
+    total_uds = foldl add_uds zapped_body_uds details_s
     final_uds = total_uds `minusDetails` bndr_set
     add_uds usage_so_far nd = usage_so_far +++ nd_uds nd
 
     adjust nd@(ND { nd_bndr = bndr', nd_rhs = rhs', nd_uds = uds })
-      = nd { nd_uds = adjustRhsUsage (willBeJoinId_maybe bndr') Recursive
-                                     rhs' uds }
+      = nd { nd_uds = adjustRhsUsage (will_be_join bndr') Recursive rhs' uds }
+    -- Haven't tagged the binders yet, so can't use willBeJoinId_maybe
+    will_be_join bndr'
+      | make_joins
+      , let occ = lookupDetails orig_total_uds bndr'
+      , AlwaysTailCalled arity <- tailCallInfo occ
+      = Just arity
+      | otherwise
+      = isJoinId_maybe bndr'
 
     ------------------------------
         -- See Note [Choosing loop breakers] for loop_breaker_nodes
     loop_breaker_nodes :: [LetrecNode]
-    loop_breaker_nodes = mkLoopBreakerNodes bndr_set total_uds details_s
+    loop_breaker_nodes = mkLoopBreakerNodes make_joins bndr_set total_uds
+                                            details_s
 
     ------------------------------
     weak_fvs :: VarSet
@@ -881,13 +883,18 @@ reOrderNodes depth bndr_set weak_fvs (node : nodes) binds
 
 mk_loop_breaker :: LetrecNode -> Binding
 mk_loop_breaker (ND { nd_bndr = bndr, nd_rhs = rhs}, _, _)
-  = (setIdOccInfo bndr strongLoopBreaker, rhs)
+  = (bndr `setIdOccInfo` strongLoopBreaker { occ_tail = tail_info }, rhs)
+  where
+    tail_info = tailCallInfo (idOccInfo bndr)
 
 mk_non_loop_breaker :: VarSet -> LetrecNode -> Binding
 -- See Note [Weak loop breakers]
 mk_non_loop_breaker weak_fvs (ND { nd_bndr = bndr, nd_rhs = rhs}, _, _)
-  | bndr `elemVarSet` weak_fvs = (setIdOccInfo bndr weakLoopBreaker, rhs)
+  | bndr `elemVarSet` weak_fvs = (setIdOccInfo bndr occ', rhs)
   | otherwise                  = (bndr, rhs)
+  where
+    occ' = weakLoopBreaker { occ_tail = tail_info }
+    tail_info = tailCallInfo (idOccInfo bndr)
 
 ----------------------------------
 chooseLoopBreaker :: Bool             -- True <=> Too many iterations,
@@ -1158,13 +1165,14 @@ makeNode env imp_rule_edges bndr_set (bndr, rhs)
                       -- isn't the right thing (it tells about
                       -- RULE activation), so we'd need more plumbing
 
-mkLoopBreakerNodes :: VarSet -> UsageDetails -> [Details] -> [LetrecNode]
+mkLoopBreakerNodes :: Bool -> VarSet -> UsageDetails -> [Details]
+                   -> [LetrecNode]
 -- Does three things
 --   a) tag each binder with its occurrence info
 --   b) add a NodeScore to each node
 --   c) make a Node with the right dependency edges for
 --      the loop-breaker SCC analysis
-mkLoopBreakerNodes bndr_set total_uds details_s
+mkLoopBreakerNodes make_joins bndr_set total_uds details_s
   = map mk_lb_node details_s
   where
     mk_lb_node nd@(ND { nd_bndr = bndr, nd_rhs = rhs, nd_inl = inl_fvs })
@@ -1175,7 +1183,7 @@ mkLoopBreakerNodes bndr_set total_uds details_s
               -- Note [Deterministic SCC] in Digraph.
       where
         nd'     = nd { nd_bndr = bndr', nd_score = score }
-        bndr'   = setBinderOcc total_uds bndr
+        bndr'   = snd $ tagBinder make_joins total_uds bndr
         score   = nodeScore bndr bndr' rhs lb_deps
         lb_deps = extendFvs_ rule_fv_env inl_fvs
 
@@ -1397,8 +1405,8 @@ Hence the is_lb field of NodeScore
 ************************************************************************
 -}
 
-occAnalRecRhs :: OccEnv -> CoreExpr    -- Binder and rhs
-              -> (UsageDetails, CoreExpr)
+occAnalRecRhs :: OccEnv -> CoreExpr    -- Rhs
+           -> (UsageDetails, CoreExpr)
               -- Returned usage details covers only the RHS,
               -- and *not* the RULE or INLINE template for the Id
 occAnalRecRhs env rhs = occAnalRhs (rhsCtxt env) rhs
@@ -1422,7 +1430,8 @@ occAnalNonRecRhs env bndr rhs
 
     certainly_inline -- See Note [Cascading inlines]
       = case idOccInfo bndr of
-          OneOcc in_lam one_br _ -> not in_lam && one_br && active && not_stable
+          OneOcc { occ_in_lam = in_lam, occ_one_br = one_br }
+                                 -> not in_lam && one_br && active && not_stable
           _                      -> False
 
     dmd        = idDemandInfo bndr
@@ -1575,7 +1584,7 @@ occAnal env (Tick tickish body)
 
 occAnal env (Cast expr co)
   = case occAnal env expr of { (usage, expr') ->
-    let usage1 = markManyIf (isRhsEnv env) usage
+    let usage1 = zapDetailsIf (isRhsEnv env) usage
         usage2 = addIdOccs usage1 (coVarsOfCo co)
           -- See Note [Gather occurrences of coercion variables]
     in (dropTailCallInfo usage2, Cast expr' co)
@@ -1636,9 +1645,12 @@ occAnal env (Case scrut bndr ty alts)
         -- into
         --      case x of w { (p,q) -> f (p,q) }
     tag_case_bndr usage bndr
-      = case lookupVarEnv (ud_occ_info usage) bndr of
-          Nothing -> (usage,                   setIdOccInfo bndr IAmDead)
-          Just _  -> (usage `delDetails` bndr, setIdOccInfo bndr NoOccInfo)
+      = (usage', setIdOccInfo bndr final_occ_info)
+      where
+        occ_info       = lookupDetails usage bndr
+        usage'         = usage `delDetails` bndr
+        final_occ_info = case occ_info of IAmDead -> IAmDead
+                                          _       -> noOccInfo
 
     alt_env = mkAltEnv env scrut bndr
     occ_anal_alt = occAnalAlt alt_env
@@ -1743,12 +1755,11 @@ occAnalApp env (fun, args, ticks)
         -- onto the context stack.
     !(args_uds, args') = occAnalArgs env args []
 
-markManyIf :: Bool              -- If this is true
-           -> UsageDetails      -- Then do markMany on this
-           -> UsageDetails
-markManyIf True  uds = uds { ud_occ_info = mapVarEnv markMany
-                                                     (ud_occ_info uds) }
-markManyIf False uds = uds
+zapDetailsIf :: Bool              -- If this is true
+             -> UsageDetails      -- Then do zapDetails on this
+             -> UsageDetails
+zapDetailsIf True  uds = zapDetails uds
+zapDetailsIf False uds = uds
 
 {-
 Note [Use one-shot information]
@@ -1839,7 +1850,7 @@ wrapAltRHS env (Just (scrut_var, let_rhs)) alt_usg bndrs alt_rhs
     -- if the scrutinee was a cast, so we must gather their
     -- usage. See Note [Gather occurrences of coercion variables]
     (let_rhs_usg, let_rhs') = occAnal env let_rhs
-    (alt_usg', tagged_scrut_var) = tagBinder alt_usg scrut_var
+    (alt_usg', tagged_scrut_var) = tagBinder False alt_usg scrut_var
 
 wrapAltRHS _ _ alt_usg _ alt_rhs
   = (alt_usg, alt_rhs)
@@ -2173,106 +2184,131 @@ mkAltEnv env@(OccEnv { occ_gbl_scrut = pe }) scrut case_bndr
 ************************************************************************
 -}
 
-data UsageDetails
-  = UD { ud_occ_info :: IdEnv OccInfo -- A finite map from ids to their usage
+type OccInfoEnv = IdEnv OccInfo -- A finite map from ids to their usage
                 -- INVARIANT: never IAmDead
                 -- (Deadness is signalled by not being in the map at all)
-       , ud_tail_calls :: IdEnv JoinArity -- Ids only occurring as tail calls
-                -- INVARIANT: Subset of ud_occ_info
-                -- Kept separately so we can drop them all at once in O(1) time
-       }
+
+data UsageDetails
+  = UD !OccInfoEnv !Zapper
+
+data Zapper -- Function which will zap each OccInfo when applied
+  = ZapAll                               -- Set everything to noOccInfo
+  | Zapper { zap_markAllInLam :: !Bool   -- Each id appears under a lambda
+           , zap_zapTailCalls :: !Bool } -- No calls count as tail calls
+  deriving (Eq)
 
 instance Outputable UsageDetails where
-  ppr (UD { ud_occ_info = occs, ud_tail_calls = tails })
-    = sep [text "occs=" <> ppr occs <> comma, text "tails=" <> ppr tails]
+  ppr (UD env zapper)
+    = sep [parens (ppr zapper), ppr env]
+
+instance Outputable Zapper where
+  ppr ZapAll = text "zap all occ info"
+  ppr (Zapper in_lam no_tail)
+    | null parts = text "no zapping"
+    | otherwise  = pprWithCommas text parts
+    where
+      parts = [ "all under lambda" | in_lam  ] ++
+              [ "no tail calls"    | no_tail ]
+
+idZapper :: Zapper
+idZapper = Zapper False False
+
+isIdZapper :: Zapper -> Bool
+isIdZapper (Zapper False False) = True
+isIdZapper _                    = False
+
+runZapper :: Zapper -> OccInfo -> OccInfo
+runZapper ZapAll
+  = const noOccInfo
+runZapper (Zapper all_in_lam no_tail)
+  = (if all_in_lam then markInsideLam     else id) .
+    (if no_tail    then markNonTailCalled else id)
+
+mapZapper :: Zapper -> VarEnv OccInfo -> VarEnv OccInfo
+mapZapper zapper
+  | isIdZapper zapper = id
+  | otherwise         = mapVarEnv (runZapper zapper)
+
+leZapper :: Zapper -> Zapper -> Bool
+leZapper _ ZapAll = True
+leZapper ZapAll _ = False
+leZapper (Zapper a1 a2) (Zapper b1 b2)
+  = a1 <= b1 && a2 <= b2 -- NB False < True
 
 (+++), combineAltsUsageDetails
-        :: UsageDetails -> UsageDetails -> UsageDetails
+        :: HasCallStack => UsageDetails -> UsageDetails -> UsageDetails
 
 (+++) = combineUsageDetailsWith addOccInfo
 combineAltsUsageDetails = combineUsageDetailsWith orOccInfo
 
-combineUsageDetailsWith :: (OccInfo -> OccInfo -> OccInfo)
+combineUsageDetailsWith :: HasCallStack => (OccInfo -> OccInfo -> OccInfo)
                         -> UsageDetails -> UsageDetails -> UsageDetails
-combineUsageDetailsWith plus_occ_info usage1 usage2
-  = UD { ud_occ_info   = plusVarEnv_C plus_occ_info (ud_occ_info usage1)
-                                                    (ud_occ_info usage2)
-       , ud_tail_calls = combineTailCallInfo usage1 usage2
-       }
-
-combineTailCallInfo :: UsageDetails -> UsageDetails -> IdEnv JoinArity
-combineTailCallInfo (UD occs1 tails1) (UD occs2 tails2)
-  = tails
+combineUsageDetailsWith plus_occ_info ud1@(UD env1 zap1) ud2@(UD env2 zap2)
+  -- Important and very common cheap cases; don't zap for no reason!
+  | isEmptyVarEnv env1 = ud2
+  | isEmptyVarEnv env2 = ud1
+  -- We want to zap lazily when possible. When combining environments with
+  -- different zappers, we apply the stronger one immediately and use the
+  -- weaker one for the combined tree. (One side may end up zapped twice, but
+  -- zappers are idempotent, so no harm done.)
+  | zap1 == zap2
+  = -- Good news! Just combine them and zap later
+    UD (plusVarEnv_C plus_occ_info env1 env2)
+       zap1
+  | zap1 `leZapper` zap2
+  = -- Zap on the right
+    UD (merge idZapper zap2 env1 env2) zap1
+  | zap2 `leZapper` zap1
+  = -- Zap on the left
+    UD (merge zap1 idZapper env1 env2) zap2
+  | otherwise
+    -- Zap all around
+  = UD (merge zap1 zap2 env1 env2) idZapper
   where
-    -- TODO There might be ways to make this more efficient. Saving grace is
-    -- that tails1 and tails2 are usually small and often empty.
+    merge zap1 zap2 env1 env2
+      = mergeUFM_Directly (combine zap1 zap2) (mapZapper zap1) (mapZapper zap2)
+          env1 env2
 
-    -- Three ways for a variable to end up in the tail-called set:
-    -- (1) There are tail calls on the left and *no* occurrences on the right
-    -- (2) There are tail calls on the right and *no* occurrences on the left
-    -- (3) There are tail calls on both sides, with same # of type+value args
-
-    -- Each variable in occs* but not tails* occurs in non-tail position
-    nontails1 = occs1 `minusVarEnv` tails1
-    nontails2 = occs2 `minusVarEnv` tails2
-    -- Each variable in non-tail position gets thrown out of the tail-called set
-    tails1' = tails1 `minusVarEnv` nontails2 -- (1) or potentially (3)
-    tails2' = tails2 `minusVarEnv` nontails1 -- (2) or potentially (3)
-
-    tails = plusMaybeVarEnv_C keep_if_equal tails1' tails2'
-
-    keep_if_equal tcinfo1 tcinfo2 | tcinfo1 == tcinfo2 = Just tcinfo1
-                                  | otherwise          = Nothing
+    combine zap1 zap2
+      = \_uniq occ1 occ2 -> Just $ plus_occ_info (runZapper zap1 occ1)
+                                                 (runZapper zap2 occ2)
 
 addOneOcc :: UsageDetails -> Id -> OccInfo -> UsageDetails
-addOneOcc usage id info
-  = usage +++ oneOcc id info
+addOneOcc (UD env zap) id info
+  = UD (plusVarEnv_C addOccInfo zapped_env (unitVarEnv id info)) idZapper
+  where
+    zapped_env = mapZapper zap env
         -- ToDo: make this more efficient
 
-oneOcc :: Id -> OccInfo -> UsageDetails
-oneOcc id info
-  = UD { ud_occ_info = unitVarEnv id info
-       , ud_tail_calls = emptyVarEnv
-       }
-
 delDetails :: UsageDetails -> Id -> UsageDetails
-delDetails (UD { ud_occ_info = occs, ud_tail_calls = tails }) bndr
-  = UD { ud_occ_info   = occs  `delVarEnv` bndr
-       , ud_tail_calls = tails `delVarEnv` bndr
-       }
+delDetails (UD env zap) bndr
+  = UD (env `delVarEnv` bndr) zap
 
 delManyDetails :: UsageDetails -> [Id] -> UsageDetails
 delManyDetails usage bndrs
   = foldl delDetails usage bndrs
 
 minusDetails :: UsageDetails -> IdEnv a -> UsageDetails
-minusDetails (UD { ud_occ_info = occs, ud_tail_calls = tails }) bndrs
-  = UD { ud_occ_info   = occs  `minusVarEnv` bndrs
-       , ud_tail_calls = tails `minusVarEnv` bndrs
-       }
+minusDetails (UD env zap) bndrs
+  = UD (env `minusVarEnv` bndrs) zap
 
 emptyDetails :: UsageDetails
-emptyDetails = UD { ud_occ_info   = emptyVarEnv
-                  , ud_tail_calls = emptyVarEnv
-                  }
+emptyDetails = UD emptyVarEnv idZapper
 
 isEmptyDetails :: UsageDetails -> Bool
-isEmptyDetails = isEmptyVarEnv . ud_occ_info
-  -- No need to check tail calls; must be a subset
+isEmptyDetails (UD env _) = isEmptyVarEnv env
 
-zapDetails :: UsageDetails -> UsageDetails
-zapDetails usage
-  = usage { ud_occ_info = mapVarEnv (const NoOccInfo) (ud_occ_info usage) }
-      -- TODO: Add a free variable set (as a pure VarSet) so that we can just
-      -- drop ud_occ_info here in O(1) time
+zapDetails, dropTailCallInfo, markAllInsideLam :: UsageDetails -> UsageDetails
+zapDetails       (UD env _)      = UD env ZapAll
+dropTailCallInfo (UD env ZapAll) = UD env ZapAll
+dropTailCallInfo (UD env zapper) = UD env (zapper { zap_zapTailCalls = True })
+markAllInsideLam (UD env ZapAll) = UD env ZapAll
+markAllInsideLam (UD env zapper) = UD env (zapper { zap_markAllInLam = True })
 
-dropTailCallInfo :: UsageDetails -> UsageDetails
-dropTailCallInfo usage
-  = usage { ud_tail_calls = emptyVarEnv }
-
-markAllInsideLam :: UsageDetails -> UsageDetails
-markAllInsideLam usage
-  = usage { ud_occ_info = mapVarEnv markInsideLam (ud_occ_info usage) }
+forceZapping :: UsageDetails -> UsageDetails
+forceZapping ud@(UD env zap)
+  | isIdZapper zap = ud
+  | otherwise      = UD (mapZapper zap env) idZapper
 
 -- | Apply adjustments from join-point-hood and one-shot-ness to usage details
 -- from a lambda expression or a binding's RHS. Can't be done from occAnalRhs
@@ -2319,8 +2355,14 @@ adjustRhsUsage mb_join_arity rec_flag expr usage
                    Just join_arity -> join_arity == length bndrs
                    _               -> False
 
+lookupDetails :: UsageDetails -> Id -> OccInfo
+lookupDetails (UD env zapper) id
+  = case lookupVarEnv env id of
+      Just occ -> runZapper zapper occ
+      Nothing  -> IAmDead
+
 usedIn :: Id -> UsageDetails -> Bool
-v `usedIn` details = isExportedId v || v `elemVarEnv` ud_occ_info details
+v `usedIn` UD env _ = isExportedId v || v `elemVarEnv` env
 
 -- Add several occurrences, assumed not to be tail calls
 addIdOccs :: UsageDetails -> VarSet -> UsageDetails
@@ -2328,9 +2370,9 @@ addIdOccs usage id_set = nonDetFoldUFM addIdOcc usage id_set
   -- It's OK to use nonDetFoldUFM here because addIdOcc commutes
 
 addIdOcc :: Id -> UsageDetails -> UsageDetails
-addIdOcc v u | isId v    = addOneOcc u v NoOccInfo
+addIdOcc v u | isId v    = addOneOcc u v noOccInfo
              | otherwise = u
-        -- Give a non-committal binder info (i.e NoOccInfo) because
+        -- Give a non-committal binder info (i.e noOccInfo) because
         --   a) Many copies of the specialised thing can appear
         --   b) We don't want to substitute a BIG expression inside a RULE
         --      even if that's the only occurrence of the thing
@@ -2338,7 +2380,7 @@ addIdOcc v u | isId v    = addOneOcc u v NoOccInfo
 
 udFreeVars :: VarSet -> UsageDetails -> VarSet
 -- Find the subset of bndrs that are mentioned in uds
-udFreeVars bndrs uds = intersectUFM_C (\b _ -> b) bndrs (ud_occ_info uds)
+udFreeVars bndrs (UD env _) = intersectUFM_C (\b _ -> b) bndrs env
 
 type IdWithOccInfo = Id
 
@@ -2352,84 +2394,73 @@ tagLamBinders :: UsageDetails          -- Of scope
 tagLamBinders usage binders = usage' `seq` (usage', bndrs')
   where
     (usage', bndrs') = mapAccumR tag_lam usage binders
-    tag_lam usage bndr = (usage2, setBinderOcc usage bndr)
+    tag_lam usage bndr = (usage2, bndr')
       where
-        usage1 = usage `delDetails` bndr
+        (usage1, bndr') = tagBinder False usage bndr
         usage2 | isId bndr = addIdOccs usage1 (idUnfoldingVars bndr)
                                -- This is effectively the RHS of a
-                               -- non-join-point binding, so no need to worry
-                               -- about tail calls.
+                               -- non-join-point binding, so it's okay to use
+                               -- addIdOccs, which assumes no tail calls
                | otherwise = usage1
 
-tagBinder :: UsageDetails           -- Of scope
-          -> Id                     -- Binders
+tagBinder :: Bool                   -- Can it be a join point?
+          -> UsageDetails           -- Of scope
+          -> CoreBndr               -- Binders
           -> (UsageDetails,         -- Details with binders removed
               IdWithOccInfo)        -- Tagged binders
 
-tagBinder usage binder
+tagBinder make_join usage binder
  = let
      usage'  = usage `delDetails` binder
-     binder' = setBinderOcc usage binder
+     binder' | make_join = setBinderOcc usage binder
+             | otherwise = setBinderOcc (dropTailCallInfo usage) binder
    in
    usage' `seq` (usage', binder')
 
 setBinderOcc :: UsageDetails -> CoreBndr -> CoreBndr
 setBinderOcc usage bndr
   | isTyVar bndr      = bndr
-  | isExportedId bndr = case idOccInfo bndr of
-                          NoOccInfo -> bndr
-                          _         -> setIdOccInfo bndr NoOccInfo
+  | isExportedId bndr = if isNoOcc (idOccInfo bndr)
+                          then bndr
+                          else setIdOccInfo bndr noOccInfo
             -- Don't use local usage info for visible-elsewhere things
             -- BUT *do* erase any IAmALoopBreaker annotation, because we're
             -- about to re-generate it and it shouldn't be "sticky"
 
   | otherwise = setIdOccInfo bndr occ_info
   where
-    occ_info = lookupVarEnv (ud_occ_info usage) bndr `orElse` IAmDead
-
-findTailCallInfo :: UsageDetails -> CoreBndr -> TailCallInfo
-findTailCallInfo usage bndr
-  = case ud_tail_calls usage `lookupVarEnv` bndr of
-      Just join_arity -> AlwaysTailCalled join_arity
-      Nothing         -> NoTailCallInfo
+    occ_info = lookupDetails usage bndr
 
 -- | Decide whether some bindings should be made into join points or not.
--- Returns `Nothing` if *either* they can't be join points *or* they already
--- are. If they can be join points, returns the binders with AlwaysTailCalled n
--- as their new tailCallInfo (for appropriate values n). Note that it's an
--- all-or-nothing decision, as if multiple binders are given, they're assumed
--- to be mutually recursive.
+-- Returns `False` if *either* they can't be join points *or* they already
+-- are. Note that it's an all-or-nothing decision, as if multiple binders are
+-- given, they're assumed to be mutually recursive.
 --
 -- See Note [Invariants for join points] in IdInfo.
-addFinalTailCallInfoRec :: UsageDetails -> TopLevelFlag -> RecFlag
-                        -> [(CoreBndr, CoreExpr)]
-                        -> Maybe [CoreBndr]
-addFinalTailCallInfoRec _ TopLevel _ _
-  = Nothing
-addFinalTailCallInfoRec usage NotTopLevel rec_flag pairs
-  = mapM addInfo pairs
+canBecomeJoinPoints :: TopLevelFlag -> RecFlag -> UsageDetails
+                    -> [(CoreBndr, CoreExpr)]
+                    -> Bool
+canBecomeJoinPoints TopLevel _ _ _
+  = False
+canBecomeJoinPoints NotTopLevel rec_flag usage pairs
+  = all ok pairs
   where
-    addInfo (bndr, rhs)
+    ok (bndr, rhs)
       | isJoinId bndr
-      = Nothing -- Already a join id (won't be in analysis anyway)
-      | AlwaysTailCalled arity <- findTailCallInfo usage bndr
+      = False -- Already a join id (won't be in analysis anyway)
+      | AlwaysTailCalled arity <- tailCallInfo (lookupDetails usage bndr)
       , not (isRec rec_flag && arity /= lambda_count rhs)
           -- Recursive join points can't be partially applied
       , isValidJoinPointType arity (idType bndr)
-      = Just $ modifyIdInfo (`setTailCallInfo` AlwaysTailCalled arity) bndr
+      = True
       | otherwise
-      = Nothing
+      = False
 
     lambda_count expr = length bndrs where (bndrs, _) = collectBinders expr
 
-addFinalTailCallInfo :: UsageDetails -> TopLevelFlag -> CoreBndr -> CoreExpr
-                     -> Maybe CoreBndr
-addFinalTailCallInfo usage lvl bndr rhs
-  = fmap head $ addFinalTailCallInfoRec usage lvl NonRecursive [(bndr, rhs)]
-
 willBeJoinId_maybe :: CoreBndr -> Maybe JoinArity
 willBeJoinId_maybe bndr
-  | AlwaysTailCalled arity <- tailCallInfo (idInfo bndr)
+  | AlwaysTailCalled arity <- tailCallInfo (idOccInfo bndr)
   = Just arity
   | otherwise
   = isJoinId_maybe bndr
@@ -2445,38 +2476,49 @@ willBeJoinId_maybe bndr
 mkOneOcc :: OccEnv -> Id -> InterestingCxt -> JoinArity -> UsageDetails
 mkOneOcc env id int_cxt arity
   | isLocalId id
-  = UD (unitVarEnv id (OneOcc False True int_cxt)) tails
-
+  = UD (unitVarEnv id (OneOcc { occ_in_lam  = False
+                              , occ_one_br  = True
+                              , occ_int_cxt = int_cxt
+                              , occ_tail    = AlwaysTailCalled arity }))
+       idZapper
   | id `elemVarEnv` occ_gbl_scrut env
-  = UD (unitVarEnv id NoOccInfo) tails
+  = UD (unitVarEnv id noOccInfo) idZapper
 
   | otherwise
-  = UD emptyVarEnv tails
-  where
-    tails | isJoinId id = emptyVarEnv -- it's already a join point; no need to
-                                      -- track tail calls
-          | otherwise   = unitVarEnv id arity
+  = emptyDetails
 
-markMany, markInsideLam :: OccInfo -> OccInfo
+markInsideLam, markNonTailCalled :: OccInfo -> OccInfo
 
-markMany _  = NoOccInfo
+markInsideLam occ@(OneOcc {}) = occ { occ_in_lam = True }
+markInsideLam occ             = occ
 
-markInsideLam (OneOcc _ one_br int_cxt) = OneOcc True one_br int_cxt
-markInsideLam occ                       = occ
+markNonTailCalled IAmDead = IAmDead
+markNonTailCalled occ     = occ { occ_tail = NoTailCallInfo }
 
 addOccInfo, orOccInfo :: OccInfo -> OccInfo -> OccInfo
 
 addOccInfo a1 a2  = ASSERT( not (isDeadOcc a1 || isDeadOcc a2) )
-                    NoOccInfo   -- Both branches are at least One
+                    ManyOccs { occ_tail = tailCallInfo a1 `andTailCallInfo`
+                                          tailCallInfo a2 }
+                                -- Both branches are at least One
                                 -- (Argument is never IAmDead)
 
 -- (orOccInfo orig new) is used
 -- when combining occurrence info from branches of a case
 
-orOccInfo (OneOcc in_lam1 _ int_cxt1)
-          (OneOcc in_lam2 _ int_cxt2)
-  = OneOcc (in_lam1 || in_lam2)
-           False        -- False, because it occurs in both branches
-           (int_cxt1 && int_cxt2)
+orOccInfo (OneOcc { occ_in_lam = in_lam1, occ_int_cxt = int_cxt1
+                  , occ_tail   = tail1 })
+          (OneOcc { occ_in_lam = in_lam2, occ_int_cxt = int_cxt2
+                  , occ_tail   = tail2 })
+  = OneOcc { occ_in_lam  = in_lam1 || in_lam2
+           , occ_one_br  = False -- False, because it occurs in both branches
+           , occ_int_cxt = int_cxt1 && int_cxt2
+           , occ_tail    = tail1 `andTailCallInfo` tail2 }
 orOccInfo a1 a2 = ASSERT( not (isDeadOcc a1 || isDeadOcc a2) )
-                  NoOccInfo
+                  ManyOccs { occ_tail = tailCallInfo a1 `andTailCallInfo`
+                                        tailCallInfo a2 }
+
+andTailCallInfo :: TailCallInfo -> TailCallInfo -> TailCallInfo
+andTailCallInfo info@(AlwaysTailCalled arity1) (AlwaysTailCalled arity2)
+  | arity1 == arity2 = info
+andTailCallInfo _ _  = NoTailCallInfo

@@ -1206,7 +1206,7 @@ simplExprF1 env (Let (Rec pairs) body) cont
     as_join_pairs pairs@((fst_bndr, _) : _)
       | isJoinId fst_bndr
       = Just pairs
-      | AlwaysTailCalled{} <- tailCallInfo (idInfo fst_bndr)
+      | AlwaysTailCalled{} <- tailCallInfo (idOccInfo fst_bndr)
       = Just [ (convertToJoinId bndr, rhs) | (bndr, rhs) <- pairs ]
       | otherwise
       = Nothing
@@ -1224,17 +1224,17 @@ simplExprF1 env (Let (NonRec bndr rhs) body) cont
       = Nothing
       | isJoinId bndr
       = Just bndr
-      | AlwaysTailCalled{} <- tailCallInfo (idInfo bndr)
+      | AlwaysTailCalled{} <- tailCallInfo (idOccInfo bndr)
       = Just (convertToJoinId bndr)
       | otherwise
       = Nothing
 
 convertToJoinId :: CoreBndr -> CoreBndr
 convertToJoinId bndr
-  = case tailCallInfo (idInfo bndr) of
+  = case tailCallInfo (idOccInfo bndr) of
       AlwaysTailCalled join_arity
         -> -- No point in keeping tailCallInfo around; very fragile
-           modifyIdInfo (`setTailCallInfo` vanillaTailCallInfo) $
+           maybeModifyIdInfo (zapTailCallInfo (idInfo bndr)) $
              bndr `asJoinId` join_arity
       _ -> pprPanic "convertToJoinId" $ pprBndr LetBind bndr
 
