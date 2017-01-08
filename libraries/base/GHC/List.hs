@@ -59,8 +59,6 @@ badHead = errorEmptyList "head"
 {-# RULES
 "head/build"    forall (g::forall b.(a->b->b)->b->b) .
                 head (build g) = g (\x _ -> x) badHead
-"head/augment"  forall xs (g::forall b. (a->b->b) -> b -> b) .
-                head (augment g xs) = g (\x _ -> x) (head xs)
  #-}
 
 -- | Decompose a list into its head and tail. If the list is empty,
@@ -153,25 +151,19 @@ filter pred (x:xs)
   | pred x         = x : filter pred xs
   | otherwise      = filter pred xs
 
-{-# NOINLINE [0] filterFB #-}
-filterFB :: (a -> b -> b) -> (a -> Bool) -> a -> b -> b
-filterFB c p x r | p x       = x `c` r
-                 | otherwise = r
+
+filterDU :: (a -> Bool) -> [a] -> [a]
+filterDU p xs = destroy (\psi a -> unfoldr (filterDU' psi) a) xs
+  where filterDU' psi' xs' =
+          case psi' xs' of
+            Nothing -> Nothing
+            Just (b,ys) -> if p b
+                           then Just (b,ys)
+                           else filterDU' psi' ys
 
 {-# RULES
-"filter"     [~1] forall p xs.  filter p xs = build (\c n -> foldr (filterFB c p) n xs)
-"filterList" [1]  forall p.     foldr (filterFB (:) p) [] = filter p
-"filterFB"        forall c p q. filterFB (filterFB c p) q = filterFB c (\x -> q x && p x)
- #-}
-
--- Note the filterFB rule, which has p and q the "wrong way round" in the RHS.
---     filterFB (filterFB c p) q a b
---   = if q a then filterFB c p a b else b
---   = if q a then (if p a then c a b else b) else b
---   = if q a && p a then c a b else b
---   = filterFB c (\x -> q x && p x) a b
--- I originally wrote (\x -> p x && q x), which is wrong, and actually
--- gave rise to a live bug report.  SLPJ.
+  "filter"     [~1] forall p xs.  filter p xs = filterDU p xs
+#-}
 
 
 -- | 'foldl', applied to a binary operator, a starting value (typically
@@ -428,15 +420,13 @@ minimum xs              =  foldl1 min xs
 iterate :: (a -> a) -> a -> [a]
 iterate f x =  x : iterate f (f x)
 
-{-# NOINLINE [0] iterateFB #-}
-iterateFB :: (a -> b -> b) -> (a -> a) -> a -> b
-iterateFB c f x0 = go x0
-  where go x = x `c` go (f x)
+
+iterateDU :: (a -> a) -> a -> [a]
+iterateDU f = unfoldr (\x -> Just (x, f x))
 
 {-# RULES
-"iterate"    [~1] forall f x.   iterate f x = build (\c _n -> iterateFB c f x)
-"iterateFB"  [1]                iterateFB (:) = iterate
- #-}
+  "iterate"    [~1] forall f x. iterate f x = iterateDU f x
+#-}
 
 
 -- | 'repeat' @x@ is an infinite list, with @x@ the value of every element.
@@ -908,29 +898,51 @@ foldr2_left  k _z  x  r (y:ys) = k x y (r ys)
 -- 'zip' is right-lazy:
 --
 -- > zip [] _|_ = []
-{-# NOINLINE [1] zip #-}
 zip :: [a] -> [b] -> [(a,b)]
-zip []     _bs    = []
-zip _as    []     = []
-zip (a:as) (b:bs) = (a,b) : zip as bs
+zip = zipDU
 
-{-# INLINE [0] zipFB #-}
-zipFB :: ((a, b) -> c -> d) -> a -> b -> c -> d
-zipFB c = \x y r -> (x,y) `c` r
+zipDU :: [a] -> [b] -> [(a,b)]
+zipDU xs ys =
+  destroy (\psi1 e1 ->
+           destroy (\psi2 e2 ->
+                    unfoldr (zipDU' psi1 psi2) (e1,e2)
+                   ) ys
+          ) xs
+  where zipDU' psi1' psi2' (e1',e2') =
+          case psi1' e1' of
+            Nothing -> Nothing
+            Just (x',xs') ->
+              case psi2' e2' of
+                Nothing -> Nothing
+                Just (y',ys') -> Just ((x',y'),(xs',ys'))
 
-{-# RULES
-"zip"      [~1] forall xs ys. zip xs ys = build (\c n -> foldr2 (zipFB c) n xs ys)
-"zipList"  [1]  foldr2 (zipFB (:)) []   = zip
- #-}
 
 ----------------------------------------------
 -- | 'zip3' takes three lists and returns a list of triples, analogous to
 -- 'zip'.
+
 zip3 :: [a] -> [b] -> [c] -> [(a,b,c)]
--- Specification
--- zip3 =  zipWith3 (,,)
-zip3 (a:as) (b:bs) (c:cs) = (a,b,c) : zip3 as bs cs
-zip3 _      _      _      = []
+zip3 = zip3DU
+
+zip3DU :: [a] -> [b] -> [c] -> [(a,b,c)]
+zip3DU xs ys zs =
+  destroy (\psi1 e1 ->
+           destroy (\psi2 e2 ->
+                    destroy (\psi3 e3 ->
+                             unfoldr (zip3DU' psi1 psi2 psi3) (e1,e2,e3)
+                            ) zs
+                   ) ys
+          ) xs
+  where zip3DU' psi1' psi2' psi3' (e1',e2',e3') =
+          case psi1' e1' of
+            Nothing -> Nothing
+            Just (x',xs') ->
+              case psi2' e2' of
+                Nothing -> Nothing
+                Just (y',ys') ->
+                  case psi3' e3' of
+                    Nothing -> Nothing
+                    Just (z',zs') -> Just ((x',y',z'),(xs',ys',zs'))
 
 
 -- The zipWith family generalises the zip family by zipping with the
@@ -945,30 +957,51 @@ zip3 _      _      _      = []
 -- 'zipWith' is right-lazy:
 --
 -- > zipWith f [] _|_ = []
-{-# NOINLINE [1] zipWith #-}
 zipWith :: (a->b->c) -> [a]->[b]->[c]
-zipWith _f []     _bs    = []
-zipWith _f _as    []     = []
-zipWith f  (a:as) (b:bs) = f a b : zipWith f as bs
+zipWith = zipWithDU
 
--- zipWithFB must have arity 2 since it gets two arguments in the "zipWith"
--- rule; it might not get inlined otherwise
-{-# INLINE [0] zipWithFB #-}
-zipWithFB :: (a -> b -> c) -> (d -> e -> a) -> d -> e -> b -> c
-zipWithFB c f = \x y r -> (x `f` y) `c` r
+zipWithDU :: (a -> b -> c) -> [a] -> [b] -> [c]
+zipWithDU f xs ys =
+  destroy (\psi1 e1 ->
+           destroy (\psi2 e2 ->
+                    unfoldr (zipWithDU' psi1 psi2) (e1,e2)
+                   ) ys
+          ) xs
+  where zipWithDU' psi1' psi2' (e1',e2') =
+          case psi1' e1' of
+            Nothing -> Nothing
+            Just (x',xs') ->
+              case psi2' e2' of
+                Nothing -> Nothing
+                Just (y',ys') -> Just (f x' y',(xs',ys'))
 
-{-# RULES
-"zipWith"       [~1] forall f xs ys.    zipWith f xs ys = build (\c n -> foldr2 (zipWithFB c f) n xs ys)
-"zipWithList"   [1]  forall f.  foldr2 (zipWithFB (:) f) [] = zipWith f
-  #-}
 
 -- | The 'zipWith3' function takes a function which combines three
 -- elements, as well as three lists and returns a list of their point-wise
 -- combination, analogous to 'zipWith'.
-zipWith3                :: (a->b->c->d) -> [a]->[b]->[c]->[d]
-zipWith3 z (a:as) (b:bs) (c:cs)
-                        =  z a b c : zipWith3 z as bs cs
-zipWith3 _ _ _ _        =  []
+zipWith3 :: (a->b->c->d) -> [a]->[b]->[c]->[d]
+zipWith3 = zipWith3DU
+
+zipWith3DU :: (a -> b -> c -> d) -> [a] -> [b] -> [c] -> [d]
+zipWith3DU f xs ys zs =
+  destroy (\psi1 e1 ->
+           destroy (\psi2 e2 ->
+                    destroy (\psi3 e3 ->
+                             unfoldr (zipWith3DU' psi1 psi2 psi3) (e1,e2,e3)
+                            ) zs
+                   ) ys
+          ) xs
+  where zipWith3DU' psi1' psi2' psi3' (e1',e2',e3') =
+          case psi1' e1' of
+            Nothing -> Nothing
+            Just (x',xs') ->
+              case psi2' e2' of
+                Nothing -> Nothing
+                Just (y',ys') ->
+                  case psi3' e3' of
+                    Nothing -> Nothing
+                    Just (z',zs') -> Just (f x' y' z',(xs',ys',zs'))
+
 
 -- | 'unzip' transforms a list of pairs into a list of first components
 -- and a list of second components.
