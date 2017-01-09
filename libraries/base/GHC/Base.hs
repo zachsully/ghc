@@ -796,16 +796,19 @@ The rest of the prelude list functions are in GHC.List.
   Functions", destroy and unfoldr are primitives for map/zip/filter.
 -}
 
+{-# INLINE destroy #-}
 destroy :: (forall a. (a -> Maybe (b,a)) -> a -> c) -> [b] -> c
 destroy g xs = g listpsi xs
   where listpsi :: [a] -> Maybe (a,[a])
         listpsi [] = Nothing
         listpsi (x1:xs1) = Just (x1,xs1)
 
+{-# INLINE unfoldr #-}
 unfoldr :: (b -> Maybe (a,b)) -> b -> [a]
 unfoldr f b = case f b of
                 Nothing -> []
                 Just (a,b') -> a : unfoldr f b'
+
 
 
 ----------------------------------------------
@@ -839,12 +842,13 @@ build g = g (:) []
 -- > map f [x1, x2, ..., xn] == [f x1, f x2, ..., f xn]
 -- > map f [x1, x2, ...] == [f x1, f x2, ...]
 
-{-# INLINE[0] map #-}
+{-# INLINE map #-}
 map :: (a -> b) -> [a] -> [b]
-map f xs = destroy (\psi a -> unfoldr (mapDU psi) a) xs
-  where mapDU psi xs1 = case psi xs1 of
-                          Nothing -> Nothing
-                          Just (x1,ys) -> Just (f x1, ys)
+map f xs = destroy (\psi a -> unfoldr (\xs1 -> case psi xs1 of
+                                         Nothing -> Nothing
+                                         Just (x1,ys) -> Just (f x1, ys))
+                                      a
+                   ) xs
 
 {-# RULES
    "map/coerce" [1] map coerce = coerce
