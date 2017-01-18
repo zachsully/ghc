@@ -901,6 +901,7 @@ foldr2_left  k _z  x  r (y:ys) = k x y (r ys)
 zip :: [a] -> [b] -> [(a,b)]
 zip = zipDU
 
+{-# INLINE zipDU #-}
 zipDU :: [a] -> [b] -> [(a,b)]
 zipDU xs ys =
   destroy (\psi1 e1 ->
@@ -924,6 +925,7 @@ zipDU xs ys =
 zip3 :: [a] -> [b] -> [c] -> [(a,b,c)]
 zip3 = zip3DU
 
+{-# INLINE zip3DU #-}
 zip3DU :: [a] -> [b] -> [c] -> [(a,b,c)]
 zip3DU xs ys zs =
   destroy (\psi1 e1 ->
@@ -944,7 +946,6 @@ zip3DU xs ys zs =
                     Nothing -> Nothing
                     Just (z',zs') -> Just ((x',y',z'),(xs',ys',zs'))
 
-
 -- The zipWith family generalises the zip family by zipping with the
 -- function given as the first argument, instead of a tupling function.
 
@@ -960,6 +961,7 @@ zip3DU xs ys zs =
 zipWith :: (a->b->c) -> [a]->[b]->[c]
 zipWith = zipWithDU
 
+{-# INLINE zipWithDU #-}
 zipWithDU :: (a -> b -> c) -> [a] -> [b] -> [c]
 zipWithDU f xs ys =
   destroy (\psi1 e1 ->
@@ -982,6 +984,7 @@ zipWithDU f xs ys =
 zipWith3 :: (a->b->c->d) -> [a]->[b]->[c]->[d]
 zipWith3 = zipWith3DU
 
+{-# INLINE zipWith3DU #-}
 zipWith3DU :: (a -> b -> c -> d) -> [a] -> [b] -> [c] -> [d]
 zipWith3DU f xs ys zs =
   destroy (\psi1 e1 ->
