@@ -145,6 +145,9 @@ GHCi
 
 - Added :ghc-flag:`-flocal-ghci-history` which uses current directory for `.ghci-history`.
 
+- Added support for :ghc-flag:`-XStaticPointers` in interpreted modules. Note, however,
+  that ``static`` expressions are still not allowed in expressions evaluated in the REPL.
+
 Template Haskell
 ~~~~~~~~~~~~~~~~
 
@@ -290,6 +293,10 @@ See ``changelog.md`` in the ``base`` package for full release notes.
 
 - Add ``type family AppendSymbol (m :: Symbol) (n :: Symbol) :: Symbol`` to
   ``GHC.TypeLits``
+
+- Add ``GHC.TypeNats`` module with ``Natural``-based ``KnownNat``. The ``Nat``
+  operations in ``GHC.TypeLits`` are a thin compatibility layer on top.
+  Note: the ``KnownNat`` evidence is changed from an ``Integer`` to a ``Natural``.
 
 binary
 ~~~~~~
