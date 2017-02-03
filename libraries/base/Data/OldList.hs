@@ -81,7 +81,7 @@ module Data.OldList
    , cycle
 
    -- ** Unfolding
-   , unfoldr
+   -- , unfoldr
 
    -- * Sublists
 
@@ -1030,14 +1030,21 @@ sortOn f =
 -- Doing a back-and-forth dance doesn't seem to accomplish anything if the
 -- final form has to be inlined in any case.
 
-unfoldr :: (b -> Maybe (a, b)) -> b -> [a]
+-- unfoldr :: (b -> Maybe (a, b)) -> b -> [a]
 
-{-# INLINE unfoldr #-} -- See Note [INLINE unfoldr]
-unfoldr f b0 = build (\c n ->
-  let go b = case f b of
-               Just (a, new_b) -> a `c` go new_b
-               Nothing         -> n
-  in go b0)
+-- {-# INLINE unfoldr #-} -- See Note [INLINE unfoldr]
+-- unfoldr f b0 = build (\c n ->
+--   let go b = case f b of
+--                Just (a, new_b) -> a `c` go new_b
+--                Nothing         -> n
+--   in go b0)
+
+-- unfoldr :: (b -> Maybe (a,b)) -> b -> [a]
+-- {-# INLINE unfoldr #-}
+-- unfoldr f b = go b
+--   where go b = case f b of
+--                  Nothing -> []
+--                  Just (a,b') -> a : go b'
 
 -- -----------------------------------------------------------------------------
 -- Functions on strings
@@ -1098,7 +1105,7 @@ words s                 =  case dropWhile {-partain:Char.-}isSpace s of
 "wordsList" [1] wordsFB (:) [] = words
  #-}
 wordsFB :: ([Char] -> b -> b) -> b -> String -> b
-{-# INLINE [0] wordsFB #-} -- See Note [Inline FB functions] in GHC.List
+{-# NOINLINE [0] wordsFB #-}
 wordsFB c n = go
   where
     go s = case dropWhile isSpace s of
