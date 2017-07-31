@@ -750,6 +750,10 @@ data Token
   | ITLarrowtail IsUnicodeSyntax --  -<<
   | ITRarrowtail IsUnicodeSyntax --  >>-
 
+  -- Copattern notation extension
+  | ITcodata
+  | ITobserve
+
   -- type application '@' (lexed differently than as-pattern '@',
   -- due to checking for preceding whitespace)
   | ITtypeApp
@@ -844,7 +848,10 @@ reservedWordsFM = listToUFM $
 
          ( "rec",            ITrec,           xbit ArrowsBit .|.
                                               xbit RecursiveDoBit),
-         ( "proc",           ITproc,          xbit ArrowsBit)
+         ( "proc",           ITproc,          xbit ArrowsBit),
+
+         ( "codata",         ITcodata,        xbit CoPatternsBit),
+         ( "observe",        ITobserve,       xbit CoPatternsBit)
      ]
 
 {-----------------------------------
@@ -2148,6 +2155,7 @@ data ExtBits
   | CApiFfiBit
   | ParrBit
   | ArrowsBit
+  | CoPatternsBit
   | ThBit
   | ThQuotesBit
   | IpBit
@@ -2189,6 +2197,8 @@ parrEnabled :: ExtsBitmap -> Bool
 parrEnabled = xtest ParrBit
 arrowsEnabled :: ExtsBitmap -> Bool
 arrowsEnabled = xtest ArrowsBit
+copatternsEnabled :: ExtsBitmap -> Bool
+copatternsEnabled = xtest CoPatternsBit
 thEnabled :: ExtsBitmap -> Bool
 thEnabled = xtest ThBit
 thQuotesEnabled :: ExtsBitmap -> Bool
@@ -2269,6 +2279,7 @@ mkParserFlags flags =
                .|. CApiFfiBit                  `setBitIf` xopt LangExt.CApiFFI                  flags
                .|. ParrBit                     `setBitIf` xopt LangExt.ParallelArrays           flags
                .|. ArrowsBit                   `setBitIf` xopt LangExt.Arrows                   flags
+               .|. CoPatternsBit               `setBitIf` xopt LangExt.CoPatterns               flags
                .|. ThBit                       `setBitIf` xopt LangExt.TemplateHaskell          flags
                .|. ThQuotesBit                 `setBitIf` xopt LangExt.TemplateHaskellQuotes    flags
                .|. QqBit                       `setBitIf` xopt LangExt.QuasiQuotes              flags

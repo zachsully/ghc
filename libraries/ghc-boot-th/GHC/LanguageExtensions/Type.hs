@@ -39,6 +39,7 @@ data Extension
    | JavaScriptFFI
    | ParallelArrays           -- Syntactic support for parallel arrays
    | Arrows                   -- Arrow-notation syntax
+   | CoPatterns               -- Copattern sugar syntax
    | TemplateHaskell
    | TemplateHaskellQuotes    -- subset of TH supported by stage1, no splice
    | QuasiQuotes
