@@ -752,7 +752,7 @@ data Token
 
   -- Copattern notation extension
   | ITcodata
-  | ITobserve
+  | ITcocase
 
   -- type application '@' (lexed differently than as-pattern '@',
   -- due to checking for preceding whitespace)
@@ -851,7 +851,7 @@ reservedWordsFM = listToUFM $
          ( "proc",           ITproc,          xbit ArrowsBit),
 
          ( "codata",         ITcodata,        xbit CoPatternsBit),
-         ( "observe",        ITobserve,       xbit CoPatternsBit)
+         ( "cocase",         ITcocase,       xbit CoPatternsBit)
      ]
 
 {-----------------------------------

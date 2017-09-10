@@ -408,7 +408,7 @@ are the most common patterns, rewritten as regular expressions for clarity:
  'proc'         { L _ ITproc }          -- for arrow notation extension
  'rec'          { L _ ITrec }           -- for arrow notation extension
  'codata'       { L _ ITcodata }        -- for copattern notation extension
- 'observe'      { L _ ITobserve }       -- for copattern notation extension
+ 'cocase'       { L _ ITcocase }       -- for copattern notation extension
  'group'    { L _ ITgroup }     -- for list transform extension
  'by'       { L _ ITby }        -- for list transform extension
  'using'    { L _ ITusing }     -- for list transform extension
