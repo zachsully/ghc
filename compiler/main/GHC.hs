@@ -493,7 +493,8 @@ initGhcMonad :: GhcMonad m => Maybe FilePath -> m ()
 initGhcMonad mb_top_dir
   = do { env <- liftIO $
                 do { mySettings <- initSysTools mb_top_dir
-                   ; dflags <- initDynFlags (defaultDynFlags mySettings)
+                   ; myLlvmTargets <- initLlvmTargets mb_top_dir
+                   ; dflags <- initDynFlags (defaultDynFlags mySettings myLlvmTargets)
                    ; checkBrokenTablesNextToCode dflags
                    ; setUnsafeGlobalDynFlags dflags
                       -- c.f. DynFlags.parseDynamicFlagsFull, which
@@ -847,7 +848,7 @@ instance DesugaredMod DesugaredModule where
   coreModule m = dm_core_module m
 
 type ParsedSource      = Located (HsModule GhcPs)
-type RenamedSource     = (HsGroup GhcRn, [LImportDecl GhcRn], Maybe [LIE GhcRn],
+type RenamedSource     = (HsGroup GhcRn, [LImportDecl GhcRn], Maybe [(LIE GhcRn, Avails)],
                           Maybe LHsDocString)
 type TypecheckedSource = LHsBinds GhcTc
 

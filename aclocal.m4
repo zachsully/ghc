@@ -237,13 +237,10 @@ AC_DEFUN([FPTOOLS_SET_HASKELL_PLATFORM_VARS],
 
     checkOS() {
         case [$]1 in
-        linux)
+        linux|linux-android)
             test -z "[$]2" || eval "[$]2=OSLinux"
             ;;
-        ios)
-            test -z "[$]2" || eval "[$]2=OSiOS"
-            ;;
-        darwin)
+        darwin|ios)
             test -z "[$]2" || eval "[$]2=OSDarwin"
             ;;
         solaris2)
@@ -278,9 +275,6 @@ AC_DEFUN([FPTOOLS_SET_HASKELL_PLATFORM_VARS],
             ;;
         aix)
             test -z "[$]2" || eval "[$]2=OSAIX"
-            ;;
-        linux-android)
-            test -z "[$]2" || eval "[$]2=OSAndroid"
             ;;
         *)
             echo "Unknown OS '[$]1'"
@@ -519,6 +513,12 @@ AC_DEFUN([FP_SETTINGS],
     else
       SettingsLibtoolCommand="$LibtoolCmd"
     fi
+    if test -z "$ClangCmd"
+    then
+        SettingsClangCommand="clang"
+    else
+        SettingsClangCommand="$ClangCmd"
+    fi
     if test -z "$LlcCmd"
     then
       SettingsLlcCommand="llc"
@@ -549,6 +549,7 @@ AC_DEFUN([FP_SETTINGS],
     AC_SUBST(SettingsWindresCommand)
     AC_SUBST(SettingsLibtoolCommand)
     AC_SUBST(SettingsTouchCommand)
+    AC_SUBST(SettingsClangCommand)
     AC_SUBST(SettingsLlcCommand)
     AC_SUBST(SettingsOptCommand)
 ])
@@ -1145,6 +1146,9 @@ else
   fi
 fi])
 fp_prog_ar_args=$fp_cv_prog_ar_args
+if test "$HostOS" != "mingw32"; then
+    ArCmd = "$(cygpath -m $ArCmd)"
+fi
 AC_SUBST([ArCmd], ["$fp_prog_ar"])
 AC_SUBST([ArArgs], ["$fp_prog_ar_args"])
 

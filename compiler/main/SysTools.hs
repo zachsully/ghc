@@ -8,11 +8,12 @@
 -----------------------------------------------------------------------------
 -}
 
-{-# LANGUAGE CPP, ScopedTypeVariables #-}
+{-# LANGUAGE CPP, MultiWayIf, ScopedTypeVariables #-}
 
 module SysTools (
         -- Initialisation
         initSysTools,
+        initLlvmTargets,
 
         -- Interface to system tools
         runUnlit, runCpp, runCc, -- [Option] -> IO ()
@@ -174,6 +175,20 @@ stuff.
 ************************************************************************
 -}
 
+initLlvmTargets :: Maybe String
+                -> IO LlvmTargets
+initLlvmTargets mbMinusB
+  = do top_dir <- findTopDir mbMinusB
+       let llvmTargetsFile = top_dir </> "llvm-targets"
+       llvmTargetsStr <- readFile llvmTargetsFile
+       case maybeReadFuzzy llvmTargetsStr of
+         Just s -> return (fmap mkLlvmTarget <$> s)
+         Nothing -> pgmError ("Can't parse " ++ show llvmTargetsFile)
+  where
+    mkLlvmTarget :: (String, String, String) -> LlvmTarget
+    mkLlvmTarget (dl, cpu, attrs) = LlvmTarget dl cpu (words attrs)
+
+
 initSysTools :: Maybe String    -- Maybe TopDir path (without the '-B' prefix)
              -> IO Settings     -- Set all the mutable variables above, holding
                                 --      (a) the system programs
@@ -309,6 +324,7 @@ initSysTools mbMinusB
        -- We just assume on command line
        lc_prog <- getSetting "LLVM llc command"
        lo_prog <- getSetting "LLVM opt command"
+       lcc_prog <- getSetting "LLVM clang command"
 
        let iserv_prog = libexec "ghc-iserv"
 
@@ -352,6 +368,7 @@ initSysTools mbMinusB
                     sPgm_libtool = libtool_path,
                     sPgm_lo  = (lo_prog,[]),
                     sPgm_lc  = (lc_prog,[]),
+                    sPgm_lcc = (lcc_prog,[]),
                     sPgm_i   = iserv_prog,
                     sOpt_L       = [],
                     sOpt_P       = [],
@@ -360,6 +377,7 @@ initSysTools mbMinusB
                     sOpt_a       = [],
                     sOpt_l       = [],
                     sOpt_windres = [],
+                    sOpt_lcc     = [],
                     sOpt_lo      = [],
                     sOpt_lc      = [],
                     sOpt_i       = [],
@@ -574,8 +592,7 @@ runLlvmLlc dflags args = do
 -- assembler)
 runClang :: DynFlags -> [Option] -> IO ()
 runClang dflags args = do
-  -- we simply assume its available on the PATH
-  let clang = "clang"
+  let (clang,_) = pgm_lcc dflags
       -- be careful what options we call clang with
       -- see #5903 and #7617 for bugs caused by this.
       (_,args0) = pgm_a dflags
@@ -805,9 +822,6 @@ getLinkerInfo' dflags = do
                  -- that doesn't support --version. We can just assume that's
                  -- what we're using.
                  return $ DarwinLD []
-               OSiOS ->
-                 -- Ditto for iOS
-                 return $ DarwinLD []
                OSMinGW32 ->
                  -- GHC doesn't support anything but GNU ld on Windows anyway.
                  -- Process creation is also fairly expensive on win32, so
@@ -867,6 +881,9 @@ getCompilerInfo' dflags = do
           return GCC
         -- Regular clang
         | any ("clang version" `isInfixOf`) stde =
+          return Clang
+        -- FreeBSD clang
+        | any ("FreeBSD clang version" `isInfixOf`) stde =
           return Clang
         -- XCode 5.1 clang
         | any ("Apple LLVM version 5.1" `isPrefixOf`) stde =
@@ -1337,9 +1354,18 @@ getFinalPath name = do
                                                      (fILE_ATTRIBUTE_NORMAL .|. fILE_FLAG_BACKUP_SEMANTICS)
                                                      Nothing
                       let fnPtr = makeGetFinalPathNameByHandle $ castPtrToFunPtr addr
-                      path    <- Win32.try "GetFinalPathName"
+                      -- First try to resolve the path to get the actual path
+                      -- of any symlinks or other file system redirections that
+                      -- may be in place. However this function can fail, and in
+                      -- the event it does fail, we need to try using the
+                      -- original path and see if we can decompose that.
+                      -- If the call fails Win32.try will raise an exception
+                      -- that needs to be caught. See #14159
+                      path    <- (Win32.try "GetFinalPathName"
                                     (\buf len -> fnPtr handle buf len 0) 512
-                                    `finally` closeHandle handle
+                                    `finally` closeHandle handle)
+                                `catch`
+                                 (\(_ :: IOException) -> return name)
                       return $ Just path
 
 type GetFinalPath = HANDLE -> LPTSTR -> DWORD -> DWORD -> IO DWORD
@@ -1368,15 +1394,6 @@ linesPlatform xs =
    lineBreak (x:xs) = let (as,bs) = lineBreak xs in (x:as,bs)
 
 #endif
-
-{-
-Note [No PIE eating while linking]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-As of 2016 some Linux distributions (e.g. Debian) have started enabling -pie by
-default in their gcc builds. This is incompatible with -r as it implies that we
-are producing an executable. Consequently, we must manually pass -no-pie to gcc
-when joining object files or linking dynamic libraries. See #12759.
--}
 
 linkDynLib :: DynFlags -> [String] -> [InstalledUnitId] -> IO ()
 linkDynLib dflags0 o_files dep_packages
@@ -1468,7 +1485,7 @@ linkDynLib dflags0 o_files dep_packages
                  ++ pkg_lib_path_opts
                  ++ pkg_link_opts
                 ))
-        _ | os `elem` [OSDarwin, OSiOS] -> do
+        _ | os == OSDarwin -> do
             -------------------------------------------------------------------
             -- Making a darwin dylib
             -------------------------------------------------------------------
@@ -1544,10 +1561,6 @@ linkDynLib dflags0 o_files dep_packages
                  ++ [ Option "-o"
                     , FileOption "" output_fn
                     ]
-                    -- See Note [No PIE eating when linking]
-                 ++ (if sGccSupportsNoPie (settings dflags)
-                     then [Option "-no-pie"]
-                     else [])
                  ++ map Option o_files
                  ++ [ Option "-shared" ]
                  ++ map Option bsymbolicFlag

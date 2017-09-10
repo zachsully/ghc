@@ -77,6 +77,14 @@ instance Monad (ST s) where
         case (k r) of { ST k2 ->
         (k2 new_s) }})
 
+-- | @since 4.11.0.0
+instance Semigroup a => Semigroup (ST s a) where
+    (<>) = liftA2 (<>)
+
+-- | @since 4.11.0.0
+instance Monoid a => Monoid (ST s a) where
+    mempty = pure mempty
+
 data STret s a = STret (State# s) a
 
 -- liftST is useful when we want a lifted result from an ST computation.  See

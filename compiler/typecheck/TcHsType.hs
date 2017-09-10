@@ -38,6 +38,8 @@ module TcHsType (
 
         kindGeneralize, checkExpectedKindX, instantiateTyUntilN,
 
+        reportFloatingKvs,
+
         -- Sort-checking kinds
         tcLHsKindSig,
 
@@ -642,7 +644,7 @@ tc_hs_type mode rn_ty@(HsSumTy hs_tys) exp_kind
   = do { let arity = length hs_tys
        ; arg_kinds <- mapM (\_ -> newOpenTypeKind) hs_tys
        ; tau_tys   <- zipWithM (tc_lhs_type mode) hs_tys arg_kinds
-       ; let arg_reps = map (getRuntimeRepFromKind "tc_hs_type HsSumTy") arg_kinds
+       ; let arg_reps = map getRuntimeRepFromKind arg_kinds
              arg_tys  = arg_reps ++ tau_tys
        ; checkExpectedKind rn_ty
                            (mkTyConApp (sumTyCon arity) arg_tys)
@@ -774,7 +776,7 @@ finish_tuple rn_ty tup_sort tau_tys tau_kinds exp_kind
        ; checkExpectedKind rn_ty (mkTyConApp tycon arg_tys) res_kind exp_kind }
   where
     arity = length tau_tys
-    tau_reps = map (getRuntimeRepFromKind "finish_tuple") tau_kinds
+    tau_reps = map getRuntimeRepFromKind tau_kinds
     res_kind = case tup_sort of
                  UnboxedTuple    -> unboxedTupleKind tau_reps
                  BoxedTuple      -> liftedTypeKind
@@ -1254,7 +1256,7 @@ Help functions for type applications
 
 addTypeCtxt :: LHsType GhcRn -> TcM a -> TcM a
         -- Wrap a context around only if we want to show that contexts.
-        -- Omit invisble ones and ones user's won't grok
+        -- Omit invisible ones and ones user's won't grok
 addTypeCtxt (L _ ty) thing
   = addErrCtxt doc thing
   where
@@ -1290,14 +1292,38 @@ Note [Dependent LHsQTyVars]
 We track (in the renamer) which explicitly bound variables in a
 LHsQTyVars are manifestly dependent; only precisely these variables
 may be used within the LHsQTyVars. We must do this so that kcHsTyVarBndrs
-can produce the right TyConBinders, and tell Anon vs. Named. Earlier,
-I thought it would work simply to do a free-variable check during
-kcHsTyVarBndrs, but this is bogus, because there may be unsolved
-equalities about. And we don't want to eagerly solve the equalities,
-because we may get further information after kcHsTyVarBndrs is called.
-(Recall that kcHsTyVarBndrs is usually called from getInitialKind.
-The only other case is in kcConDecl.) This is what implements the rule
-that all variables intended to be dependent must be manifestly so.
+can produce the right TyConBinders, and tell Anon vs. Required.
+
+Example   data T k1 (a:k1) (b:k2) c
+               = MkT (Proxy a) (Proxy b) (Proxy c)
+
+Here
+  (a:k1),(b:k2),(c:k3)
+       are Anon     (explicitly specified as a binder, not used
+                     in the kind of any other binder
+  k1   is Required  (explicitly specifed as a binder, but used
+                     in the kind of another binder i.e. dependently)
+  k2   is Specified (not explicitly bound, but used in the kind
+                     of another binder)
+  k3   in Inferred  (not lexically in scope at all, but inferred
+                     by kind inference)
+and
+  T :: forall {k3} k1. forall k3 -> k1 -> k2 -> k3 -> *
+
+See Note [TyVarBndrs, TyVarBinders, TyConBinders, and visiblity]
+in TyCoRep.
+
+kcHsTyVarBndrs uses the hsq_dependent field to decide whether
+k1, a, b, c should be Required or Anon.
+
+Earlier, thought it would work simply to do a free-variable check
+during kcHsTyVarBndrs, but this is bogus, because there may be
+unsolved equalities about. And we don't want to eagerly solve the
+equalities, because we may get further information after
+kcHsTyVarBndrs is called.  (Recall that kcHsTyVarBndrs is usually
+called from getInitialKind.  The only other case is in kcConDecl.)
+This is what implements the rule that all variables intended to be
+dependent must be manifestly so.
 
 Sidenote: It's quite possible that later, we'll consider (t -> s)
 as a degenerate case of some (pi (x :: t) -> s) and then this will
@@ -1384,6 +1410,12 @@ kcHsTyVarBndrs name flav cusk all_kind_vars
                            -- in scope from an enclosing class, but
                            -- re-adding tvs to the env't doesn't cause
                            -- harm
+
+       ; traceTc "kcHsTyVarBndrs: cusk" $
+         vcat [ ppr name, ppr kv_ns, ppr hs_tvs, ppr dep_names
+              , ppr tc_binders, ppr (mkTyConKind tc_binders res_kind)
+              , ppr qkvs, ppr meta_tvs, ppr good_tvs, ppr final_binders ]
+
        ; return (tycon, stuff) }}
 
   | otherwise
@@ -1397,6 +1429,8 @@ kcHsTyVarBndrs name flav cusk all_kind_vars
                -- must remain lined up with the binders
              tycon = mkTcTyCon name binders res_kind
                                (scoped_kvs ++ binderVars binders) flav
+
+       ; traceTc "kcHsTyVarBndrs: not-cusk" (ppr name <+> ppr binders)
        ; return (tycon, stuff) }
   where
     open_fam = tcFlavourIsOpen flav
@@ -1682,16 +1716,16 @@ Consider
   data T = MkT (forall (a :: k). Proxy a)
   -- from test ghci/scripts/T7873
 
-This is not an existential datatype, but a higher-rank one. Note that
-the forall to the right of MkT. Also consider
+This is not an existential datatype, but a higher-rank one (the forall
+to the right of MkT). Also consider
 
   data S a = MkS (Proxy (a :: k))
 
-According to the rules around implicitly-bound kind variables, those
-k's scope over the whole declarations. The renamer grabs it and adds it
-to the hsq_implicits field of the HsQTyVars of the tycon. So it must
-be in scope during type-checking, but we want to reject T while accepting
-S.
+According to the rules around implicitly-bound kind variables, in both
+cases those k's scope over the whole declaration. The renamer grabs
+it and adds it to the hsq_implicits field of the HsQTyVars of the
+tycon. So it must be in scope during type-checking, but we want to
+reject T while accepting S.
 
 Why reject T? Because the kind variable isn't fixed by anything. For
 a variable like k to be implicit, it needs to be mentioned in the kind
@@ -1711,6 +1745,46 @@ it must be a free-floating kind var. Error.
 CUSK: When we determine the tycon's final, never-to-be-changed kind
 in kcHsTyVarBndrs, we check to make sure all implicitly-bound kind
 vars are indeed mentioned in a kind somewhere. If not, error.
+
+We also perform free-floating kind var analysis for type family instances
+(see #13985). Here is an interesting example:
+
+    type family   T :: k
+    type instance T = (Nothing :: Maybe a)
+
+Upon a cursory glance, it may appear that the kind variable `a` is
+free-floating above, since there are no (visible) LHS patterns in `T`. However,
+there is an *invisible* pattern due to the return kind, so inside of GHC, the
+instance looks closer to this:
+
+    type family T @k :: k
+    type instance T @(Maybe a) = (Nothing :: Maybe a)
+
+Here, we can see that `a` really is bound by a LHS type pattern, so `a` is in
+fact not free-floating. Contrast that with this example:
+
+    type instance T = Proxy (Nothing :: Maybe a)
+
+This would looks like this inside of GHC:
+
+    type instance T @(*) = Proxy (Nothing :: Maybe a)
+
+So this time, `a` is neither bound by a visible nor invisible type pattern on
+the LHS, so it would be reported as free-floating.
+
+Finally, here's one more brain-teaser (from #9574). In the example below:
+
+    class Funct f where
+      type Codomain f :: *
+    instance Funct ('KProxy :: KProxy o) where
+      type Codomain 'KProxy = NatTr (Proxy :: o -> *)
+
+As it turns out, `o` is not free-floating in this example. That is because `o`
+bound by the kind signature of the LHS type pattern 'KProxy. To make this more
+obvious, one can also write the instance like so:
+
+    instance Funct ('KProxy :: KProxy o) where
+      type Codomain ('KProxy :: KProxy o) = NatTr (Proxy :: o -> *)
 
 -}
 
@@ -1769,6 +1843,7 @@ tcTyClTyVars tycon_name thing_inside
 
           -- Add the *unzonked* tyvars to the env't, because those
           -- are the ones mentioned in the source.
+       ; traceTc "tcTyClTyVars" (ppr tycon_name <+> ppr binders)
        ; tcExtendTyVarEnv scoped_tvs $
          thing_inside binders res_kind }
 

@@ -43,9 +43,7 @@ import State
 import UniqDFM
 
 import Control.Monad
-#if __GLASGOW_HASKELL__ > 710
 import qualified Control.Monad.Fail as MonadFail
-#endif
 
 {-
 ************************************************************************
@@ -735,7 +733,7 @@ specImport dflags this_mod top_env done callers rb fn calls_for_fn
   = do { warnMsg (vcat [ hang (text "Could not specialise imported function" <+> quotes (ppr fn))
                             2 (vcat [ text "when specialising" <+> quotes (ppr caller)
                                     | caller <- callers])
-                      , ifPprDebug (text "calls:" <+> vcat (map (pprCallInfo fn) calls_for_fn))
+                      , whenPprDebug (text "calls:" <+> vcat (map (pprCallInfo fn) calls_for_fn))
                       , text "Probable fix: add INLINABLE pragma on" <+> quotes (ppr fn) ])
        ; return ([], []) }
 
@@ -2287,12 +2285,10 @@ instance Monad SpecM where
                                case f y of
                                    SpecM z ->
                                        z
-    fail str = SpecM $ fail str
+    fail = MonadFail.fail
 
-#if __GLASGOW_HASKELL__ > 710
 instance MonadFail.MonadFail SpecM where
     fail str = SpecM $ fail str
-#endif
 
 instance MonadUnique SpecM where
     getUniqueSupplyM

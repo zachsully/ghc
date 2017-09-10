@@ -8,9 +8,27 @@
   * Add instances `Num`, `Functor`, `Applicative`, `Monad`, `Semigroup`
     and `Monoid` for `Data.Ord.Down` (#13097).
 
+  * Add `Semigroup` instance for `EventLifetime`.
+
+  * Make `Semigroup` a superclass of `Monoid`;
+    export `Semigroup` from `Prelude`; remove `Monoid` reexport
+    from `Data.Semigroup` (#14191).
+
   * Add `infixl 9 !!` declaration for `Data.List.NonEmpty.!!`
 
   * Add `<&>` operator to `Data.Functor` (#14029)
+
+  * Remove the deprecated `Typeable{1..7}` type synonyms (#14047)
+
+  * Add instances `Semigroup` and `Monoid` for `Control.Monad.ST` (#14107).
+
+  * The `Read` instances for `Proxy`, `Coercion`, `(:~:)`, `(:~~:)`, and `U1`
+    now ignore the parsing precedence. The effect of this is that `read` will
+    be able to successfully parse more strings containing `"Proxy"` _et al._
+    without surrounding parentheses (e.g., `"Thing Proxy"`) (#12874).
+
+  * Add `iterate'`, a strict version of `iterate`, to `Data.List`
+    and `Data.OldList` (#3474)
 
 ## 4.10.0.0 *April 2017*
   * Bundled with GHC *TBA*
