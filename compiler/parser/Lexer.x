@@ -9,7 +9,7 @@
 -- Completely accurate information about token-spans within the source
 -- file is maintained.  Every token has a start and end RealSrcLoc
 -- attached to it.
---
+---
 -- References:
 -- [1] https://www.haskell.org/onlinereport/haskell2010/haskellch2.html
 -- [2] http://www.haskell.org/alex/
@@ -751,6 +751,7 @@ data Token
   -- Copattern notation extension
   | ITcodata
   | ITcocase
+  | IThash  -- used for the head copattern
 
   -- type application '@' (lexed differently than as-pattern '@',
   -- due to checking for preceding whitespace)
@@ -849,7 +850,8 @@ reservedWordsFM = listToUFM $
          ( "proc",           ITproc,          xbit ArrowsBit),
 
          ( "codata",         ITcodata,        xbit CoPatternsBit),
-         ( "cocase",         ITcocase,       xbit CoPatternsBit)
+         ( "cocase",         ITcocase,        xbit CoPatternsBit),
+	 ( "#",              IThash,          xbit CoPatternsBit)
      ]
 
 {-----------------------------------
