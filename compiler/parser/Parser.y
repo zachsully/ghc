@@ -408,7 +408,8 @@ are the most common patterns, rewritten as regular expressions for clarity:
  'proc'         { L _ ITproc }          -- for arrow notation extension
  'rec'          { L _ ITrec }           -- for arrow notation extension
  'codata'       { L _ ITcodata }        -- for copattern notation extension
- 'cocase'       { L _ ITcocase }       -- for copattern notation extension
+ 'cocase'       { L _ ITcocase }        -- for copattern notation extension
+ '\#'           { L _ IThash }          -- for copattern notation extension
  'group'    { L _ ITgroup }     -- for list transform extension
  'by'       { L _ ITby }        -- for list transform extension
  'using'    { L _ ITusing }     -- for list transform extension
@@ -2418,6 +2419,7 @@ exp10_top :: { LHsExpr GhcPs }
                                                    FromSource (snd $ unLoc $4)))
                                                (mj AnnCase $1:mj AnnOf $3
                                                   :(fst $ unLoc $4)) }
+        | 'cocase' '{' coaltslist '}'   { error "I lied, copatterns not yet implemented" }
         | '-' fexp                      {% ams (sLL $1 $> $ NegApp $2 noSyntaxExpr)
                                                [mj AnnMinus $1] }
 
@@ -2875,6 +2877,11 @@ apat    : aexp                  {% checkPattern empty $1 }
 apats  :: { [LPat GhcPs] }
         : apat apats            { $1 : $2 }
         | {- empty -}           { [] }
+
+-----------------------------------------------------------------------------
+-- Cocase coalternatives
+
+coaltslist : {- empty -}         { [] }
 
 -----------------------------------------------------------------------------
 -- Statement sequences
