@@ -849,9 +849,9 @@ reservedWordsFM = listToUFM $
                                               xbit RecursiveDoBit),
          ( "proc",           ITproc,          xbit ArrowsBit),
 
-         ( "codata",         ITcodata,        xbit CoPatternsBit),
-         ( "cocase",         ITcocase,        xbit CoPatternsBit),
-	 ( "#",              IThash,          xbit CoPatternsBit)
+         ( "codata",         ITcodata,        xbit CopatternsBit),
+         ( "cocase",         ITcocase,        xbit CopatternsBit),
+	 ( "#",              IThash,          xbit CopatternsBit)
      ]
 
 {-----------------------------------
@@ -2153,7 +2153,7 @@ data ExtBits
   | CApiFfiBit
   | ParrBit
   | ArrowsBit
-  | CoPatternsBit
+  | CopatternsBit
   | ThBit
   | ThQuotesBit
   | IpBit
@@ -2196,7 +2196,7 @@ parrEnabled = xtest ParrBit
 arrowsEnabled :: ExtsBitmap -> Bool
 arrowsEnabled = xtest ArrowsBit
 copatternsEnabled :: ExtsBitmap -> Bool
-copatternsEnabled = xtest CoPatternsBit
+copatternsEnabled = xtest CopatternsBit
 thEnabled :: ExtsBitmap -> Bool
 thEnabled = xtest ThBit
 thQuotesEnabled :: ExtsBitmap -> Bool
@@ -2277,7 +2277,7 @@ mkParserFlags flags =
                .|. CApiFfiBit                  `setBitIf` xopt LangExt.CApiFFI                  flags
                .|. ParrBit                     `setBitIf` xopt LangExt.ParallelArrays           flags
                .|. ArrowsBit                   `setBitIf` xopt LangExt.Arrows                   flags
-               .|. CoPatternsBit               `setBitIf` xopt LangExt.CoPatterns               flags
+               .|. CopatternsBit               `setBitIf` xopt LangExt.Copatterns               flags
                .|. ThBit                       `setBitIf` xopt LangExt.TemplateHaskell          flags
                .|. ThQuotesBit                 `setBitIf` xopt LangExt.TemplateHaskellQuotes    flags
                .|. QqBit                       `setBitIf` xopt LangExt.QuasiQuotes              flags
