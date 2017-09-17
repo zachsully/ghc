@@ -20,6 +20,14 @@
 
   * Remove the deprecated `Typeable{1..7}` type synonyms (#14047)
 
+  * Make `Data.Type.Equality.==` a closed type family. It now works for all
+  kinds out of the box. Any modules that previously declared instances of this
+  family will need to remove them. Whereas the previous definition was somewhat
+  ad hoc, the behavior is now completely uniform. As a result, some applications
+  that used to reduce no longer do, and conversely. Most notably, `(==)` no
+  longer treats the `*`, `j -> k`, or `()` kinds specially; equality is
+  tested structurally in all cases.
+
   * Add instances `Semigroup` and `Monoid` for `Control.Monad.ST` (#14107).
 
   * The `Read` instances for `Proxy`, `Coercion`, `(:~:)`, `(:~~:)`, and `U1`
@@ -29,6 +37,10 @@
 
   * Add `iterate'`, a strict version of `iterate`, to `Data.List`
     and `Data.OldList` (#3474)
+
+  * Add `Data` instances for `IntPtr` and `WordPtr` (#13115)
+
+  * Add missing `MonadFail` instance for `Control.Monad.Strict.ST.ST`
 
 ## 4.10.0.0 *April 2017*
   * Bundled with GHC *TBA*
