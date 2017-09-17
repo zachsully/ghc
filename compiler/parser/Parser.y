@@ -2419,7 +2419,7 @@ exp10_top :: { LHsExpr GhcPs }
                                                    FromSource (snd $ unLoc $4)))
                                                (mj AnnCase $1:mj AnnOf $3
                                                   :(fst $ unLoc $4)) }
-        | 'cocase' '{' coaltslist '}'   { error "I lied, copatterns not yet implemented" }
+        | 'cocase' '{' '}'   { error "I lied, copatterns not yet implemented" }
         | '-' fexp                      {% ams (sLL $1 $> $ NegApp $2 noSyntaxExpr)
                                                [mj AnnMinus $1] }
 
@@ -2881,7 +2881,6 @@ apats  :: { [LPat GhcPs] }
 -----------------------------------------------------------------------------
 -- Cocase coalternatives
 
-coaltslist : {- empty -}         { [] }
 
 -----------------------------------------------------------------------------
 -- Statement sequences
@@ -3754,4 +3753,17 @@ asl (x:_xs) (L ls _) _x = addAnnotation (getLoc x) AnnSemi ls
 
 sst ::HasSourceText a => SourceText -> a
 sst = setSourceText
+
+--------------------------------------------------------------------------------
+-- Add hoc Copattern additions
+
+newtype Cocase = Cocase [(Copattern,(LHsExpr GhcPs))]
+
+data Copattern
+  = QHead
+  | QDest (LHsExpr GhcPs) Copattern
+  | QPat Copattern (LHsExpr GhcPs)
+
+flattenCopattern :: Cocase -> LHsExpr GhcPs
+flattenCopattern = undefined
 }
