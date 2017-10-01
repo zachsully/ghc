@@ -35,7 +35,10 @@ module HsPat (
 
         collectEvVarsPats,
 
-        pprParendLPat, pprConArgs
+        pprParendLPat, pprConArgs,
+
+        -- Copatterns
+        Cop(..)
     ) where
 
 import {-# SOURCE #-} HsExpr            (SyntaxExpr, LHsExpr, HsSplice, pprLExpr, pprSplice)
@@ -716,3 +719,16 @@ collectEvVarsPat pat =
     ConPatIn _  _     -> panic "foldMapPatBag: ConPatIn"
     SigPatIn _ _      -> panic "foldMapPatBag: SigPatIn"
     _other_pat        -> emptyBag
+
+
+-- | Copatterns
+--
+
+data Cop p
+  = HeadCop
+    -- ^ the trivil copattern
+
+  | DestCop (Located ConLike)
+
+
+  | PatCop (LPat p)

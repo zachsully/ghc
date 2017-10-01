@@ -400,6 +400,8 @@ data HsExpr p
   --       'ApiAnnotation.AnnThen','ApiAnnotation.AnnSemi',
   --       'ApiAnnotation.AnnElse',
 
+  | HsCoCase  (CoMatch p (LHsExpr p))
+
   -- For details on above see note [Api annotations] in ApiAnnotation
   | HsIf        (Maybe (SyntaxExpr p)) -- cond function
                                         -- Nothing => use the built-in 'if'
@@ -930,6 +932,8 @@ ppr_expr (HsCase expr matches@(MG { mg_alts = L _ [_] }))
 ppr_expr (HsCase expr matches)
   = sep [ sep [text "case", nest 4 (ppr expr), ptext (sLit "of")],
           nest 2 (pprMatches matches) ]
+
+ppr_expr (HsCoCase _) = panic "ppr_expr HsCoCase"
 
 ppr_expr (HsIf _ e1 e2 e3)
   = sep [hsep [text "if", nest 2 (ppr e1), ptext (sLit "then")],
@@ -1592,6 +1596,18 @@ pprGRHS ctxt (GRHS guards body)
 
 pp_rhs :: Outputable body => HsMatchContext idL -> body -> SDoc
 pp_rhs ctxt rhs = matchSeparator ctxt <+> pprDeeper (ppr rhs)
+
+
+{-
+************************************************************************
+*                                                                      *
+\subsection{CoMatch}
+*                                                                      *
+************************************************************************
+-}
+
+data CoMatch p body
+deriving instance (Data body,DataId p) => Data (CoMatch p body)
 
 {-
 ************************************************************************
