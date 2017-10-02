@@ -3775,31 +3775,4 @@ asl (x:_xs) (L ls _) _x = addAnnotation (getLoc x) AnnSemi ls
 
 sst ::HasSourceText a => SourceText -> a
 sst = setSourceText
-
---------------------------------------------------------------------------------
--- Add hoc Copattern additions
-
-data Codata
-  = Codata
-  { consName   :: Located RdrName
-  , consFvars  :: [Located RdrName]
-  }
-
-data Cocase = Cocase [(Copattern,LHsExpr GhcPs)]
-data FCocase = FCocase (FCopattern,LHsExpr GhcPs) (LHsExpr GhcPs)
-
-data Copattern
-  = QHead
-  | QDest (Located RdrName) Copattern
-  | QPat Copattern (LPat GhcPs)
-
-data FCopattern
-  = FQDest (LHsExpr GhcPs)
-  | FQVar (LPat GhcPs)
-
-flatten :: Cocase -> FCocase
-flatten = undefined
-
-toRecords :: FCocase -> LHsExpr GhcPs
-toRecords = undefined
 }

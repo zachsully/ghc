@@ -35,7 +35,7 @@
 
 module Name (
         -- * The main types
-        Name,                                   -- Abstract
+        Name(..),                                 -- Abstract
         BuiltInSyntax(..),
 
         -- ** Creating 'Name's

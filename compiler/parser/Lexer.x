@@ -1872,7 +1872,10 @@ data PState = PState {
         -- See note [Api annotations] in ApiAnnotation.hs
         annotations :: [(ApiAnnKey,[SrcSpan])],
         comment_q :: [Located AnnotationComment],
-        annotations_comments :: [(SrcSpan,[Located AnnotationComment])]
+        annotations_comments :: [(SrcSpan,[Located AnnotationComment])],
+
+	-- Used to generate unique names in the flattening stage for copatterns
+	u_num :: Int
      }
         -- last_loc and last_len are used when generating error messages,
         -- and in pushCurrentContext only.  Sigh, if only Happy passed the
@@ -2342,7 +2345,8 @@ mkPStatePure options buf loc =
       alr_justClosedExplicitLetBlock = False,
       annotations = [],
       comment_q = [],
-      annotations_comments = []
+      annotations_comments = [],
+      u_num = 0
     }
 
 addWarning :: WarningFlag -> SrcSpan -> SDoc -> P ()

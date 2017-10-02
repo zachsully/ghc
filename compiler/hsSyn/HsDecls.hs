@@ -508,10 +508,14 @@ data TyClDecl pass
                                                --       type F a = a -> a
                                                -- Here the type decl for 'f'
                                                -- includes 'a' in its tcdTyVars
-             , tcdFixity  :: LexicalFixity -- ^ Fixity used in the declaration
+             , tcdFixity   :: LexicalFixity -- ^ Fixity used in the declaration
              , tcdDataDefn :: HsDataDefn pass
              , tcdDataCusk :: PostRn pass Bool    -- ^ does this have a CUSK?
              , tcdFVs      :: PostRn pass NameSet }
+
+  -- negative data
+  | CoDataDecl { tccdLName  :: Located (IdP pass)
+               , tccdTyVars :: LHsQTyVars pass }
 
   | ClassDecl { tcdCtxt    :: LHsContext pass,         -- ^ Context...
                 tcdLName   :: Located (IdP pass),      -- ^ Name of the class
