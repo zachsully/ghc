@@ -72,7 +72,7 @@ module   RdrHsSyn (
         Copattern(..),
         FCopattern(..),
         flattenCocase,
-        cocaseToExpr,
+        translateFCocase,
     ) where
 
 import HsSyn            -- Lots of it
@@ -1625,11 +1625,12 @@ mkSetterName (L l s) = L l $
     Exact  n -> Exact  (n { n_occ = addSet (n_occ n) })
   where addSet n = n { occNameFS = appendFS (fsLit "set_") (occNameFS n) }
 
-flattenCocase :: Cocase -> P FCocase
+flattenCocase :: Cocase -> P (Either (LHsExpr GhcPs) FCocase)
 flattenCocase (Cocase coalts) =
   case coalts of
     [] -> error "constructor error"
-    ((QHead,u):_) -> undefined
+    ((QHead,u):_) -> return (Left u)
 
-cocaseToExpr :: FCocase -> LHsExpr GhcPs
-cocaseToExpr = undefined
+translateFCocase :: Either (LHsExpr GhcPs) FCocase -> LHsExpr GhcPs
+translateFCocase (Left u) = u
+translateFCocase (Right _) = panic "oops not done implementing copattens"

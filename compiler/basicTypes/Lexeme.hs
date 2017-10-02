@@ -225,7 +225,7 @@ reservedIds = Set.fromList [ "case", "class", "data", "default", "deriving"
                            , "do", "else", "foreign", "if", "import", "in"
                            , "infix", "infixl", "infixr", "instance", "let"
                            , "module", "newtype", "of", "then", "type", "where"
-                           , "_" ]
+                           , "_" , "cocase" , "codata" , "#" ]
 
 -- | All reserved operators. Taken from section 2.4 of the 2010 Report.
 reservedOps :: Set.Set String

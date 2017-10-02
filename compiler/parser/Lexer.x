@@ -534,6 +534,10 @@ $tab          { warnTab }
   \"                            { lex_string_tok }
 }
 
+<0> {
+  \# / { ifExtension copatternsEnabled } { special IThash }
+}
+
 -- Note [Lexing type applications]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 -- The desired syntax for type applications is to prefix the type application
@@ -851,6 +855,7 @@ reservedWordsFM = listToUFM $
 
          ( "codata",         ITcodata,        xbit CopatternsBit),
          ( "cocase",         ITcocase,        xbit CopatternsBit),
+	 ( "#",              IThash,          xbit CopatternsBit),
 	 ( "#",              IThash,          xbit CopatternsBit)
      ]
 
@@ -916,6 +921,7 @@ reservedSymsFM = listToUFM $
         -- ToDo: ideally, → and ∷ should be "specials", so that they cannot
         -- form part of a large operator.  This would let us have a better
         -- syntax for kinds: ɑ∷*→* would be a legal kind signature. (maybe).
+       ,( "#", IThash, copatternsEnabled)
        ]
 
 -- -----------------------------------------------------------------------------

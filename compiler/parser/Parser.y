@@ -2419,7 +2419,7 @@ exp10_top :: { LHsExpr GhcPs }
                                                    FromSource (snd $ unLoc $4)))
                                                (mj AnnCase $1:mj AnnOf $3
                                                   :(fst $ unLoc $4)) }
-        | 'cocase' '{' coaltlist '}'    { error "copatterns not yet implemented" }
+        | 'cocase' '{' coaltlist '}'    {% fmap translateFCocase (flattenCocase (Cocase $3)) }
         | '-' fexp                      {% ams (sLL $1 $> $ NegApp $2 noSyntaxExpr)
                                                [mj AnnMinus $1] }
 
@@ -2887,15 +2887,15 @@ coaltlist  : coaltlist ';' coalt { $1 ++ [$3] }
            | {- empty -}         { [] }
 
 coalt :: { (Copattern,LHsExpr GhcPs) }
-coalt : cop '->' exp             { ( $1 , $3 ) }
+coalt : acop '->' exp             { ( $1 , $3 ) }
 
 cop :: { Copattern }
 cop : qvar cop                   { QDest $1 $2 }
     | cop1                       { $1 }
 
 cop1 :: { Copattern }
-cop1 : acop                      { QHead }
-     | cop parenpat              { QPat $1 $2 }
+cop1 : cop parenpat              { QPat $1 $2 }
+     | acop                      { $1 }
 
 parenpat :: { LPat GhcPs }
 parenpat : '(' pat ')'           { $2 }
