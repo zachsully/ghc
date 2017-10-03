@@ -2890,7 +2890,7 @@ coalt :: { (Copattern,LHsExpr GhcPs) }
 coalt : cop '->' exp             { ( $1 , $3 ) }
 
 cop :: { Copattern }
-cop : qvar cop                   { QDest $1 $2 }
+cop : qcon cop                   { QDest $1 $2 }
     | cop1                       { $1 }
 
 cop1 :: { Copattern }

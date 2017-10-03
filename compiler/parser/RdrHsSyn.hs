@@ -1595,7 +1595,8 @@ data Codata
   }
 
 data Cocase = Cocase [(Copattern,LHsExpr GhcPs)]
-data FCocase = FCocase (FCopattern,LHsExpr GhcPs) (LHsExpr GhcPs)
+data FCocase = FCocase (FCopattern,LHsExpr GhcPs)
+                       (Either (LHsExpr GhcPs) FCocase)
 
 data Copattern
   = QHead
@@ -1642,17 +1643,35 @@ freshen l =
 flattenCocase :: Cocase -> P (Either (LHsExpr GhcPs) FCocase)
 flattenCocase (Cocase coalts) =
   case coalts of
-    [] -> error "constructor error"
+    [] -> return . Left $
+            nlHsApp (nlHsVar . mkVarUnqual . fsLit $ "error")
+                    (nlHsLit . mkHsString $ "unmatched (co)case")
+
     -- R-QHead
     ((QHead,u):_) -> return (Left u)
 
-    ((QPat QHead p,u):_) ->
+    -- R-QDest
+    ((QDest h QHead,u):coalts) ->
+      Right . FCocase (FQDest h,u) <$> flattenCocase (Cocase coalts)
+
+
+    ((QPat QHead p,u):coalts) ->
       case unLoc p of
         -- R-PQVar
-        WildPat _ -> return (Left (mkHsLam [p] u))
-        (VarPat _) -> return (Left (mkHsLam [p] u))
-        _ -> panic "TODO flattenCocase{# p}"
-    _ -> panic "TODO flattenCocase"
+        WildPat _ -> return . Left $ mkHsLam [p] u
+        VarPat _  -> return . Left $ mkHsLam [p] u
+
+        -- R-QPat
+        _ -> do { x <- freshen . noLoc . mkVarUnqual . fsLit $ "x"
+                ; y <- freshen . noLoc . mkVarUnqual . fsLit $ "y"
+                ; ec <- flattenCocase (Cocase coalts)
+                ; let matches = panic "matches unimplemented"
+                ; return . Left $
+                    mkHsLam [noLoc . VarPat $ x]
+                            (nlHsCase (noLoc . HsVar $ x) matches)
+                }
+    ((q,u):coalts) -> panic "recursive cases not implemented"
+
 
 translateFCocase :: Either (LHsExpr GhcPs) FCocase -> LHsExpr GhcPs
 translateFCocase (Left u) = u
