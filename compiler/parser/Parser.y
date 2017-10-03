@@ -2887,7 +2887,7 @@ coaltlist  : coaltlist ';' coalt { $1 ++ [$3] }
            | {- empty -}         { [] }
 
 coalt :: { (Copattern,LHsExpr GhcPs) }
-coalt : acop '->' exp             { ( $1 , $3 ) }
+coalt : cop '->' exp             { ( $1 , $3 ) }
 
 cop :: { Copattern }
 cop : qvar cop                   { QDest $1 $2 }

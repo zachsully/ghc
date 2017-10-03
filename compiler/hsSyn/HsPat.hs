@@ -17,7 +17,7 @@
 {-# LANGUAGE TypeFamilies #-}
 
 module HsPat (
-        Pat(..), InPat, OutPat, LPat,
+        Pat(..), InPat, OutPat, LPat(..),
 
         HsConPatDetails, hsConPatArgs,
         HsRecFields(..), HsRecField'(..), LHsRecField',

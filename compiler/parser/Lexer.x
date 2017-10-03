@@ -55,7 +55,7 @@
 module Lexer (
    Token(..), lexer, pragState, mkPState, mkPStatePure, PState(..),
    P(..), ParseResult(..), mkParserFlags, ParserFlags(..), getSrcLoc,
-   getPState, extopt, withThisPackage,
+   getPState, setPState, extopt, withThisPackage,
    failLocMsgP, failSpanMsgP, srcParseFail,
    getMessages,
    popContext, pushModuleContext, setLastToken, setSrcLoc,
@@ -1944,6 +1944,9 @@ failSpanMsgP span msg =
 
 getPState :: P PState
 getPState = P $ \s -> POk s s
+
+setPState :: PState -> P ()
+setPState s' = P $ \s -> POk s' ()
 
 withThisPackage :: (UnitId -> a) -> P a
 withThisPackage f = P $ \s@(PState{options = o}) -> POk s (f (pThisPackage o))
