@@ -949,6 +949,7 @@ ops     :: { Located (OrdList (Located RdrName)) }
 -- No trailing semicolons, non-empty
 topdecls :: { OrdList (LHsDecl GhcPs) }
         : topdecls_semi topdecl        { $1 `snocOL` $2 }
+        | topdecls_semi codata_decl    { panic "codata declarations not handled yet."}
 
 -- May have trailing semicolons, can be empty
 topdecls_semi :: { OrdList (LHsDecl GhcPs) }
@@ -2879,7 +2880,14 @@ apats  :: { [LPat GhcPs] }
         | {- empty -}           { [] }
 
 -----------------------------------------------------------------------------
--- Cocase coalternatives
+-- Copatterns parsing
+{- Parsing copatterns requires parsing a cocase connective (which can contain
+copatterns that need a special parser) and codata declarations which are similar
+to GADT declarations. -}
+
+codata_decl :: { Codata }
+codata_decl : 'codata' { panic "cannot parse codata yet." }
+
 
 coaltlist  :: { [(Copattern,LHsExpr GhcPs)] }
 coaltlist  : coaltlist ';' coalt { $1 ++ [$3] }
