@@ -949,7 +949,7 @@ ops     :: { Located (OrdList (Located RdrName)) }
 -- No trailing semicolons, non-empty
 topdecls :: { OrdList (LHsDecl GhcPs) }
         : topdecls_semi topdecl        { $1 `snocOL` $2 }
-        | topdecls_semi codata_decl    { panic "codata declarations not handled yet."}
+        | topdecls_semi codata_decl    { mappend $1 (translateCodata $2) }
 
 -- May have trailing semicolons, can be empty
 topdecls_semi :: { OrdList (LHsDecl GhcPs) }
@@ -2076,7 +2076,7 @@ gadt_constr :: { LConDecl GhcPs }
                        [mu AnnDcolon $2] }
 
 {- Note [Difference in parsing GADT and data constructors]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 GADT constructors have simpler syntax than usual data constructors:
 in GADTs, types cannot occur to the left of '::', so they cannot be mixed
 with constructor names (see Note [Parsing data constructors is hard]).
@@ -2880,15 +2880,43 @@ apats  :: { [LPat GhcPs] }
         | {- empty -}           { [] }
 
 -----------------------------------------------------------------------------
--- Copatterns parsing
+-- Copatterns syntax extension parsing
 {- Parsing copatterns requires parsing a cocase connective (which can contain
 copatterns that need a special parser) and codata declarations which are similar
 to GADT declarations. -}
 
+---------------------
+-- Codata parsing
 codata_decl :: { Codata }
-codata_decl : 'codata' { panic "cannot parse codata yet." }
+codata_decl : 'codata' type destlist       { Codata (error "")
+                                                    (error "")
+                                                    $3 }
+
+destlist :: { [Dest] }
+destlist : 'where' '{'        dests '}'    { $3 }
+         | 'where' vocurly    dests close  { $3 }
+         | {- empty -}                     { [] }
+
+dests :: { [Dest] }
+dests : dest_with_doc ';' dests            { $1 : $3 }
+      | dest_with_doc                      { [$1] }
+      | {- empty -}                        { [] }
+
+-- dest_with_doc :: { Dest }
+-- dest_with_doc : maybe_docnext ';' dest {% return $ addConDoc $3 $1 }
+--               | dest                   {% return $1 }
+
+dest_with_doc :: { Dest }
+dest_with_doc : maybe_docnext ';' dest    { $3 }
+              | dest                      { $1 }
 
 
+dest :: { Dest }
+dest : qcon '::' sigtype                   { Dest $1 $3 }
+
+
+------------------
+-- Coalternatives
 coaltlist  :: { [(Copattern,LHsExpr GhcPs)] }
 coaltlist  : coaltlist ';' coalt { $1 ++ [$3] }
            | coalt               { [$1] }

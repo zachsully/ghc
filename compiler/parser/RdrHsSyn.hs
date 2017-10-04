@@ -66,12 +66,14 @@ module   RdrHsSyn (
         SumOrTuple (..), mkSumOrTuple,
 
         -- Copattern parsing helpers
-        Codata(..),
+        Codata(Codata),
+        Dest(Dest),
         Cocase(Cocase),
         FCocase(FCocase),
         Copattern(..),
         FCopattern(..),
         flattenCocase,
+        translateCodata,
         translateFCocase,
     ) where
 
@@ -1590,8 +1592,15 @@ mkSumOrTuple Boxed l (Sum alt arity (L _ e)) =
 
 data Codata
   = Codata
-  { consName   :: Located RdrName
-  , consFvars  :: [Located RdrName]
+  { codataName    :: Located RdrName
+  , codataFvars   :: [Located RdrName]
+  , destructors   :: [Dest]
+  }
+
+data Dest
+  = Dest
+  { destName :: Located RdrName
+  , destType :: LHsType GhcPs
   }
 
 data Cocase = Cocase [(Copattern,LHsExpr GhcPs)]
@@ -1672,7 +1681,9 @@ flattenCocase (Cocase coalts) =
                 }
     ((q,u):coalts) -> panic "recursive cases not implemented"
 
+translateCodata :: Codata -> OrdList (LHsDecl GhcPs)
+translateCodata = panic "translating codata not yet implemented."
 
 translateFCocase :: Either (LHsExpr GhcPs) FCocase -> LHsExpr GhcPs
 translateFCocase (Left u) = u
-translateFCocase (Right _) = panic "oops not done implementing copattens"
+translateFCocase (Right _) = panic "oops not done implementing copattens."
