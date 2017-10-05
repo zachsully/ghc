@@ -98,7 +98,7 @@ import ForeignCall
 import PrelNames        ( forall_tv_RDR, eqTyCon_RDR, allNameStrings )
 import SrcLoc
 import Unique           ( hasKey )
-import OrdList          ( OrdList, fromOL )
+import OrdList          ( OrdList, fromOL, unitOL )
 import Bag              ( emptyBag, consBag )
 import Outputable
 import FastString
@@ -1597,6 +1597,26 @@ data Codata
   , destructors   :: [Dest]
   }
 
+-- mkTyCoData :: SrcSpan
+--            -> NewOrData
+--            -> Maybe (Located CType)
+--            -> Located (Maybe (LHsContext GhcPs), LHsType GhcPs)
+--            -> Maybe (LHsKind GhcPs)
+--            -> [LConDecl GhcPs]
+--            -> HsDeriving GhcPs
+--            -> P (LTyClDecl GhcPs)
+-- mkTyCoData loc new_or_data cType (L _ (mcxt, tycl_hdr)) ksig data_cons maybe_deriv
+--   = do { (tc, tparams, fixity, ann) <- checkTyClHdr False tycl_hdr
+--        ; mapM_ (\a -> a loc) ann -- Add any API Annotations to the top SrcSpan
+--        ; tyvars <- checkTyVarsP (ppr new_or_data) equalsDots tc tparams
+--        ; defn <- mkDataDefn new_or_data cType mcxt ksig data_cons maybe_deriv
+--        ; return (L loc (DataDecl { tccdLName = tc, tcdTyVars = tyvars,
+--                                    tccdFixity = fixity,
+--                                    tccdDataDefn = defn,
+--                                    tccdDataCusk = PlaceHolder,
+--                                    tccdFVs = placeHolderNames })) }
+
+
 data Dest
   = Dest
   { destName :: Located RdrName
@@ -1682,7 +1702,13 @@ flattenCocase (Cocase coalts) =
     ((q,u):coalts) -> panic "recursive cases not implemented"
 
 translateCodata :: Codata -> OrdList (LHsDecl GhcPs)
-translateCodata = panic "translating codata not yet implemented."
+translateCodata cdt = id
+                    $ mappend (unitOL . noLoc . TyClD . transCons $ cdt)
+                              (fmap (noLoc . ValD) . genSetters $ cdt)
+  where transCons :: Codata -> TyClDecl GhcPs
+        transCons = panic "translating negative constructor unimplemented"
+        genSetters :: Codata -> OrdList (HsBind GhcPs)
+        genSetters = panic "genSetters unimplemented"
 
 translateFCocase :: Either (LHsExpr GhcPs) FCocase -> LHsExpr GhcPs
 translateFCocase (Left u) = u

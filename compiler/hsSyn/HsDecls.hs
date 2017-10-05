@@ -514,8 +514,12 @@ data TyClDecl pass
              , tcdFVs      :: PostRn pass NameSet }
 
   -- negative data
-  | CoDataDecl { tccdLName  :: Located (IdP pass)
-               , tccdTyVars :: LHsQTyVars pass }
+  | CodataDecl { tccdLName    :: Located (IdP pass)
+               , tccdTyVars   :: LHsQTyVars pass
+               , tccdFixity   :: LexicalFixity
+               , tccdDataDefn :: HsCodataDefn pass
+               , tccdDataCusk :: PostRn pass Bool
+               , tccdFVs      :: PostRn pass NameSet }
 
   | ClassDecl { tcdCtxt    :: LHsContext pass,         -- ^ Context...
                 tcdLName   :: Located (IdP pass),      -- ^ Name of the class
@@ -552,10 +556,14 @@ isDataDecl :: TyClDecl pass -> Bool
 isDataDecl (DataDecl {}) = True
 isDataDecl _other        = False
 
+isCodataDecl :: TyClDecl pass -> Bool
+isCodataDecl (CodataDecl {}) = True
+isCodataDecl _other          = False
+
 -- | type or type instance declaration
 isSynDecl :: TyClDecl pass -> Bool
-isSynDecl (SynDecl {})   = True
-isSynDecl _other        = False
+isSynDecl (SynDecl {}) = True
+isSynDecl _other       = False
 
 -- | type class
 isClassDecl :: TyClDecl pass -> Bool
@@ -1054,7 +1062,7 @@ data HsDataDefn pass   -- The payload of a data type defn
                  dd_derivs :: HsDeriving pass  -- ^ Optional 'deriving' claues
 
              -- For details on above see note [Api annotations] in ApiAnnotation
-   }
+    }
 deriving instance (DataId id) => Data (HsDataDefn id)
 
 -- | Haskell Deriving clause
@@ -1278,6 +1286,31 @@ pprConDecl (ConDeclGADT { con_names = cons, con_type = res_ty, con_doc = doc })
 
 ppr_con_names :: (OutputableBndr a) => [Located a] -> SDoc
 ppr_con_names = pprWithCommas (pprPrefixOcc . unLoc)
+
+{- *********************************************************************
+*                                                                      *
+               Codata types and Codata destructors
+*                                                                      *
+********************************************************************* -}
+
+data HsCodataDefn pass
+  = HsCodataDefn
+  { cdd_ctxt :: LHsContext pass
+  , cdd_cons :: [LDestDecl pass]
+  }
+deriving instance (DataId pass) => Data (HsCodataDefn pass)
+
+type LDestDecl pass = Located (DestDecl pass)
+
+data DestDecl pass
+  = DestDecl
+  { dest_names   :: [Located (IdP pass)]
+  , dest_type    :: LHsSigType pass
+    -- ^ The type after the ‘::’
+  , dest_doc     :: Maybe LHsDocString
+    -- ^ A possible Haddock comment.
+  }
+deriving instance (DataId pass) => Data (DestDecl pass)
 
 {-
 ************************************************************************
