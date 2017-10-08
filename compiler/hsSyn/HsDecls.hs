@@ -67,6 +67,8 @@ module HsDecls (
   getConNames,
   getConDetails,
   gadtDeclDetails,
+  -- ** Codata-destructor declarations
+  HsCodataDefn(..),DestDecl(..), LDestDecl,
   -- ** Document comments
   DocDecl(..), LDocDecl, docDeclDoc,
   -- ** Deprecations
@@ -514,12 +516,10 @@ data TyClDecl pass
              , tcdFVs      :: PostRn pass NameSet }
 
   -- negative data
-  | CodataDecl { tccdLName    :: Located (IdP pass)
-               , tccdTyVars   :: LHsQTyVars pass
-               , tccdFixity   :: LexicalFixity
-               , tccdDataDefn :: HsCodataDefn pass
-               , tccdDataCusk :: PostRn pass Bool
-               , tccdFVs      :: PostRn pass NameSet }
+  | CodataDecl { tccdLName      :: Located (IdP pass)
+               , tccdTyVars     :: LHsQTyVars pass
+               , tccdFixity     :: LexicalFixity
+               , tccdCodataDefn :: HsCodataDefn pass }
 
   | ClassDecl { tcdCtxt    :: LHsContext pass,         -- ^ Context...
                 tcdLName   :: Located (IdP pass),      -- ^ Name of the class
@@ -1295,8 +1295,8 @@ ppr_con_names = pprWithCommas (pprPrefixOcc . unLoc)
 
 data HsCodataDefn pass
   = HsCodataDefn
-  { cdd_ctxt :: LHsContext pass
-  , cdd_cons :: [LDestDecl pass]
+  { cdd_ctxt  :: LHsContext pass
+  , cdd_dests :: [LDestDecl pass]
   }
 deriving instance (DataId pass) => Data (HsCodataDefn pass)
 

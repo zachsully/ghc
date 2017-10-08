@@ -88,7 +88,7 @@ import Prelude
 import qualified GHC.LanguageExtensions as LangExt
 }
 
-%expect 37 -- shift/reduce conflicts
+%expect 38 -- shift/reduce conflicts
 
 {- Last updated: 3 Aug 2016
 
@@ -949,7 +949,7 @@ ops     :: { Located (OrdList (Located RdrName)) }
 -- No trailing semicolons, non-empty
 topdecls :: { OrdList (LHsDecl GhcPs) }
         : topdecls_semi topdecl        { $1 `snocOL` $2 }
-        | topdecls_semi codata_decl    { mappend $1 (translateCodata $2) }
+        | topdecls_semi codata_decl    { $1 `mappend` translateCodata $2 }
 
 -- May have trailing semicolons, can be empty
 topdecls_semi :: { OrdList (LHsDecl GhcPs) }
@@ -2420,7 +2420,8 @@ exp10_top :: { LHsExpr GhcPs }
                                                    FromSource (snd $ unLoc $4)))
                                                (mj AnnCase $1:mj AnnOf $3
                                                   :(fst $ unLoc $4)) }
-        | 'cocase' '{' coaltlist '}'    {% fmap translateFCocase (flattenCocase (Cocase $3)) }
+        | '{' coalts '}'     {% fmap translateFCocase (flattenCocase (Cocase (reverse $2))) }
+        | 'cocase' coaltlist {% fmap translateFCocase (flattenCocase (Cocase $2)) }
         | '-' fexp                      {% ams (sLL $1 $> $ NegApp $2 noSyntaxExpr)
                                                [mj AnnMinus $1] }
 
@@ -2508,6 +2509,7 @@ aexp    :: { LHsExpr GhcPs }
 
         | '~' aexp              {% ams (sLL $1 $> $ ELazyPat $2) [mj AnnTilde $1] }
         | aexp1                 { $1 }
+
 
 aexp1   :: { LHsExpr GhcPs }
         : aexp1 '{' fbinds '}' {% do { r <- mkRecConstrOrUpdate $1 (comb2 $2 $4)
@@ -2887,40 +2889,34 @@ to GADT declarations. -}
 
 ---------------------
 -- Codata parsing
-codata_decl :: { Codata }
-codata_decl : 'codata' type destlist       { Codata (error "")
-                                                    (error "")
-                                                    $3 }
+codata_decl :: { LTyClDecl GhcPs }
+codata_decl : 'codata' tycl_hdr dest_list
+   {%  amms (mkTyCodata noSrcSpan $2 (fmap noLoc $3)) [] }
 
-destlist :: { [Dest] }
-destlist : 'where' '{'        dests '}'    { $3 }
-         | 'where' vocurly    dests close  { $3 }
-         | {- empty -}                     { [] }
+dest_list :: { [DestDecl GhcPs] }
+dest_list : 'where' '{'        dests '}'    { $3 }
+          | 'where' vocurly    dests close  { $3 }
+          | {- empty -}                     { [] }
 
-dests :: { [Dest] }
-dests : dest_with_doc ';' dests            { $1 : $3 }
-      | dest_with_doc                      { [$1] }
-      | {- empty -}                        { [] }
+dests :: { [DestDecl GhcPs] }
+dests : dest maybe_docnext ';' maybe_docprev dests { $1 : $5 }
+      | dest                                       { [$1] }
+      | {- empty -}                                { [] }
 
--- dest_with_doc :: { Dest }
--- dest_with_doc : maybe_docnext ';' dest {% return $ addConDoc $3 $1 }
---               | dest                   {% return $1 }
-
-dest_with_doc :: { Dest }
-dest_with_doc : maybe_docnext ';' dest    { $3 }
-              | dest                      { $1 }
-
-
-dest :: { Dest }
-dest : qcon '::' sigtype                   { Dest $1 $3 }
+dest :: { DestDecl GhcPs }
+dest : qcon '::' sigtype                  { mkDestDecl [$1] (mkLHsSigType $3) }
 
 
 ------------------
 -- Coalternatives
 coaltlist  :: { [(Copattern,LHsExpr GhcPs)] }
-coaltlist  : coaltlist ';' coalt { $1 ++ [$3] }
-           | coalt               { [$1] }
-           | {- empty -}         { [] }
+coaltlist  : '{'     coalts '}'      { reverse $2 }
+           | vocurly coalts close    { reverse $2 }
+
+coalts :: { [(Copattern,LHsExpr GhcPs)] }
+coalts : coalts maybe_docnext ';' coalt { $4 : $1 }
+       | coalt                          { [$1] }
+       | {- empty -}                    { [] }
 
 coalt :: { (Copattern,LHsExpr GhcPs) }
 coalt : cop '->' exp             { ( $1 , $3 ) }
