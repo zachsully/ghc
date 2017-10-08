@@ -949,12 +949,12 @@ ops     :: { Located (OrdList (Located RdrName)) }
 -- No trailing semicolons, non-empty
 topdecls :: { OrdList (LHsDecl GhcPs) }
         : topdecls_semi topdecl        { $1 `snocOL` $2 }
-        | topdecls_semi codata_decl    { $1 `mappend` translateCodata $2 }
 
 -- May have trailing semicolons, can be empty
 topdecls_semi :: { OrdList (LHsDecl GhcPs) }
-        : topdecls_semi topdecl semis1 {% ams $2 $3 >> return ($1 `snocOL` $2) }
-        | {- empty -}                  { nilOL }
+        : topdecls_semi topdecl semis1      {% ams $2 $3 >> return ($1 `snocOL` $2) }
+        | topdecls_semi codata_decl semis1  { $1 `mappend` translateCodata $2 }
+        | {- empty -}                       { nilOL }
 
 topdecl :: { LHsDecl GhcPs }
         : cl_decl                               { sL1 $1 (TyClD (unLoc $1)) }
@@ -2420,8 +2420,8 @@ exp10_top :: { LHsExpr GhcPs }
                                                    FromSource (snd $ unLoc $4)))
                                                (mj AnnCase $1:mj AnnOf $3
                                                   :(fst $ unLoc $4)) }
-        | '{' coalts '}'     {% fmap translateFCocase (flattenCocase (Cocase (reverse $2))) }
-        | 'cocase' coaltlist {% fmap translateFCocase (flattenCocase (Cocase $2)) }
+        | '{' coalts '}'     {% translateFCocase =<< flattenCocase (Cocase (reverse $2)) }
+        | 'cocase' coaltlist {% translateFCocase =<< flattenCocase (Cocase $2) }
         | '-' fexp                      {% ams (sLL $1 $> $ NegApp $2 noSyntaxExpr)
                                                [mj AnnMinus $1] }
 
@@ -2899,9 +2899,10 @@ dest_list : 'where' '{'        dests '}'    { $3 }
           | {- empty -}                     { [] }
 
 dests :: { [DestDecl GhcPs] }
-dests : dest maybe_docnext ';' maybe_docprev dests { $1 : $5 }
-      | dest                                       { [$1] }
-      | {- empty -}                                { [] }
+dests : dests ';' dest                      { $3 : $1 }
+      | dests ';'                           { $1 }
+      | dest                                { [$1] }
+      | {- empty -}                         { [] }
 
 dest :: { DestDecl GhcPs }
 dest : qcon '::' sigtype                  { mkDestDecl [$1] (mkLHsSigType $3) }
@@ -2914,7 +2915,8 @@ coaltlist  : '{'     coalts '}'      { reverse $2 }
            | vocurly coalts close    { reverse $2 }
 
 coalts :: { [(Copattern,LHsExpr GhcPs)] }
-coalts : coalts maybe_docnext ';' coalt { $4 : $1 }
+coalts : coalts ';' coalt               { $3 : $1 }
+       | coalts ';'                     { $1 }
        | coalt                          { [$1] }
        | {- empty -}                    { [] }
 
