@@ -88,7 +88,7 @@ import Prelude
 import qualified GHC.LanguageExtensions as LangExt
 }
 
-%expect 38 -- shift/reduce conflicts
+%expect 37 -- shift/reduce conflicts
 
 {- Last updated: 3 Aug 2016
 
@@ -953,7 +953,7 @@ topdecls :: { OrdList (LHsDecl GhcPs) }
 -- May have trailing semicolons, can be empty
 topdecls_semi :: { OrdList (LHsDecl GhcPs) }
         : topdecls_semi topdecl semis1      {% ams $2 $3 >> return ($1 `snocOL` $2) }
-        | topdecls_semi codata_decl semis1  { $1 `mappend` translateCodata $2 }
+        | topdecls_semi codata_decl semis1  { $1 `mappend` transCodata $2 }
         | {- empty -}                       { nilOL }
 
 topdecl :: { LHsDecl GhcPs }
@@ -2420,8 +2420,7 @@ exp10_top :: { LHsExpr GhcPs }
                                                    FromSource (snd $ unLoc $4)))
                                                (mj AnnCase $1:mj AnnOf $3
                                                   :(fst $ unLoc $4)) }
-        | '{' coalts '}'     {% translateFCocase =<< flattenCocase (Cocase (reverse $2)) }
-        | 'cocase' coaltlist {% translateFCocase =<< flattenCocase (Cocase $2) }
+        | coaltlist                     {% transExtendedExpr =<< flattenCocase (Cocase $1) }
         | '-' fexp                      {% ams (sLL $1 $> $ NegApp $2 noSyntaxExpr)
                                                [mj AnnMinus $1] }
 
@@ -2891,7 +2890,7 @@ to GADT declarations. -}
 -- Codata parsing
 codata_decl :: { LTyClDecl GhcPs }
 codata_decl : 'codata' tycl_hdr dest_list
-   {%  amms (mkTyCodata noSrcSpan $2 (fmap noLoc $3)) [] }
+   {%  amms (mkTyCodata noSrcSpan $2 (fmap noLoc (reverse $3))) [] }
 
 dest_list :: { [DestDecl GhcPs] }
 dest_list : 'where' '{'        dests '}'    { $3 }
@@ -2911,28 +2910,32 @@ dest : qcon '::' sigtype                  { mkDestDecl [$1] (mkLHsSigType $3) }
 ------------------
 -- Coalternatives
 coaltlist  :: { [(Copattern,LHsExpr GhcPs)] }
-coaltlist  : '{'     coalts '}'      { reverse $2 }
-           | vocurly coalts close    { reverse $2 }
+coaltlist  :          '{'     coalts '}'      { reverse $2 }
+           |          '{'            '}'      { [] }
+           | 'cocase' vocurly coalts close    { reverse $3 }
+           | 'cocase' vocurly        close    { [] }
+           | 'cocase' '{'     coalts '}'      { reverse $3 }
+           | 'cocase' '{'            '}'      { [] }
 
 coalts :: { [(Copattern,LHsExpr GhcPs)] }
-coalts : coalts ';' coalt               { $3 : $1 }
-       | coalts ';'                     { $1 }
-       | coalt                          { [$1] }
-       | {- empty -}                    { [] }
+coalts : coalts1                       { $1 }
+       | ';' coalts                    { $2 }
+
+coalts1 :: { [(Copattern,LHsExpr GhcPs)] }
+coalts1 : coalts1 ';' coalt               { $3 : $1 }
+        | coalts1 ';'                     { $1 }
+        | coalt                           { [$1] }
 
 coalt :: { (Copattern,LHsExpr GhcPs) }
 coalt : cop '->' exp             { ( $1 , $3 ) }
 
 cop :: { Copattern }
-cop : qcon cop                   { QDest $1 $2 }
+cop : con cop                   { QDest $1 $2 }
     | cop1                       { $1 }
 
 cop1 :: { Copattern }
-cop1 : cop parenpat              { QPat $1 $2 }
+cop1 : acop '(' pat ')'      { QPat $1 $3 }
      | acop                      { $1 }
-
-parenpat :: { LPat GhcPs }
-parenpat : '(' pat ')'           { $2 }
 
 acop :: { Copattern }
 acop : '\#'                      { QHead }
