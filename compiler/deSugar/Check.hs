@@ -20,6 +20,8 @@ module Check (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import TmOracle
 import Unify( tcMatchTy )
 import BasicTypes
@@ -100,22 +102,27 @@ liftD m = ListT $ \sk fk -> m >>= \a -> sk a fk
 -- Pick the first match complete covered match or otherwise the "best" match.
 -- The best match is the one with the least uncovered clauses, ties broken
 -- by the number of inaccessible clauses followed by number of redundant
--- clauses
+-- clauses.
+--
+-- This is specified in the
+-- "Disambiguating between multiple ``COMPLETE`` pragmas" section of the
+-- users' guide. If you update the implementation of this function, make sure
+-- to update that section of the users' guide as well.
 getResult :: PmM PmResult -> DsM PmResult
-getResult ls = do
-  res <- fold ls goM (pure Nothing)
-  case res of
-    Nothing -> panic "getResult is empty"
-    Just a -> return a
+getResult ls
+  = do { res <- fold ls goM (pure Nothing)
+       ; case res of
+            Nothing -> panic "getResult is empty"
+            Just a  -> return a }
   where
     goM :: PmResult -> DsM (Maybe PmResult) -> DsM (Maybe PmResult)
-    goM mpm dpm = do
-      pmr <- dpm
-      return $ go pmr mpm
+    goM mpm dpm = do { pmr <- dpm
+                     ; return $ Just $ go pmr mpm }
+
     -- Careful not to force unecessary results
-    go :: Maybe PmResult -> PmResult -> Maybe PmResult
-    go Nothing rs = Just rs
-    go old@(Just (PmResult prov rs (UncoveredPatterns us) is)) new
+    go :: Maybe PmResult -> PmResult -> PmResult
+    go Nothing rs = rs
+    go (Just old@(PmResult prov rs (UncoveredPatterns us) is)) new
       | null us && null rs && null is = old
       | otherwise =
         let PmResult prov' rs' (UncoveredPatterns us') is' = new
@@ -123,8 +130,8 @@ getResult ls = do
                 `mappend` (compareLength is is')
                 `mappend` (compareLength rs rs')
                 `mappend` (compare prov prov') of
-              GT  -> Just new
-              EQ  -> Just new
+              GT  -> new
+              EQ  -> new
               LT  -> old
     go (Just (PmResult _ _ (TypeOfUncovered _) _)) _new
       = panic "getResult: No inhabitation candidates"
@@ -274,9 +281,9 @@ instance Monoid PartialResult where
 --
 data PmResult =
   PmResult {
-      pmresultProvenance :: Provenance
-    , pmresultRedundant :: [Located [LPat GhcTc]]
-    , pmresultUncovered :: UncoveredCandidates
+      pmresultProvenance   :: Provenance
+    , pmresultRedundant    :: [Located [LPat GhcTc]]
+    , pmresultUncovered    :: UncoveredCandidates
     , pmresultInaccessible :: [Located [LPat GhcTc]] }
 
 -- | Either a list of patterns that are not covered, or their type, in case we
@@ -571,7 +578,7 @@ Which means that in source Haskell:
 -- | Generate all inhabitation candidates for a given type. The result is
 -- either (Left ty), if the type cannot be reduced to a closed algebraic type
 -- (or if it's one trivially inhabited, like Int), or (Right candidates), if it
--- can. In this case, the candidates are the singnature of the tycon, each one
+-- can. In this case, the candidates are the signature of the tycon, each one
 -- accompanied by the term- and type- constraints it gives rise to.
 -- See also Note [Checking EmptyCase Expressions]
 inhabitationCandidates :: FamInstEnvs -> Type

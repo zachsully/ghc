@@ -85,6 +85,8 @@ module Outputable (
         pprDebugAndThen, callStackDoc
     ) where
 
+import GhcPrelude
+
 import {-# SOURCE #-}   DynFlags( DynFlags, hasPprDebug, hasNoDebugOutput,
                                   targetPlatform, pprUserLength, pprCols,
                                   useUnicode, useUnicodeSyntax,
@@ -1017,7 +1019,7 @@ pprQuotedList :: Outputable a => [a] -> SDoc
 pprQuotedList = quotedList . map ppr
 
 quotedList :: [SDoc] -> SDoc
-quotedList xs = hsep (punctuate comma (map quotes xs))
+quotedList xs = fsep (punctuate comma (map quotes xs))
 
 quotedListWithOr :: [SDoc] -> SDoc
 -- [x,y,z]  ==>  `x', `y' or `z'

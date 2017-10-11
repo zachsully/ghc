@@ -3,15 +3,14 @@
 module TcInteract (
      solveSimpleGivens,   -- Solves [Ct]
      solveSimpleWanteds,  -- Solves Cts
-
-     solveCallStack,      -- for use in TcSimplify
   ) where
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import BasicTypes ( SwapFlag(..), isSwapped,
                     infinity, IntWithInf, intGtLimit )
-import HsTypes ( HsIPName(..) )
 import TcCanonical
 import TcFlatten
 import TcUnify( canSolveByUnification )
@@ -28,9 +27,10 @@ import TcType
 import Name
 import RdrName ( lookupGRE_FieldLabel )
 import PrelNames ( knownNatClassName, knownSymbolClassName,
-                   typeableClassName, coercibleTyConKey,
+                   typeableClassName,
+                   coercibleTyConKey,
                    hasFieldClassName,
-                   heqTyConKey, ipClassKey )
+                   heqTyConKey, eqTyConKey, ipClassKey )
 import TysWiredIn ( typeNatKind, typeSymbolKind, heqDataCon,
                     coercibleDataCon, constraintKindTyCon )
 import TysPrim    ( eqPrimTyCon, eqReprPrimTyCon )
@@ -201,16 +201,15 @@ solve_simple_wanteds :: WantedConstraints -> TcS (Int, WantedConstraints)
 -- Try solving these constraints
 -- Affects the unification state (of course) but not the inert set
 -- The result is not necessarily zonked
-solve_simple_wanteds (WC { wc_simple = simples1, wc_insol = insols1, wc_impl = implics1 })
+solve_simple_wanteds (WC { wc_simple = simples1, wc_impl = implics1 })
   = nestTcS $
     do { solveSimples simples1
-       ; (implics2, tv_eqs, fun_eqs, insols2, others) <- getUnsolvedInerts
+       ; (implics2, tv_eqs, fun_eqs, others) <- getUnsolvedInerts
        ; (unif_count, unflattened_eqs) <- reportUnifications $
                                           unflattenWanteds tv_eqs fun_eqs
             -- See Note [Unflatten after solving the simple wanteds]
        ; return ( unif_count
                 , WC { wc_simple = others `andCts` unflattened_eqs
-                     , wc_insol  = insols1 `andCts` insols2
                      , wc_impl   = implics1 `unionBags` implics2 }) }
 
 {- Note [The solveSimpleWanteds loop]
@@ -270,7 +269,7 @@ runTcPluginsGiven
 -- 'solveSimpleWanteds' should feed the updated wanteds back into the
 -- main solver.
 runTcPluginsWanted :: WantedConstraints -> TcS (Bool, WantedConstraints)
-runTcPluginsWanted wc@(WC { wc_simple = simples1, wc_insol = insols1, wc_impl = implics1 })
+runTcPluginsWanted wc@(WC { wc_simple = simples1, wc_impl = implics1 })
   | isEmptyBag simples1
   = return (False, wc)
   | otherwise
@@ -284,15 +283,17 @@ runTcPluginsWanted wc@(WC { wc_simple = simples1, wc_insol = insols1, wc_impl = 
        ; let (_, _,                solved_wanted)   = pluginSolvedCts p
              (_, unsolved_derived, unsolved_wanted) = pluginInputCts p
              new_wanted                             = pluginNewCts p
+             insols                                 = pluginBadCts p
 
 -- SLPJ: I'm deeply suspicious of this
 --       ; updInertCans (removeInertCts $ solved_givens ++ solved_deriveds)
 
        ; mapM_ setEv solved_wanted
        ; return ( notNull (pluginNewCts p)
-                , WC { wc_simple = listToBag new_wanted `andCts` listToBag unsolved_wanted
-                                                        `andCts` listToBag unsolved_derived
-                     , wc_insol  = listToBag (pluginBadCts p) `andCts` insols1
+                , WC { wc_simple = listToBag new_wanted       `andCts`
+                                   listToBag unsolved_wanted  `andCts`
+                                   listToBag unsolved_derived `andCts`
+                                   listToBag insols
                      , wc_impl   = implics1 } ) } }
   where
     setEv :: (EvTerm,Ct) -> TcS ()
@@ -493,10 +494,10 @@ interactWithInertsStage wi
   = do { inerts <- getTcSInerts
        ; let ics = inert_cans inerts
        ; case wi of
-             CTyEqCan    {} -> interactTyVarEq ics wi
-             CFunEqCan   {} -> interactFunEq   ics wi
-             CIrredEvCan {} -> interactIrred   ics wi
-             CDictCan    {} -> interactDict    ics wi
+             CTyEqCan  {} -> interactTyVarEq ics wi
+             CFunEqCan {} -> interactFunEq   ics wi
+             CIrredCan {} -> interactIrred   ics wi
+             CDictCan  {} -> interactDict    ics wi
              _ -> pprPanic "interactWithInerts" (ppr wi) }
                 -- CHoleCan are put straight into inert_frozen, so never get here
                 -- CNonCanonical have been canonicalised
@@ -657,7 +658,7 @@ that this chain of events won't happen, but that's very fragile.)
 -- mean that (ty1 ~ ty2)
 interactIrred :: InertCans -> Ct -> TcS (StopOrContinue Ct)
 
-interactIrred inerts workItem@(CIrredEvCan { cc_ev = ev_w })
+interactIrred inerts workItem@(CIrredCan { cc_ev = ev_w })
   | let pred = ctEvPred ev_w
         (matching_irreds, others)
           = partitionBag (\ct -> ctPred ct `tcEqTypeNoKindCheck` pred)
@@ -689,8 +690,8 @@ interactIrred _ wi = pprPanic "interactIrred" (ppr wi)
 *                                                                               *
 *********************************************************************************
 
-Note [Solving from instances when interacting Dicts]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note [Shortcut solving]
+~~~~~~~~~~~~~~~~~~~~~~~
 When we interact a [W] constraint with a [G] constraint that solves it, there is
 a possibility that we could produce better code if instead we solved from a
 top-level instance declaration (See #12791, #5835). For example:
@@ -714,17 +715,23 @@ solution for `Num Int`. This would let us produce core like the following
           eta1
           A.f1
 
-This is bad! We could do much better if we solved [W] `Num Int` directly from
-the instance that we have in scope:
+This is bad! We could do /much/ better if we solved [W] `Num Int` directly
+from the instance that we have in scope:
 
     f :: forall b. C Int b => b -> Int -> Int
     f = \ (@ b) _ _ (x :: Int) ->
         case x of { GHC.Types.I# x1 -> GHC.Types.I# (GHC.Prim.+# x1 1#) }
 
-However, there is a reason why the solver does not simply try to solve such
-constraints with top-level instances. If the solver finds a relevant instance
-declaration in scope, that instance may require a context that can't be solved
-for. A good example of this is:
+** NB: It is important to emphasize that all this is purely an optimization:
+** exactly the same programs should typecheck with or without this
+** procedure.
+
+Solving fully
+~~~~~~~~~~~~~
+There is a reason why the solver does not simply try to solve such
+constraints with top-level instances. If the solver finds a relevant
+instance declaration in scope, that instance may require a context
+that can't be solved for. A good example of this is:
 
     f :: Ord [a] => ...
     f x = ..Need Eq [a]...
@@ -732,11 +739,14 @@ for. A good example of this is:
 If we have instance `Eq a => Eq [a]` in scope and we tried to use it, we would
 be left with the obligation to solve the constraint Eq a, which we cannot. So we
 must be conservative in our attempt to use an instance declaration to solve the
-[W] constraint we're interested in. Our rule is that we try to solve all of the
-instance's subgoals recursively all at once. Precisely: We only attempt to
-solve constraints of the form `C1, ... Cm => C t1 ... t n`, where all the Ci are
-themselves class constraints of the form `C1', ... Cm' => C' t1' ... tn'` and we
-only succeed if the entire tree of constraints is solvable from instances.
+[W] constraint we're interested in.
+
+Our rule is that we try to solve all of the instance's subgoals
+recursively all at once. Precisely: We only attempt to solve
+constraints of the form `C1, ... Cm => C t1 ... t n`, where all the Ci
+are themselves class constraints of the form `C1', ... Cm' => C' t1'
+... tn'` and we only succeed if the entire tree of constraints is
+solvable from instances.
 
 An example that succeeds:
 
@@ -772,6 +782,26 @@ Which, because solving `Eq [a]` demands `Eq a` which we cannot solve, produces:
           (m @ [a] @ b $dC eta)
           (GHC.Types.[] @ a)
 
+Type families
+~~~~~~~~~~~~~
+Suppose we have (Trac #13943)
+  class Take (n :: Nat) where ...
+  instance {-# OVERLAPPING #-}                    Take 0 where ..
+  instance {-# OVERLAPPABLE #-} (Take (n - 1)) => Take n where ..
+
+And we have [W] Take 3.  That only matches one instance so we get
+[W] Take (3-1).  Really we should now flatten to reduce the (3-1) to 2, and
+so on -- but that is reproducing yet more of the solver.  Sigh.  For now,
+we just give up (remember all this is just an optimisation).
+
+But we must not just naively try to lookup (Take (3-1)) in the
+InstEnv, or it'll (wrongly appear not to match (Take 0) and get a
+unique match on the (Take n) instance.  That leads immediately to an
+infinite loop.  Hence the check that 'preds' have no type families
+(isTyFamFree).
+
+Incoherence
+~~~~~~~~~~~
 This optimization relies on coherence of dictionaries to be correct. When we
 cannot assume coherence because of IncoherentInstances then this optimization
 can change the behavior of the user's code.
@@ -830,64 +860,37 @@ on whether we apply this optimization when IncoherentInstances is in effect:
 The output of `main` if we avoid the optimization under the effect of
 IncoherentInstances is `1`. If we were to do the optimization, the output of
 `main` would be `2`.
-
-It is important to emphasize that failure means that we don't produce more
-efficient code, NOT that we fail to typecheck at all! This is purely an
-an optimization: exactly the same programs should typecheck with or without this
-procedure.
-
 -}
 
 interactDict :: InertCans -> Ct -> TcS (StopOrContinue Ct)
 interactDict inerts workItem@(CDictCan { cc_ev = ev_w, cc_class = cls, cc_tyargs = tys })
-  | isWanted ev_w
-  , Just ip_name      <- isCallStackPred (ctPred workItem)
-  , OccurrenceOf func <- ctLocOrigin (ctEvLoc ev_w)
-  -- If we're given a CallStack constraint that arose from a function
-  -- call, we need to push the current call-site onto the stack instead
-  -- of solving it directly from a given.
-  -- See Note [Overview of implicit CallStacks]
-  = do { let loc = ctEvLoc ev_w
+  | Just ctev_i <- lookupInertDict inerts (ctEvLoc ev_w) cls tys
+  = -- There is a matching dictionary in the inert set
+    do { -- First to try to solve it /completely/ from top level instances
+         -- See Note [Shortcut solving]
+         dflags <- getDynFlags
+       ; try_inst_res <- shortCutSolver dflags ev_w ctev_i
+       ; case try_inst_res of
+           Just evs -> do
+             { flip mapM_ evs $ \(ev_t, ct_ev, cls, typ) -> do
+               { setWantedEvBind (ctEvId ct_ev) ev_t
+               ; addSolvedDict ct_ev cls typ }
+             ; stopWith ev_w "interactDict/solved from instance" }
 
-         -- First we emit a new constraint that will capture the
-         -- given CallStack.
-       ; let new_loc      = setCtLocOrigin loc (IPOccOrigin (HsIPName ip_name))
-                            -- We change the origin to IPOccOrigin so
-                            -- this rule does not fire again.
-                            -- See Note [Overview of implicit CallStacks]
+           -- We were unable to solve the [W] constraint from in-scope instances
+           -- so we solve it from the matching inert we found
+           Nothing ->  do
+             { (inert_effect, stop_now) <- solveOneFromTheOther ctev_i ev_w
+             ; traceTcS "lookupInertDict" (ppr inert_effect <+> ppr stop_now)
+             ; case inert_effect of
+                 IRKeep    -> return ()
+                 IRDelete  -> updInertDicts $ \ ds -> delDict ds cls tys
+                 IRReplace -> updInertDicts $ \ ds -> addDict ds cls tys workItem
+             ; if stop_now then
+                 return $ Stop ev_w (text "Dict equal" <+> parens (ppr inert_effect))
+               else
+                 continueWith workItem } }
 
-       ; mb_new <- newWantedEvVar new_loc (ctEvPred ev_w)
-       ; emitWorkNC (freshGoals [mb_new])
-
-         -- Then we solve the wanted by pushing the call-site onto the
-         -- newly emitted CallStack.
-       ; let ev_cs = EvCsPushCall func (ctLocSpan loc) (getEvTerm mb_new)
-       ; solveCallStack ev_w ev_cs
-       ; stopWith ev_w "Wanted CallStack IP" }
-  | Just ctev_i <- lookupInertDict inerts cls tys
-  = do
-  { dflags <- getDynFlags
-  -- See Note [Solving from instances when interacting Dicts]
-  ; try_inst_res <- trySolveFromInstance dflags ev_w ctev_i
-  ; case try_inst_res of
-      Just evs -> do
-        { flip mapM_ evs $ \(ev_t, ct_ev, cls, typ) -> do
-          { setWantedEvBind (ctEvId ct_ev) ev_t
-          ; addSolvedDict ct_ev cls typ }
-        ; stopWith ev_w "interactDict/solved from instance" }
-      -- We were unable to solve the [W] constraint from in-scope instances so
-      -- we solve it from the solution in the inerts we just retrieved.
-      Nothing ->  do
-        { (inert_effect, stop_now) <- solveOneFromTheOther ctev_i ev_w
-        ; traceTcS "lookupInertDict" (ppr inert_effect <+> ppr stop_now)
-        ; case inert_effect of
-            IRKeep    -> return ()
-            IRDelete  -> updInertDicts $ \ ds -> delDict ds cls tys
-            IRReplace -> updInertDicts $ \ ds -> addDict ds cls tys workItem
-        ; if stop_now then
-            return $ Stop ev_w (text "Dict equal" <+> parens (ppr inert_effect))
-          else
-            continueWith workItem } }
   | cls `hasKey` ipClassKey
   , isGiven ev_w
   = interactGivenIP inerts workItem
@@ -898,28 +901,30 @@ interactDict inerts workItem@(CDictCan { cc_ev = ev_w, cc_class = cls, cc_tyargs
 
 interactDict _ wi = pprPanic "interactDict" (ppr wi)
 
--- See Note [Solving from instances when interacting Dicts]
-trySolveFromInstance :: DynFlags
-                     -> CtEvidence -- Work item
-                     -> CtEvidence -- Inert we want to try to replace
-                     -> TcS (Maybe [(EvTerm, CtEvidence, Class, [TcPredType])])
-                     -- Everything we need to bind a solution for the work item
-                     -- and add the solved Dict to the cache in the main solver.
-trySolveFromInstance dflags ev_w ctev_i
+-- See Note [Shortcut solving]
+shortCutSolver :: DynFlags
+               -> CtEvidence -- Work item
+               -> CtEvidence -- Inert we want to try to replace
+               -> TcS (Maybe [(EvTerm, CtEvidence, Class, [TcPredType])])
+                      -- Everything we need to bind a solution for the work item
+                      -- and add the solved Dict to the cache in the main solver.
+shortCutSolver dflags ev_w ctev_i
   | isWanted ev_w
  && isGiven ctev_i
  -- We are about to solve a [W] constraint from a [G] constraint. We take
  -- a moment to see if we can get a better solution using an instance.
  -- Note that we only do this for the sake of performance. Exactly the same
  -- programs should typecheck regardless of whether we take this step or
- -- not. See Note [Solving from instances when interacting Dicts]
+ -- not. See Note [Shortcut solving]
+
  && not (xopt LangExt.IncoherentInstances dflags)
  -- If IncoherentInstances is on then we cannot rely on coherence of proofs
  -- in order to justify this optimization: The proof provided by the
  -- [G] constraint's superclass may be different from the top-level proof.
+
  && gopt Opt_SolveConstantDicts dflags
  -- Enabled by the -fsolve-constant-dicts flag
-  = runMaybeT $ try_solve_from_instance emptyDictMap ev_w
+  = runMaybeT $ try_solve_from_instance loc_w emptyDictMap ev_w
 
   | otherwise = return Nothing
   where
@@ -934,7 +939,7 @@ trySolveFromInstance dflags ev_w ctev_i
     new_wanted_cached :: DictMap CtEvidence -> TcPredType -> MaybeT TcS MaybeNew
     new_wanted_cached cache pty
       | ClassPred cls tys <- classifyPredType pty
-      = lift $ case findDict cache cls tys of
+      = lift $ case findDict cache loc_w cls tys of
           Just ctev -> return $ Cached (ctEvTerm ctev)
           Nothing -> Fresh <$> newWantedNC loc_w pty
       | otherwise = mzero
@@ -948,29 +953,35 @@ trySolveFromInstance dflags ev_w ctev_i
     --    cache ensures that we remember what we have already tried to
     --    solve to avoid looping.
     try_solve_from_instance
-      :: DictMap CtEvidence -> CtEvidence
+      :: CtLoc -> DictMap CtEvidence -> CtEvidence
       -> MaybeT TcS [(EvTerm, CtEvidence, Class, [TcPredType])]
-    try_solve_from_instance cache ev
-      | ClassPred cls tys <- classifyPredType (ctEvPred ev) = do
+    try_solve_from_instance loc cache ev
+      | let pred = ctEvPred ev
+      , ClassPred cls tys <- classifyPredType pred
       -- It is important that we add our goal to the cache before we solve!
       -- Otherwise we may end up in a loop while solving recursive dictionaries.
-      { let cache' = addDict cache cls tys ev
-      ; inst_res <- lift $ match_class_inst dflags cls tys loc_w
-      ; case inst_res of
-          GenInst { lir_new_theta = preds
-                  , lir_mk_ev = mk_ev
-                  , lir_safe_over = safeOverlap }
-            | safeOverlap -> do
-              -- emit work for subgoals but use our local cache so that we can
-              -- solve recursive dictionaries.
-              { evc_vs <- mapM (new_wanted_cached cache') preds
-              ; subgoalBinds <- mapM (try_solve_from_instance cache')
-                                     (freshGoals evc_vs)
-              ; return $ (mk_ev (map getEvTerm evc_vs), ev, cls, preds)
-                       : concat subgoalBinds }
+      = do { let cache' = addDict cache cls tys ev
+                 loc'   = bumpCtLocDepth loc
+           ; inst_res <- lift $ match_class_inst dflags cls tys loc_w
+           ; case inst_res of
+               GenInst { lir_new_theta = preds
+                       , lir_mk_ev = mk_ev
+                       , lir_safe_over = safeOverlap }
+                 | safeOverlap
+                 , all isTyFamFree preds  -- See "Type families" in
+                                          -- Note [Shortcut solving]
+                 -> do { lift $ traceTcS "shortCutSolver: found instance" (ppr preds)
+                       ; lift $ checkReductionDepth loc' pred
+                       ; evc_vs <- mapM (new_wanted_cached cache') preds
+                                  -- Emit work for subgoals but use our local cache
+                                  -- so we can solve recursive dictionaries.
+                       ; subgoalBinds <- mapM (try_solve_from_instance loc' cache')
+                                              (freshGoals evc_vs)
+                       ; return $ (mk_ev (map getEvTerm evc_vs), ev, cls, preds)
+                                : concat subgoalBinds }
 
-            | otherwise -> mzero
-          _ -> mzero }
+                 | otherwise -> mzero
+               _ -> mzero }
       | otherwise = mzero
 
 addFunDepWork :: InertCans -> CtEvidence -> Class -> TcS ()
@@ -1034,7 +1045,6 @@ interactGivenIP inerts workItem@(CDictCan { cc_ev = ev, cc_class = cls
     is_this_ip _ = False
 
 interactGivenIP _ wi = pprPanic "interactGivenIP" (ppr wi)
-
 
 {- Note [Shadowing of Implicit Parameters]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2073,7 +2083,7 @@ doTopReactDict inerts work_item@(CDictCan { cc_ev = fl, cc_class = cls
   = do { try_fundep_improvement
        ; continueWith work_item }
 
-  | Just ev <- lookupSolvedDict inerts cls xis   -- Cached
+  | Just ev <- lookupSolvedDict inerts dict_loc cls xis   -- Cached
   = do { setEvBindIfWanted fl (ctEvTerm ev)
        ; stopWith fl "Dict/Top (cached)" }
 
@@ -2205,6 +2215,23 @@ match_class_inst dflags clas tys loc
   where
     cls_name = className clas
 
+-- | If a class is "naturally coherent", then we needn't worry at all, in any
+-- way, about overlapping/incoherent instances. Just solve the thing!
+-- See Note [Naturally coherent classes]
+-- See also Note [The equality class story] in TysPrim.
+naturallyCoherentClass :: Class -> Bool
+naturallyCoherentClass cls
+  = isCTupleClass cls
+    || cls `hasKey` heqTyConKey
+    || cls `hasKey` eqTyConKey
+    || cls `hasKey` coercibleTyConKey
+{-
+    || cls `hasKey` typeableClassKey
+    -- I have no idea why Typeable is in this list, and it looks utterly
+    -- wrong, according the reasoning in Note [Naturally coherent classes].
+    -- So I've commented it out, and sure enough everything seems fine.
+-}
+
 {- Note [Instance and Given overlap]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Example, from the OutsideIn(X) paper:
@@ -2288,6 +2315,49 @@ Other notes:
 All of this is disgustingly delicate, so to discourage people from writing
 simplifiable class givens, we warn about signatures that contain them;
 see TcValidity Note [Simplifiable given constraints].
+
+Note [Naturally coherent classes]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+A few built-in classes are "naturally coherent".  This term means that
+the "instance" for the class is bidirectional with its superclass(es).
+For example, consider (~~), which behaves as if it was defined like
+this:
+  class a ~# b => a ~~ b
+  instance a ~# b => a ~~ b
+(See Note [The equality types story] in TysPrim.)
+
+Faced with [W] t1 ~~ t2, it's always OK to reduce it to [W] t1 ~# t2,
+without worrying about Note [Instance and Given overlap].  Why?  Because
+if we had [G] s1 ~~ s2, then we'd get the superclass [G] s1 ~# s2, and
+so the reduction of the [W] constraint does not risk losing any solutions.
+
+On the other hand, it can be fatal to /fail/ to reduce such
+equalities, on the grounds of Note [Instance and Given overlap],
+because many good things flow from [W] t1 ~# t2.
+
+The same reasoning applies to
+
+* (~~)        heqTyCOn
+* (~)         eqTyCon
+* Coercible   coercibleTyCon
+
+And less obviously to:
+
+* Tuple classes.  For reasons described in TcSMonad
+  Note [Tuples hiding implicit parameters], we may have a constraint
+     [W] (?x::Int, C a)
+  with an exactly-matching Given constraint.  We must decompose this
+  tuple and solve the components separately, otherwise we won't solve
+  it at all!  It is perfectly safe to decompose it, because again the
+  superclasses invert the instance;  e.g.
+      class (c1, c2) => (% c1, c2 %)
+      instance (c1, c2) => (% c1, c2 %)
+  Example in Trac #14218
+
+Exammples: T5853, T10432, T5315, T9222, T2627b, T3028b
+
+PS: the term "naturally coherent" doesn't really seem helpful.
+Perhaps "invertible" or something?  I left it for now though.
 -}
 
 
@@ -2528,14 +2598,6 @@ a TypeRep for them.  For qualified but not polymorphic types, like
    no other class works with impredicative types.
    For now we leave it off, until we have a better story for impredicativity.
 -}
-
-solveCallStack :: CtEvidence -> EvCallStack -> TcS ()
-solveCallStack ev ev_cs = do
-  -- We're given ev_cs :: CallStack, but the evidence term should be a
-  -- dictionary, so we have to coerce ev_cs to a dictionary for
-  -- `IP ip CallStack`. See Note [Overview of implicit CallStacks]
-  let ev_tm = mkEvCast (EvCallStack ev_cs) (wrapIP (ctEvPred ev))
-  setWantedEvBind (ctEvId ev) ev_tm
 
 {- ********************************************************************
 *                                                                     *

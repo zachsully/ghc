@@ -135,6 +135,8 @@ module TcRnMonad(
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import TcRnTypes        -- Re-export all
 import IOEnv            -- Re-export all
 import TcEvidence
@@ -219,6 +221,7 @@ initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
         th_foreign_files_var <- newIORef [] ;
         th_topnames_var      <- newIORef emptyNameSet ;
         th_modfinalizers_var <- newIORef [] ;
+        th_coreplugins_var <- newIORef [] ;
         th_state_var         <- newIORef Map.empty ;
         th_remote_state_var  <- newIORef Nothing ;
         let {
@@ -235,6 +238,7 @@ initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
                 tcg_th_foreign_files = th_foreign_files_var,
                 tcg_th_topnames      = th_topnames_var,
                 tcg_th_modfinalizers = th_modfinalizers_var,
+                tcg_th_coreplugins = th_coreplugins_var,
                 tcg_th_state         = th_state_var,
                 tcg_th_remote_state  = th_remote_state_var,
 
@@ -1572,7 +1576,7 @@ looks :-).
 
 However suppose we throw an exception inside an invocation of
 captureConstraints, and discard all the constraints. Some of those
-contraints might be "variable out of scope" Hole constraints, and that
+constraints might be "variable out of scope" Hole constraints, and that
 might have been the actual original cause of the exception!  For
 example (Trac #12529):
    f = p @ Int
@@ -1584,6 +1588,17 @@ So we /retain the insoluble constraints/ if there is an exception.
 Hence:
   - insolublesOnly in tryCaptureConstraints
   - emitConstraints in the Left case of captureConstraints
+
+Hover note that fresly-generated constraints like (Int ~ Bool), or
+((a -> b) ~ Int) are all CNonCanonical, and hence won't be flagged as
+insoluble.  The constraint solver does that.  So they'll be discarded.
+That's probably ok; but see th/5358 as a not-so-good example:
+   t1 :: Int
+   t1 x = x   -- Manifestly wrong
+
+   foo = $(...raises exception...)
+We report the exception, but not the bug in t1.  Oh well.  Possible
+solution: make TcUnify.uType spot manifestly-insoluble constraints.
 
 
 ************************************************************************

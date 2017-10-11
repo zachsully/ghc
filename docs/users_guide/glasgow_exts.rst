@@ -8868,7 +8868,7 @@ you must ``import Data.Kind`` to get ``*`` (but only with :ghc-flag:`-XTypeInTyp
 enabled).
 
 The only way ``*`` is unordinary is in its parsing. In order to be backward
-compatible, ``*`` is parsed as if it were an alphanumeric idenfifier; note
+compatible, ``*`` is parsed as if it were an alphanumeric identifier; note
 that we do not write ``Int :: (*)`` but just plain ``Int :: *``. Due to the
 bizarreness with which ``*`` is parsed--and the fact that it is the only such
 operator in GHC--there are some corner cases that are
@@ -12189,7 +12189,7 @@ A simple example of the new notation is the expression ::
 We call this a procedure or arrow abstraction. As with a lambda
 expression, the variable ``x`` is a new variable bound within the
 ``proc``-expression. It refers to the input to the arrow. In the above
-example, ``-<`` is not an identifier but an new reserved symbol used for
+example, ``-<`` is not an identifier but a new reserved symbol used for
 building commands from an expression of arrow type and an expression to
 be fed as input to that arrow. (The weird look will make more sense
 later.) It may be read as analogue of application for arrows. The above
@@ -14046,6 +14046,49 @@ the user must provide a type signature. ::
     -- No warning
     foo :: [a] -> Int
     foo T = 5
+
+.. _multiple-complete-pragmas:
+
+Disambiguating between multiple ``COMPLETE`` pragmas
+----------------------------------------------------
+
+What should happen if there are multiple ``COMPLETE`` sets that apply to a
+single set of patterns? Consider this example: ::
+
+  data T = MkT1 | MkT2 | MkT2Internal
+  {-# COMPLETE MkT1, MkT2 #-}
+  {-# COMPLETE MkT1, MkT2Internal #-}
+
+  f :: T -> Bool
+  f MkT1 = True
+  f MkT2 = False
+
+Which ``COMPLETE`` pragma should be used when checking the coverage of the
+patterns in ``f``? If we pick the ``COMPLETE`` set that covers ``MkT1`` and
+``MkT2``, then ``f`` is exhaustive, but if we pick the other ``COMPLETE`` set
+that covers ``MkT1`` and ``MkT2Internal``, then ``f`` is *not* exhaustive,
+since it fails to match ``MkT2Internal``. An intuitive way to solve this
+dilemma is to recognize that picking the former ``COMPLETE`` set produces the
+fewest number of uncovered pattern clauses, and thus is the better choice.
+
+GHC disambiguates between multiple ``COMPLETE`` sets based on this rationale.
+To make things more formal, when the pattern-match checker requests a set of
+constructors for some data type constructor ``T``, the checker returns:
+
+* The original set of data constructors for ``T``
+* Any ``COMPLETE`` sets of type ``T``
+
+GHC then checks for pattern coverage using each of these sets. If any of these
+sets passes the pattern coverage checker with no warnings, then we are done. If
+each set produces at least one warning, then GHC must pick one of the sets of
+warnings depending on how good the results are. The results are prioritized in
+this order:
+
+1. Fewest uncovered clauses
+2. Fewest redundant clauses
+3. Fewest inaccessible clauses
+4. Whether the match comes from the original set of data constructors or from a
+   ``COMPLETE`` pragma (prioritizing the former over the latter)
 
 .. _overlap-pragma:
 

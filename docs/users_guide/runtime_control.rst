@@ -220,6 +220,21 @@ Miscellaneous RTS options
     capabilities. To disable the timer signal, use the ``-V0`` RTS
     option (see above).
 
+.. rts-flag:: --install-seh-handlers=⟨yes|no⟩
+
+    If yes (the default), the RTS on Windows installs exception handlers to
+    catch unhandled exceptions using the Windows exception handling mechanism.
+    This option is primarily useful for when you are using the Haskell code as a
+    DLL, and don't want the RTS to ungracefully terminate your application on
+    erros such as segfaults.
+
+.. rts-flag:: --generate-crash-dumps
+
+    If yes (the default), the RTS on Windows will generate a core dump on
+    any crash. These dumps can be inspected using debuggers such as WinDBG.
+    The dumps record all code, registers and threading information at the time
+    of the crash. Note that this implies `--install-seh-handlers=yes`.
+
 .. rts-flag:: -xm ⟨address⟩
 
     .. index::

@@ -18,6 +18,8 @@ module HsExpr where
 #include "HsVersions.h"
 
 -- friends:
+import GhcPrelude
+
 import HsDecls
 import HsPat
 import HsLit
@@ -1415,10 +1417,6 @@ data Match p body
         m_ctxt :: HsMatchContext (NameOrRdrName (IdP p)),
           -- See note [m_ctxt in Match]
         m_pats :: [LPat p], -- The patterns
-        m_type :: (Maybe (LHsType p)),
-                                 -- A type signature for the result of the match
-                                 -- Nothing after typechecking
-                                 -- NB: No longer supported
         m_grhss :: (GRHSs p body)
   }
 deriving instance (Data body,DataId p) => Data (Match p body)
@@ -1542,7 +1540,6 @@ pprMatch :: (SourceTextX idR, OutputableBndrId idR, Outputable body)
          => Match idR body -> SDoc
 pprMatch match
   = sep [ sep (herald : map (nest 2 . pprParendLPat) other_pats)
-        , nest 2 ppr_maybe_ty
         , nest 2 (pprGRHSs ctxt (m_grhss match)) ]
   where
     ctxt = m_ctxt match
@@ -1572,10 +1569,6 @@ pprMatch match
 
     (pat1:pats1) = m_pats match
     (pat2:pats2) = pats1
-    ppr_maybe_ty = case m_type match of
-                        Just ty -> dcolon <+> ppr ty
-                        Nothing -> empty
-
 
 pprGRHSs :: (SourceTextX idR, OutputableBndrId idR, Outputable body)
          => HsMatchContext idL -> GRHSs idR body -> SDoc

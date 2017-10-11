@@ -61,7 +61,6 @@ module TyCoRep (
         pprThetaArrowTy, pprClassPred,
         pprKind, pprParendKind, pprTyLit,
         TyPrec(..), maybeParen,
-        pprPrefixApp, pprArrowChain,
         pprDataCons, ppSuggestExplicitKinds,
 
         pprCo, pprParendCo,
@@ -135,9 +134,11 @@ module TyCoRep (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import {-# SOURCE #-} DataCon( dataConFullSig
-                             , dataConUnivTyVarBinders, dataConExTyVarBinders
-                             , DataCon, filterEqSpec )
+                             , dataConUserTyVarBinders
+                             , DataCon )
 import {-# SOURCE #-} Type( isPredTy, isCoercionTy, mkAppTy, mkCastTy
                           , tyCoVarsOfTypeWellScoped
                           , tyCoVarsOfTypesWellScoped
@@ -460,8 +461,8 @@ words, if `x` is either a function or a polytype, `x arg` makes sense
 (for an appropriate `arg`).
 
 
-Note [TyVarBndrs, TyVarBinders, TyConBinders, and visiblity]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note [TyVarBndrs, TyVarBinders, TyConBinders, and visibility]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 * A ForAllTy (used for both types and kinds) contains a TyVarBinder.
   Each TyVarBinder
       TvBndr a tvis
@@ -474,7 +475,7 @@ Note [TyVarBndrs, TyVarBinders, TyConBinders, and visiblity]
   and kind arguments for this TyCon should be visible (explicit) in
   source Haskell.
 
-This table summarises the visiblity rules:
+This table summarises the visibility rules:
 ---------------------------------------------------------------------------------------
 |                                                      Occurrences look like this
 |                             GHC displays type as     in Haskell source code
@@ -1268,7 +1269,7 @@ the evidence for unboxed equalities:
     they might appear in a top-level type, there is no place to bind these
    (unlifted) coercions in the usual way.
 
-  - A coercion for (forall a. t1) ~ forall a. t2) will look like
+  - A coercion for (forall a. t1) ~ (forall a. t2) will look like
        forall a. (coercion for t1~t2)
     But the coercion for (t1~t2) may mention 'a', and we don't have let-bindings
     within coercions.  We could add them, but coercion holes are easier.
@@ -2649,12 +2650,11 @@ pprDataCons = sepWithVBars . fmap pprDataConWithArgs . tyConDataCons
 pprDataConWithArgs :: DataCon -> SDoc
 pprDataConWithArgs dc = sep [forAllDoc, thetaDoc, ppr dc <+> argsDoc]
   where
-    (_univ_tvs, _ex_tvs, eq_spec, theta, arg_tys, _res_ty) = dataConFullSig dc
-    univ_bndrs = dataConUnivTyVarBinders dc
-    ex_bndrs   = dataConExTyVarBinders dc
-    forAllDoc = pprUserForAll $ (filterEqSpec eq_spec univ_bndrs ++ ex_bndrs)
-    thetaDoc  = pprThetaArrowTy theta
-    argsDoc   = hsep (fmap pprParendType arg_tys)
+    (_univ_tvs, _ex_tvs, _eq_spec, theta, arg_tys, _res_ty) = dataConFullSig dc
+    user_bndrs = dataConUserTyVarBinders dc
+    forAllDoc  = pprUserForAll user_bndrs
+    thetaDoc   = pprThetaArrowTy theta
+    argsDoc    = hsep (fmap pprParendType arg_tys)
 
 
 pprTypeApp :: TyCon -> [Type] -> SDoc
@@ -2664,17 +2664,6 @@ pprTypeApp tc tys
     -- TODO: toIfaceTcArgs seems rather wasteful here
 
 ------------------
-
-pprPrefixApp :: TyPrec -> SDoc -> [SDoc] -> SDoc
-pprPrefixApp = pprIfacePrefixApp
-
-----------------
-pprArrowChain :: TyPrec -> [SDoc] -> SDoc
--- pprArrowChain p [a,b,c]  generates   a -> b -> c
-pprArrowChain _ []         = empty
-pprArrowChain p (arg:args) = maybeParen p FunPrec $
-                             sep [arg, sep (map (arrow <+>) args)]
-
 ppSuggestExplicitKinds :: SDoc
 -- Print a helpful suggstion about -fprint-explicit-kinds,
 -- if it is not already on

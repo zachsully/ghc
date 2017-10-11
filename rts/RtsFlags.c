@@ -225,8 +225,10 @@ void initRtsFlagsDefaults(void)
     RtsFlags.ConcFlags.ctxtSwitchTime   = USToTime(20000); // 20ms
 
     RtsFlags.MiscFlags.install_signal_handlers = true;
-    RtsFlags.MiscFlags.machineReadable = false;
-    RtsFlags.MiscFlags.linkerMemBase    = 0;
+    RtsFlags.MiscFlags.install_seh_handlers    = true;
+    RtsFlags.MiscFlags.generate_dump_file      = false;
+    RtsFlags.MiscFlags.machineReadable         = false;
+    RtsFlags.MiscFlags.linkerMemBase           = 0;
 
 #if defined(THREADED_RTS)
     RtsFlags.ParFlags.nCapabilities     = 1;
@@ -426,6 +428,14 @@ usage_text[] = {
 #endif
 "  --install-signal-handlers=<yes|no>",
 "            Install signal handlers (default: yes)",
+#if defined(mingw32_HOST_OS)
+"  --install-seh-handlers=<yes|no>",
+"            Install exception handlers (default: yes)",
+"  --generate-crash-dumps",
+"            Generate Windows crash dumps, requires exception handlers",
+"            to be installed. Implies --install-signal-handlers=yes.",
+"            (default: no)",
+#endif
 #if defined(THREADED_RTS)
 "  -e<n>     Maximum number of outstanding local sparks (default: 4096)",
 #endif
@@ -839,6 +849,21 @@ error = true;
                                &rts_argv[arg][2])) {
                       OPTION_UNSAFE;
                       RtsFlags.MiscFlags.install_signal_handlers = false;
+                  }
+                  else if (strequal("install-seh-handlers=yes",
+                              &rts_argv[arg][2])) {
+                      OPTION_UNSAFE;
+                      RtsFlags.MiscFlags.install_seh_handlers = true;
+                  }
+                  else if (strequal("install-seh-handlers=no",
+                              &rts_argv[arg][2])) {
+                      OPTION_UNSAFE;
+                      RtsFlags.MiscFlags.install_seh_handlers = false;
+                  }
+                  else if (strequal("generate-crash-dumps",
+                              &rts_argv[arg][2])) {
+                      OPTION_UNSAFE;
+                      RtsFlags.MiscFlags.generate_dump_file = true;
                   }
                   else if (strequal("machine-readable",
                                &rts_argv[arg][2])) {
@@ -1592,6 +1617,11 @@ static void normaliseRtsOpts (void)
         } else {
             RtsFlags.ParFlags.parGcLoadBalancingGen = 1;
         }
+    }
+
+    // We can't generate dumps without signal handlers
+    if (RtsFlags.MiscFlags.generate_dump_file) {
+        RtsFlags.MiscFlags.install_seh_handlers = true;
     }
 }
 

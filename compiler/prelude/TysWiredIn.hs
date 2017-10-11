@@ -128,6 +128,8 @@ module TysWiredIn (
 #include "HsVersions.h"
 #include "MachDeps.h"
 
+import GhcPrelude
+
 import {-# SOURCE #-} MkId( mkDataConWorkId, mkDictSelId )
 
 -- friends:
@@ -488,12 +490,15 @@ pcTyCon is_enum name cType tyvars cons
                 False           -- Not in GADT syntax
 
 pcDataCon :: Name -> [TyVar] -> [Type] -> TyCon -> DataCon
-pcDataCon n univs = pcDataConWithFixity False n univs []  -- no ex_tvs
+pcDataCon n univs = pcDataConWithFixity False n univs
+                      []    -- no ex_tvs
+                      univs -- the univs are precisely the user-written tyvars
 
 pcDataConWithFixity :: Bool      -- ^ declared infix?
                     -> Name      -- ^ datacon name
                     -> [TyVar]   -- ^ univ tyvars
                     -> [TyVar]   -- ^ ex tyvars
+                    -> [TyVar]   -- ^ user-written tyvars
                     -> [Type]    -- ^ args
                     -> TyCon
                     -> DataCon
@@ -507,19 +512,20 @@ pcDataConWithFixity infx n = pcDataConWithFixity' infx n (dataConWorkerUnique (n
 -- one DataCon unique per pair of Ints.
 
 pcDataConWithFixity' :: Bool -> Name -> Unique -> RuntimeRepInfo
-                     -> [TyVar] -> [TyVar]
+                     -> [TyVar] -> [TyVar] -> [TyVar]
                      -> [Type] -> TyCon -> DataCon
 -- The Name should be in the DataName name space; it's the name
 -- of the DataCon itself.
 
-pcDataConWithFixity' declared_infix dc_name wrk_key rri tyvars ex_tyvars arg_tys tycon
+pcDataConWithFixity' declared_infix dc_name wrk_key rri
+                     tyvars ex_tyvars user_tyvars arg_tys tycon
   = data_con
   where
     data_con = mkDataCon dc_name declared_infix prom_info
                 (map (const no_bang) arg_tys)
                 []      -- No labelled fields
-                (mkTyVarBinders Specified tyvars)
-                (mkTyVarBinders Specified ex_tyvars)
+                tyvars ex_tyvars
+                (mkTyVarBinders Specified user_tyvars)
                 []      -- No equality spec
                 []      -- No theta
                 arg_tys (mkTyConApp tycon (mkTyVarTys tyvars))
@@ -550,7 +556,7 @@ mkDataConWorkerName data_con wrk_key =
 pcSpecialDataCon :: Name -> [Type] -> TyCon -> RuntimeRepInfo -> DataCon
 pcSpecialDataCon dc_name arg_tys tycon rri
   = pcDataConWithFixity' False dc_name (dataConWorkerUnique (nameUnique dc_name)) rri
-                         [] [] arg_tys tycon
+                         [] [] [] arg_tys tycon
 
 {-
 ************************************************************************
@@ -619,12 +625,13 @@ Note [How tuples work]  See also Note [Known-key names] in PrelNames
     - Given constraints: the superclasses automatically become available
     - Wanted constraints: there is a built-in instance
          instance (c1,c2) => (c1,c2)
-    - Currently just go up to 16; beyond that
+      See TcInteract.matchCTuple
+    - Currently just go up to 62; beyond that
       you have to use manual nesting
     - Their OccNames look like (%,,,%), so they can easily be
       distinguished from term tuples.  But (following Haskell) we
-      pretty-print saturated constraint tuples with round parens; see
-      BasicTypes.tupleParens.
+      pretty-print saturated constraint tuples with round parens;
+      see BasicTypes.tupleParens.
 
 * In quite a lot of places things are restrcted just to
   BoxedTuple/UnboxedTuple, and then we used BasicTypes.Boxity to distinguish
@@ -1415,7 +1422,8 @@ nilDataCon  = pcDataCon nilDataConName alpha_tyvar [] listTyCon
 consDataCon :: DataCon
 consDataCon = pcDataConWithFixity True {- Declared infix -}
                consDataConName
-               alpha_tyvar [] [alphaTy, mkTyConApp listTyCon alpha_ty] listTyCon
+               alpha_tyvar [] alpha_tyvar
+               [alphaTy, mkTyConApp listTyCon alpha_ty] listTyCon
 -- Interesting: polymorphic recursion would help here.
 -- We can't use (mkListTy alphaTy) in the defn of consDataCon, else mkListTy
 -- gets the over-specific type (Type -> Type)

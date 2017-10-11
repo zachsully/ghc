@@ -18,7 +18,7 @@
 
 # Target sets
 WINDOWS_x86="i386-unknown-windows i686-unknown-windows x86_64-unknown-windows"
-LINUX_ARM="arm-unknown-linux-gnueabihf armv6-unknown-linux-gnueabihf armv7-unknown-linux-gnueabihf aarch64-unknown-linux-gnu aarch64-unknown-linux"
+LINUX_ARM="arm-unknown-linux-gnueabihf armv6-unknown-linux-gnueabihf armv7-unknown-linux-gnueabihf aarch64-unknown-linux-gnu aarch64-unknown-linux armv7a-unknown-linux-gnueabi"
 LINUX_x86="i386-unknown-linux-gnu i386-unknown-linux x86_64-unknown-linux-gnu x86_64-unknown-linux"
 ANDROID="armv7-unknown-linux-androideabi aarch64-unknown-linux-android"
 QNX="arm-unknown-nto-qnx-eabi"
@@ -36,7 +36,20 @@ function get_cpu_and_attr() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
             -target-cpu) CPU=$2; shift 2;;
-            -target-feature) ATTR+=("$2"); shift 2;;
+            -target-feature)
+                # translate clang to opt/llc target features
+                case "$2" in
+                    # we don't have support in GHC for proper soft-float.
+                    # if we extend the `llvm-target` file to contain two
+                    # additional columns for opt and llc flags, we could
+                    # pass -float-abi=soft; However ghc will use float
+                    # registers unconditionally on arm, and as such true
+                    # soft float with the registered llvm backed will is
+                    # currently not possible.
+                    +soft-float-abi) shift 2;;
+                    *) ATTR+=("$2"); shift 2;;
+                esac
+                ;;
             *) shift 1;;
         esac
     done

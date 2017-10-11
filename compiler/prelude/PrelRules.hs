@@ -25,6 +25,8 @@ where
 #include "HsVersions.h"
 #include "../includes/MachDeps.h"
 
+import GhcPrelude
+
 import {-# SOURCE #-} MkId ( mkPrimOpId, magicDictId )
 
 import CoreSyn
@@ -120,11 +122,11 @@ primOpRules nm NotIOp      = mkPrimOpRule nm 1 [ unaryLit complementOp
                                                , inversePrimOp NotIOp ]
 primOpRules nm IntNegOp    = mkPrimOpRule nm 1 [ unaryLit negOp
                                                , inversePrimOp IntNegOp ]
-primOpRules nm ISllOp      = mkPrimOpRule nm 2 [ binaryLit (intOp2 Bits.shiftL)
+primOpRules nm ISllOp      = mkPrimOpRule nm 2 [ shiftRule (const Bits.shiftL)
                                                , rightIdentityDynFlags zeroi ]
-primOpRules nm ISraOp      = mkPrimOpRule nm 2 [ binaryLit (intOp2 Bits.shiftR)
+primOpRules nm ISraOp      = mkPrimOpRule nm 2 [ shiftRule (const Bits.shiftR)
                                                , rightIdentityDynFlags zeroi ]
-primOpRules nm ISrlOp      = mkPrimOpRule nm 2 [ binaryLit (intOp2' shiftRightLogical)
+primOpRules nm ISrlOp      = mkPrimOpRule nm 2 [ shiftRule shiftRightLogical
                                                , rightIdentityDynFlags zeroi ]
 
 -- Word operations
@@ -155,8 +157,8 @@ primOpRules nm XorOp       = mkPrimOpRule nm 2 [ binaryLit (wordOp2 xor)
                                                , equalArgs >> retLit zerow ]
 primOpRules nm NotOp       = mkPrimOpRule nm 1 [ unaryLit complementOp
                                                , inversePrimOp NotOp ]
-primOpRules nm SllOp       = mkPrimOpRule nm 2 [ wordShiftRule (const Bits.shiftL) ]
-primOpRules nm SrlOp       = mkPrimOpRule nm 2 [ wordShiftRule shiftRightLogical ]
+primOpRules nm SllOp       = mkPrimOpRule nm 2 [ shiftRule (const Bits.shiftL) ]
+primOpRules nm SrlOp       = mkPrimOpRule nm 2 [ shiftRule shiftRightLogical ]
 
 -- coercions
 primOpRules nm Word2IntOp     = mkPrimOpRule nm 1 [ liftLitDynFlags word2IntLit
@@ -417,10 +419,10 @@ wordOp2 op dflags (MachWord w1) (MachWord w2)
     = wordResult dflags (fromInteger w1 `op` fromInteger w2)
 wordOp2 _ _ _ _ = Nothing  -- Could find LitLit
 
-wordShiftRule :: (DynFlags -> Integer -> Int -> Integer) -> RuleM CoreExpr
+shiftRule :: (DynFlags -> Integer -> Int -> Integer) -> RuleM CoreExpr
                  -- Shifts take an Int; hence third arg of op is Int
 -- See Note [Guarding against silly shifts]
-wordShiftRule shift_op
+shiftRule shift_op
   = do { dflags <- getDynFlags
        ; [e1, Lit (MachInt shift_len)] <- getArgs
        ; case e1 of
@@ -429,10 +431,16 @@ wordShiftRule shift_op
              | shift_len < 0 || wordSizeInBits dflags < shift_len
              -> return (mkRuntimeErrorApp rUNTIME_ERROR_ID wordPrimTy
                                         ("Bad shift length" ++ show shift_len))
+
+           -- Do the shift at type Integer, but shift length is Int
+           Lit (MachInt x)
+             -> let op = shift_op dflags
+                in  liftMaybe $ intResult dflags (x `op` fromInteger shift_len)
+
            Lit (MachWord x)
              -> let op = shift_op dflags
                 in  liftMaybe $ wordResult dflags (x `op` fromInteger shift_len)
-                    -- Do the shift at type Integer, but shift length is Int
+
            _ -> mzero }
 
 wordSizeInBits :: DynFlags -> Integer
@@ -889,21 +897,22 @@ tagToEnumRule = do
     _ -> WARN( True, text "tagToEnum# on non-enumeration type" <+> ppr ty )
          return $ mkRuntimeErrorApp rUNTIME_ERROR_ID ty "tagToEnum# on non-enumeration type"
 
-{-
-For dataToTag#, we can reduce if either
-
-        (a) the argument is a constructor
-        (b) the argument is a variable whose unfolding is a known constructor
--}
-
+------------------------------
 dataToTagRule :: RuleM CoreExpr
+-- Rules for dataToTag#
 dataToTagRule = a `mplus` b
   where
+    -- dataToTag (tagToEnum x)   ==>   x
     a = do
       [Type ty1, Var tag_to_enum `App` Type ty2 `App` tag] <- getArgs
       guard $ tag_to_enum `hasKey` tagToEnumKey
       guard $ ty1 `eqType` ty2
-      return tag -- dataToTag (tagToEnum x)   ==>   x
+      return tag
+
+    -- dataToTag (K e1 e2)  ==>   tag-of K
+    -- This also works (via exprIsConApp_maybe) for
+    --   dataToTag x
+    -- where x's unfolding is a constructor application
     b = do
       dflags <- getDynFlags
       [_, val_arg] <- getArgs
@@ -1000,6 +1009,9 @@ builtinRules
         ]
      ]
  ++ builtinIntegerRules
+{-# NOINLINE builtinRules #-}
+-- there is no benefit to inlining these yet, despite this, GHC produces
+-- unfoldings for this regardless since the floated list entries look small.
 
 builtinIntegerRules :: [CoreRule]
 builtinIntegerRules =

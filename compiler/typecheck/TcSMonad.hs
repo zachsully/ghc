@@ -117,6 +117,8 @@ module TcSMonad (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import HscTypes
 
 import qualified Inst as TcM
@@ -424,8 +426,7 @@ emptyInert
                          , inert_dicts    = emptyDicts
                          , inert_safehask = emptyDicts
                          , inert_funeqs   = emptyFunEqs
-                         , inert_irreds   = emptyCts
-                         , inert_insols   = emptyCts }
+                         , inert_irreds   = emptyCts }
        , inert_flat_cache    = emptyExactFunEqs
        , inert_fsks          = []
        , inert_solved_dicts  = emptyDictMap }
@@ -627,10 +628,9 @@ data InertCans   -- See Note [Detailed InertCans Invariants] for more
               -- in TcSimplify
 
        , inert_irreds :: Cts
-              -- Irreducible predicates
-
-       , inert_insols :: Cts
-              -- Frozen errors (as non-canonicals)
+              -- Irreducible predicates that cannot be made canonical,
+              --     and which don't interact with others (e.g.  (c a))
+              -- and insoluble predicates (e.g.  Int ~ Bool, or a ~ [a])
 
        , inert_count :: Int
               -- Number of Wanted goals in
@@ -962,7 +962,7 @@ instance Outputable InertCans where
   ppr (IC { inert_eqs = eqs
           , inert_funeqs = funeqs, inert_dicts = dicts
           , inert_safehask = safehask, inert_irreds = irreds
-          , inert_insols = insols, inert_count = count })
+          , inert_count = count })
     = braces $ vcat
       [ ppUnless (isEmptyDVarEnv eqs) $
         text "Equalities:"
@@ -975,8 +975,6 @@ instance Outputable InertCans where
         text "Safe Haskell unsafe overlap =" <+> pprCts (dictsToBag safehask)
       , ppUnless (isEmptyCts irreds) $
         text "Irreds =" <+> pprCts irreds
-      , ppUnless (isEmptyCts insols) $
-        text "Insolubles =" <+> pprCts insols
       , text "Unsolved goals =" <+> int count
       ]
 
@@ -1027,7 +1025,7 @@ The same idea is sometimes also called "saturation"; find all the
 equalities that must hold in any solution.
 
 Or, equivalently, you can think of the derived shadows as implementing
-the "model": an non-idempotent but no-occurs-check substitution,
+the "model": a non-idempotent but no-occurs-check substitution,
 reflecting *all* *Nominal* equalities (a ~N ty) that are not
 immediately soluble by unification.
 
@@ -1418,7 +1416,7 @@ add_item :: InertCans -> Ct -> InertCans
 add_item ics item@(CFunEqCan { cc_fun = tc, cc_tyargs = tys })
   = ics { inert_funeqs = insertFunEq (inert_funeqs ics) tc tys item }
 
-add_item ics item@(CIrredEvCan { cc_ev = ev })
+add_item ics item@(CIrredCan { cc_ev = ev })
   = ics { inert_irreds = inert_irreds ics `Bag.snocBag` item
         , inert_count = bumpUnsolvedCount ev (inert_count ics) }
        -- The 'False' is because the irreducible constraint might later instantiate
@@ -1435,7 +1433,7 @@ add_item _ item
   = pprPanic "upd_inert set: can't happen! Inserting " $
     ppr item   -- CTyEqCan is dealt with by addInertEq
                -- Can't be CNonCanonical, CHoleCan,
-               -- because they only land in inert_insols
+               -- because they only land in inert_irreds
 
 bumpUnsolvedCount :: CtEvidence -> Int -> Int
 bumpUnsolvedCount ev n | isWanted ev = n+1
@@ -1473,7 +1471,6 @@ kick_out_rewritable new_fr new_tv ics@(IC { inert_eqs      = tv_eqs
                                         , inert_safehask = safehask
                                         , inert_funeqs   = funeqmap
                                         , inert_irreds   = irreds
-                                        , inert_insols   = insols
                                         , inert_count    = n })
   | not (new_fr `eqMayRewriteFR` new_fr)
   = (emptyWorkList, ics)
@@ -1490,14 +1487,12 @@ kick_out_rewritable new_fr new_tv ics@(IC { inert_eqs      = tv_eqs
                        , inert_safehask = safehask   -- ??
                        , inert_funeqs   = feqs_in
                        , inert_irreds   = irs_in
-                       , inert_insols   = insols_in
                        , inert_count    = n - workListWantedCount kicked_out }
 
-    kicked_out = WL { wl_eqs    = tv_eqs_out
-                    , wl_funeqs = feqs_out
-                    , wl_deriv  = []
-                    , wl_rest   = bagToList (dicts_out `andCts` irs_out
-                                             `andCts` insols_out)
+    kicked_out = WL { wl_eqs     = tv_eqs_out
+                    , wl_funeqs  = feqs_out
+                    , wl_deriv   = []
+                    , wl_rest    = bagToList (dicts_out `andCts` irs_out)
                     , wl_implics = emptyBag }
 
     (tv_eqs_out, tv_eqs_in) = foldDVarEnv kick_out_eqs ([], emptyDVarEnv) tv_eqs
@@ -1505,8 +1500,9 @@ kick_out_rewritable new_fr new_tv ics@(IC { inert_eqs      = tv_eqs
            -- See Note [Kicking out CFunEqCan for fundeps]
     (dicts_out,  dicts_in)  = partitionDicts   kick_out_ct dictmap
     (irs_out,    irs_in)    = partitionBag     kick_out_ct irreds
-    (insols_out, insols_in) = partitionBag     kick_out_ct insols
       -- Kick out even insolubles: See Note [Rewrite insolubles]
+      -- Of course we must kick out irreducibles like (c a), in case
+      -- we can rewrite 'c' to something more useful
 
     fr_may_rewrite :: CtFlavourRole -> Bool
     fr_may_rewrite fs = new_fr `eqMayRewriteFR` fs
@@ -1713,7 +1709,10 @@ getInertEqs :: TcS (DTyVarEnv EqualCtList)
 getInertEqs = do { inert <- getInertCans; return (inert_eqs inert) }
 
 getInertInsols :: TcS Cts
-getInertInsols = do { inert <- getInertCans; return (inert_insols inert) }
+-- Returns insoluble equality constraints
+-- specifically including Givens
+getInertInsols = do { inert <- getInertCans
+                    ; return (filterBag insolubleEqCt (inert_irreds inert)) }
 
 getInertGivens :: TcS [Ct]
 -- Returns the Given constraints in the inert set,
@@ -1752,7 +1751,6 @@ getPendingScDicts = updRetInertCans get_sc_dicts
 getUnsolvedInerts :: TcS ( Bag Implication
                          , Cts     -- Tyvar eqs: a ~ ty
                          , Cts     -- Fun eqs:   F a ~ ty
-                         , Cts     -- Insoluble
                          , Cts )   -- All others
 -- Return all the unsolved [Wanted] or [Derived] constraints
 --
@@ -1764,7 +1762,6 @@ getUnsolvedInerts
            , inert_funeqs = fun_eqs
            , inert_irreds = irreds
            , inert_dicts  = idicts
-           , inert_insols = insols
            } <- getInertCans
 
       ; let unsolved_tv_eqs  = foldTyEqs add_if_unsolved tv_eqs emptyCts
@@ -1772,19 +1769,16 @@ getUnsolvedInerts
             unsolved_irreds  = Bag.filterBag is_unsolved irreds
             unsolved_dicts   = foldDicts add_if_unsolved idicts emptyCts
             unsolved_others  = unsolved_irreds `unionBags` unsolved_dicts
-            unsolved_insols  = filterBag is_unsolved insols
 
       ; implics <- getWorkListImplics
 
       ; traceTcS "getUnsolvedInerts" $
         vcat [ text " tv eqs =" <+> ppr unsolved_tv_eqs
              , text "fun eqs =" <+> ppr unsolved_fun_eqs
-             , text "insols =" <+> ppr unsolved_insols
              , text "others =" <+> ppr unsolved_others
              , text "implics =" <+> ppr implics ]
 
-      ; return ( implics, unsolved_tv_eqs, unsolved_fun_eqs
-               , unsolved_insols, unsolved_others) }
+      ; return ( implics, unsolved_tv_eqs, unsolved_fun_eqs, unsolved_others) }
   where
     add_if_unsolved :: Ct -> Cts -> Cts
     add_if_unsolved ct cts | is_unsolved ct = ct `consCts` cts
@@ -1817,32 +1811,35 @@ isInInertEqs eqs tv rhs
 getNoGivenEqs :: TcLevel          -- TcLevel of this implication
                -> [TcTyVar]       -- Skolems of this implication
                -> TcS ( Bool      -- True <=> definitely no residual given equalities
-                      , Cts )     -- Insoluble constraints arising from givens
+                      , Cts )     -- Insoluble equalities arising from givens
 -- See Note [When does an implication have given equalities?]
 getNoGivenEqs tclvl skol_tvs
-  = do { inerts@(IC { inert_eqs = ieqs, inert_irreds = iirreds
-                    , inert_insols = insols })
+  = do { inerts@(IC { inert_eqs = ieqs, inert_irreds = irreds })
               <- getInertCans
-       ; let has_given_eqs = foldrBag ((||) . ev_given_here . ctEvidence) False
-                                      (iirreds `unionBags` insols)
+       ; let has_given_eqs = foldrBag ((||) . ct_given_here) False irreds
                           || anyDVarEnv eqs_given_here ieqs
+             insols = filterBag insolubleEqCt irreds
+                      -- Specifically includes ones that originated in some
+                      -- outer context but were refined to an insoluble by
+                      -- a local equality; so do /not/ add ct_given_here.
 
        ; traceTcS "getNoGivenEqs" (vcat [ ppr has_given_eqs, ppr inerts
                                         , ppr insols])
        ; return (not has_given_eqs, insols) }
   where
     eqs_given_here :: EqualCtList -> Bool
-    eqs_given_here [CTyEqCan { cc_tyvar = tv, cc_ev = ev }]
+    eqs_given_here [ct@(CTyEqCan { cc_tyvar = tv })]
                               -- Givens are always a sigleton
-      = not (skolem_bound_here tv) && ev_given_here ev
+      = not (skolem_bound_here tv) && ct_given_here ct
     eqs_given_here _ = False
 
-    ev_given_here :: CtEvidence -> Bool
+    ct_given_here :: Ct -> Bool
     -- True for a Given bound by the current implication,
     -- i.e. the current level
-    ev_given_here ev
-      =  isGiven ev
-      && tclvl == ctLocLevel (ctEvLoc ev)
+    ct_given_here ct =  isGiven ev
+                     && tclvl == ctLocLevel (ctEvLoc ev)
+        where
+          ev = ctEvidence ct
 
     skol_tv_set = mkVarSet skol_tvs
     skolem_bound_here tv -- See Note [Let-bound skolems]
@@ -1990,7 +1987,7 @@ removeInertCt is ct =
     CTyEqCan  { cc_tyvar = x,  cc_rhs    = ty } ->
       is { inert_eqs    = delTyEq (inert_eqs is) x ty }
 
-    CIrredEvCan {}   -> panic "removeInertCt: CIrredEvCan"
+    CIrredCan {}     -> panic "removeInertCt: CIrredEvCan"
     CNonCanonical {} -> panic "removeInertCt: CNonCanonical"
     CHoleCan {}      -> panic "removeInertCt: CHoleCan"
 
@@ -2013,30 +2010,30 @@ lookupFlatCache fam_tc tys
     lookup_flats flat_cache = findExactFunEq flat_cache fam_tc tys
 
 
-lookupInInerts :: TcPredType -> TcS (Maybe CtEvidence)
+lookupInInerts :: CtLoc -> TcPredType -> TcS (Maybe CtEvidence)
 -- Is this exact predicate type cached in the solved or canonicals of the InertSet?
-lookupInInerts pty
+lookupInInerts loc pty
   | ClassPred cls tys <- classifyPredType pty
   = do { inerts <- getTcSInerts
-       ; return (lookupSolvedDict inerts cls tys `mplus`
-                 lookupInertDict (inert_cans inerts) cls tys) }
+       ; return (lookupSolvedDict inerts loc cls tys `mplus`
+                 lookupInertDict (inert_cans inerts) loc cls tys) }
   | otherwise -- NB: No caching for equalities, IPs, holes, or errors
   = return Nothing
 
 -- | Look up a dictionary inert. NB: the returned 'CtEvidence' might not
 -- match the input exactly. Note [Use loose types in inert set].
-lookupInertDict :: InertCans -> Class -> [Type] -> Maybe CtEvidence
-lookupInertDict (IC { inert_dicts = dicts }) cls tys
-  = case findDict dicts cls tys of
+lookupInertDict :: InertCans -> CtLoc -> Class -> [Type] -> Maybe CtEvidence
+lookupInertDict (IC { inert_dicts = dicts }) loc cls tys
+  = case findDict dicts loc cls tys of
       Just ct -> Just (ctEvidence ct)
       _       -> Nothing
 
 -- | Look up a solved inert. NB: the returned 'CtEvidence' might not
 -- match the input exactly. See Note [Use loose types in inert set].
-lookupSolvedDict :: InertSet -> Class -> [Type] -> Maybe CtEvidence
+lookupSolvedDict :: InertSet -> CtLoc -> Class -> [Type] -> Maybe CtEvidence
 -- Returns just if exactly this predicate type exists in the solved.
-lookupSolvedDict (IS { inert_solved_dicts = solved }) cls tys
-  = case findDict solved cls tys of
+lookupSolvedDict (IS { inert_solved_dicts = solved }) loc cls tys
+  = case findDict solved loc cls tys of
       Just ev -> Just ev
       _       -> Nothing
 
@@ -2123,16 +2120,66 @@ foldTcAppMap k m z = foldUDFM (foldTM k) z m
 *                                                                      *
 ********************************************************************* -}
 
+
+{- Note [Tuples hiding implicit parameters]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider
+   f,g :: (?x::Int, C a) => a -> a
+   f v = let ?x = 4 in g v
+
+The call to 'g' gives rise to a Wanted constraint (?x::Int, C a).
+We must /not/ solve this from the Given (?x::Int, C a), because of
+the intervening binding for (?x::Int).  Trac #14218.
+
+We deal with this by arranging that we always fail when looking up a
+tuple constraint that hides an implicit parameter. Not that this applies
+  * both to the inert_dicts (lookupInertDict)
+  * and to the solved_dicts (looukpSolvedDict)
+An alternative would be not to extend these sets with such tuple
+constraints, but it seemed more direct to deal with the lookup.
+
+Note [Solving CallStack constraints]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Suppose f :: HasCallStack => blah.  Then
+
+* Each call to 'f' gives rise to
+    [W] s1 :: IP "callStack" CallStack    -- CtOrigin = OccurrenceOf f
+  with a CtOrigin that says "OccurrenceOf f".
+  Remember that HasCallStack is just shorthand for
+    IP "callStack CallStack
+  See Note [Overview of implicit CallStacks] in TcEvidence
+
+* We cannonicalise such constraints, in TcCanonical.canClassNC, by
+  pushing the call-site info on the stack, and changing the CtOrigin
+  to record that has been done.
+   Bind:  s1 = pushCallStack <site-info> s2
+   [W] s2 :: IP "callStack" CallStack   -- CtOrigin = IPOccOrigin
+
+* Then, and only then, we can solve the constraint from an enclosing
+  Given.
+
+So we must be careful /not/ to solve 's1' from the Givens.  Again,
+we ensure this by arranging that findDict always misses when looking
+up souch constraints.
+-}
+
 type DictMap a = TcAppMap a
 
 emptyDictMap :: DictMap a
 emptyDictMap = emptyTcAppMap
 
--- sizeDictMap :: DictMap a -> Int
--- sizeDictMap m = foldDicts (\ _ x -> x+1) m 0
+findDict :: DictMap a -> CtLoc -> Class -> [Type] -> Maybe a
+findDict m loc cls tys
+  | isCTupleClass cls
+  , any hasIPPred tys   -- See Note [Tuples hiding implicit parameters]
+  = Nothing
 
-findDict :: DictMap a -> Class -> [Type] -> Maybe a
-findDict m cls tys = findTcApp m (getUnique cls) tys
+  | Just {} <- isCallStackPred cls tys
+  , OccurrenceOf {} <- ctLocOrigin loc
+  = Nothing             -- See Note [Solving CallStack constraints]
+
+  | otherwise
+  = findTcApp m (getUnique cls) tys
 
 findDictsByClass :: DictMap a -> Class -> Bag a
 findDictsByClass m cls
@@ -2549,8 +2596,7 @@ buildImplication skol_info skol_tvs givens (TcS thing_inside)
        ; let wc  = ASSERT2( null (wl_funeqs wl) && null (wl_rest wl) &&
                             null (wl_deriv wl) && null (wl_implics wl), ppr wl )
                    WC { wc_simple = listToCts eqs
-                      , wc_impl   = emptyBag
-                      , wc_insol  = emptyCts }
+                      , wc_impl   = emptyBag }
              imp = Implic { ic_tclvl  = new_tclvl
                           , ic_skols  = skol_tvs
                           , ic_no_eqs = True
@@ -2625,12 +2671,12 @@ emitInsoluble ct
        ; updInertTcS add_insol }
   where
     this_pred = ctPred ct
-    add_insol is@(IS { inert_cans = ics@(IC { inert_insols = old_insols }) })
+    add_insol is@(IS { inert_cans = ics@(IC { inert_irreds = old_irreds }) })
       | drop_it   = is
-      | otherwise = is { inert_cans = ics { inert_insols = old_insols `snocCts` ct } }
+      | otherwise = is { inert_cans = ics { inert_irreds = old_irreds `snocCts` ct } }
       where
         drop_it = isDroppableDerivedCt ct &&
-                  anyBag (tcEqType this_pred . ctPred) old_insols
+                  anyBag (tcEqType this_pred . ctPred) old_irreds
              -- See Note [Do not add duplicate derived insolubles]
 
 newTcRef :: a -> TcS (TcRef a)
@@ -2809,7 +2855,7 @@ Assume we have started with an implication:
 which we have simplified to:
 
   forall c. Eq c => { wc_simple = D [c] c [W]
-                    , wc_insols = (c ~ [c]) [D] }
+                                  (c ~ [c]) [D] }
 
 For some reason, e.g. because we floated an equality somewhere else,
 we might try to re-solve this implication. If we do not do a
@@ -2822,7 +2868,7 @@ constraints the second time:
 which will result in two Deriveds to end up in the insoluble set:
 
   wc_simple   = D [c] c [W]
-  wc_insols = (c ~ [c]) [D], (c ~ [c]) [D]
+               (c ~ [c]) [D], (c ~ [c]) [D]
 -}
 
 {- *********************************************************************
@@ -3082,7 +3128,7 @@ newWantedEvVarNC loc pty
 newWantedEvVar :: CtLoc -> TcPredType -> TcS MaybeNew
 -- For anything except ClassPred, this is the same as newWantedEvVarNC
 newWantedEvVar loc pty
-  = do { mb_ct <- lookupInInerts pty
+  = do { mb_ct <- lookupInInerts loc pty
        ; case mb_ct of
             Just ctev
               | not (isDerived ctev)

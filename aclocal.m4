@@ -109,6 +109,8 @@ AC_DEFUN([FPTOOLS_SET_PLATFORM_VARS],
         GHC_CONVERT_OS([$target_os], [$TargetArch], [TargetOS])
     fi
 
+    GHC_LLVM_TARGET([$target_cpu],[$target_vendor],[$target_os],[LlvmTarget])
+
     GHC_SELECT_FILE_EXTENSIONS([$host], [exeext_host], [soext_host])
     GHC_SELECT_FILE_EXTENSIONS([$target], [exeext_target], [soext_target])
     windows=NO
@@ -137,12 +139,12 @@ AC_DEFUN([FPTOOLS_SET_PLATFORM_VARS],
     TargetOS_CPP=`      echo "$TargetOS"       | sed -e 's/\./_/g' -e 's/-/_/g'`
 
     # we intend to pass trough --targets to llvm as is.
-    LLVMTarget_CPP=`    echo "$target"`
+    LLVMTarget_CPP=`    echo "$LlvmTarget"`
 
     echo "GHC build  : $BuildPlatform"
     echo "GHC host   : $HostPlatform"
     echo "GHC target : $TargetPlatform"
-    echo "LLVM target: $target"
+    echo "LLVM target: $LlvmTarget"
 
     AC_SUBST(BuildPlatform)
     AC_SUBST(HostPlatform)
@@ -1069,9 +1071,20 @@ AC_SUBST([LdHasFilelist])
 # FP_PROG_AR
 # ----------
 # Sets fp_prog_ar to a path to ar. Exits if no ar can be found
+# The host normalization on Windows breaks autoconf, it no longer
+# thinks that target == host so it never checks the unqualified
+# tools for Windows. See #14274.
 AC_DEFUN([FP_PROG_AR],
 [if test -z "$fp_prog_ar"; then
-  AC_PATH_PROG([fp_prog_ar], [ar])
+  if test "$HostOS" = "mingw32"
+  then
+    AC_PATH_PROG([fp_prog_ar], [ar])
+    if test -n "$fp_prog_ar"; then
+      fp_prog_ar=$(cygpath -m $fp_prog_ar)
+    fi
+  else
+    AC_CHECK_TARGET_TOOL([fp_prog_ar], [ar])
+  fi
 fi
 if test -z "$fp_prog_ar"; then
   AC_MSG_ERROR([cannot find ar in your PATH, no idea how to make a library])
@@ -1149,9 +1162,6 @@ else
   fi
 fi])
 fp_prog_ar_args=$fp_cv_prog_ar_args
-if test "$HostOS" != "mingw32"; then
-    ArCmd = "$(cygpath -m $ArCmd)"
-fi
 AC_SUBST([ArCmd], ["$fp_prog_ar"])
 AC_SUBST([ArArgs], ["$fp_prog_ar_args"])
 
@@ -1880,6 +1890,36 @@ case "$1" in
   esac
 ])
 
+# GHC_LLVM_TARGET(target_cpu, target_vendor, target_os, llvm_target_var)
+# --------------------------------
+# converts the canonicalized target into someting llvm can understand
+AC_DEFUN([GHC_LLVM_TARGET], [
+  case "$2-$3" in
+    hardfloat-*eabi)
+      llvm_target_vendor="unknown"
+      llvm_target_os="$3""hf"
+      ;;
+    *-mingw32|*-mingw64|*-msys)
+      llvm_target_vendor="unknown"
+      llvm_target_os="windows"
+      ;;
+    # retain any android and gnueabi linux flavours
+    # for the LLVM Target. Otherwise these would be
+    # turned into just `-linux` and fail to be found
+    # in the `llvm-targets` file.
+    *-android*|*-gnueabi*)
+      GHC_CONVERT_VENDOR([$2],[llvm_target_vendor])
+      llvm_target_os="$3"
+      ;;
+    *)
+      GHC_CONVERT_VENDOR([$2],[llvm_target_vendor])
+      GHC_CONVERT_OS([$3],[$1],[llvm_target_os])
+      ;;
+  esac
+  $4="$1-$llvm_target_vendor-$llvm_target_os"
+])
+
+
 # GHC_CONVERT_VENDOR(vendor, target_var)
 # --------------------------------
 # converts vendor from gnu to ghc naming, and assigns the result to $target_var
@@ -2003,7 +2043,7 @@ AC_DEFUN([XCODE_VERSION],[
 #
 AC_DEFUN([FIND_LLVM_PROG],[
     # Test for program with and without version name.
-    AC_CHECK_TOOLS([$1], [$2-$3 $2])
+    AC_CHECK_TOOLS([$1], [$2-$3 $2], [:])
     if test "$$1" != ":"; then
         AC_MSG_CHECKING([$$1 is version $3])
         if test `$$1 --version | grep -c "version $3"` -gt 0 ; then
@@ -2012,6 +2052,8 @@ AC_DEFUN([FIND_LLVM_PROG],[
             AC_MSG_RESULT(no)
             $1=""
         fi
+    else
+        $1=""
     fi
 ])
 
@@ -2289,28 +2331,51 @@ AC_DEFUN([FIND_LD],[
       [],
       [enable_ld_override=yes])
 
-    if test "x$enable_ld_override" = "xyes"; then
-        TmpLd="$LD" # In case the user set LD
-        AC_CHECK_TARGET_TOOLS([TmpLd], [ld.lld ld.gold ld])
-
-        out=`$TmpLd --version`
-        case $out in
-          "GNU ld"*)   FP_CC_LINKER_FLAG_TRY(bfd, $2) ;;
-          "GNU gold"*) FP_CC_LINKER_FLAG_TRY(gold, $2) ;;
-          "LLD"*)      FP_CC_LINKER_FLAG_TRY(lld, $2) ;;
-          *) AC_MSG_NOTICE([unknown linker version $out]) ;;
-        esac
-        if test "z$$2" = "z"; then
-            AC_MSG_NOTICE([unable to convince '$CC' to use linker '$TmpLd'])
+    find_ld() {
+        # Make sure the user didn't specify LD manually.
+        if test "z$LD" != "z"; then
             AC_CHECK_TARGET_TOOL([LD], [ld])
-        else
-            LD="$TmpLd"
+            return
         fi
-   else
-        AC_CHECK_TARGET_TOOL([LD], [ld])
-   fi
 
-   CHECK_LD_COPY_BUG([$1])
+        # Manually iterate over possible names since we want to ensure that, e.g.,
+        # if ld.lld is installed but gcc doesn't support -fuse-ld=lld, that we
+        # then still try ld.gold and -fuse-ld=gold.
+        for possible_ld in ld.lld ld.gold ld; do
+            TmpLd="" # In case the user set LD
+            AC_CHECK_TARGET_TOOL([TmpLd], [$possible_ld])
+            if test "x$TmpLd" = "x"; then continue; fi
+
+            out=`$TmpLd --version`
+            case $out in
+              "GNU ld"*)   FP_CC_LINKER_FLAG_TRY(bfd, $2) ;;
+              "GNU gold"*) FP_CC_LINKER_FLAG_TRY(gold, $2) ;;
+              "LLD"*)      FP_CC_LINKER_FLAG_TRY(lld, $2) ;;
+              *) AC_MSG_NOTICE([unknown linker version $out]) ;;
+            esac
+            if test "z$$2" = "z"; then
+                AC_MSG_NOTICE([unable to convince '$CC' to use linker '$TmpLd'])
+                # a terrible hack to prevent autoconf from caching the previous
+                # AC_CHECK_TARGET_TOOL result since next time we'll be looking
+                # for another ld variant.
+                $as_unset ac_cv_prog_ac_ct_TmpLd
+            else
+                LD="$TmpLd"
+                return
+            fi
+        done
+
+        # Fallback
+        AC_CHECK_TARGET_TOOL([LD], [ld])
+    }
+
+    if test "x$enable_ld_override" = "xyes"; then
+        find_ld
+    else
+        AC_CHECK_TARGET_TOOL([LD], [ld])
+    fi
+
+    CHECK_LD_COPY_BUG([$1])
 ])
 
 # LocalWords:  fi

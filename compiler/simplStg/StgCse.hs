@@ -70,6 +70,8 @@ and nothing stops us from transforming that to
 -}
 module StgCse (stgCse) where
 
+import GhcPrelude
+
 import DataCon
 import Id
 import StgSyn
@@ -362,7 +364,7 @@ stgCsePairs env0 ((b,e):pairs)
     mbCons = maybe id (:)
 
 -- The RHS of a binding.
--- If it is an constructor application, either short-cut it or extend the environment
+-- If it is a constructor application, either short-cut it or extend the environment
 stgCseRhs :: CseEnv -> OutId -> InStgRhs -> (Maybe (OutId, OutStgRhs), CseEnv)
 stgCseRhs env bndr (StgRhsCon ccs dataCon args)
     | Just other_bndr <- envLookup dataCon args' env

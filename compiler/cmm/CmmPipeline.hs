@@ -7,6 +7,8 @@ module CmmPipeline (
   cmmPipeline
 ) where
 
+import GhcPrelude
+
 import Cmm
 import CmmLint
 import CmmBuildInfoTables
@@ -66,7 +68,7 @@ cpsTop hsc_env proc =
 
        ----------- Eliminate common blocks -------------------------------------
        g <- {-# SCC "elimCommonBlocks" #-}
-            condPass Opt_CmmElimCommonBlocks elimCommonBlocks g
+            condPass Opt_CmmElimCommonBlocks (elimCommonBlocks dflags) g
                           Opt_D_dump_cmm_cbe "Post common block elimination"
 
        -- Any work storing block Labels must be performed _after_

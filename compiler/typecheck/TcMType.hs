@@ -24,7 +24,7 @@ module TcMType (
   cloneMetaTyVar,
   newFmvTyVar, newFskTyVar,
 
-  readMetaTyVar, writeMetaTyVar, writeMetaTyVarRef,
+  readMetaTyVar, writeMetaTyVar,
   newMetaDetails, isFilledMetaTyVar, isUnfilledMetaTyVar,
 
   --------------------------------
@@ -90,6 +90,8 @@ module TcMType (
 #include "HsVersions.h"
 
 -- friends:
+import GhcPrelude
+
 import TyCoRep
 import TcType
 import Type
@@ -240,7 +242,7 @@ newDict cls tys
 predTypeOccName :: PredType -> OccName
 predTypeOccName ty = case classifyPredType ty of
     ClassPred cls _ -> mkDictOcc (getOccName cls)
-    EqPred _ _ _    -> mkVarOccFS (fsLit "cobox")
+    EqPred _ _ _    -> mkVarOccFS (fsLit "co")
     IrredPred _     -> mkVarOccFS (fsLit "irred")
 
 {-
@@ -675,8 +677,11 @@ writeMetaTyVarRef tyvar ref ty
        ; zonked_tv_kind <- zonkTcType tv_kind
        ; zonked_ty_kind <- zonkTcType ty_kind
        ; let kind_check_ok = isPredTy tv_kind  -- Don't check kinds for updates
-                                               -- to coercion variables
+                                               -- to coercion variables.  Why not??
+                          || isConstraintKind zonked_tv_kind
                           || tcEqKind zonked_ty_kind zonked_tv_kind
+             -- Hack alert! isConstraintKind: see TcHsType
+             -- Note [Extra-constraint holes in partial type signatures]
 
              kind_msg = hang (text "Ill-kinded update to meta tyvar")
                            2 (    ppr tyvar <+> text "::" <+> (ppr tv_kind $$ ppr zonked_tv_kind)
@@ -1346,11 +1351,10 @@ zonkWC :: WantedConstraints -> TcM WantedConstraints
 zonkWC wc = zonkWCRec wc
 
 zonkWCRec :: WantedConstraints -> TcM WantedConstraints
-zonkWCRec (WC { wc_simple = simple, wc_impl = implic, wc_insol = insol })
+zonkWCRec (WC { wc_simple = simple, wc_impl = implic })
   = do { simple' <- zonkSimples simple
        ; implic' <- mapBagM zonkImplication implic
-       ; insol'  <- zonkSimples insol
-       ; return (WC { wc_simple = simple', wc_impl = implic', wc_insol = insol' }) }
+       ; return (WC { wc_simple = simple', wc_impl = implic' }) }
 
 zonkSimples :: Cts -> TcM Cts
 zonkSimples cts = do { cts' <- mapBagM zonkCt' cts
@@ -1361,10 +1365,12 @@ zonkCt' :: Ct -> TcM Ct
 zonkCt' ct = zonkCt ct
 
 {- Note [zonkCt behaviour]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 zonkCt tries to maintain the canonical form of a Ct.  For example,
   - a CDictCan should stay a CDictCan;
   - a CTyEqCan should stay a CTyEqCan (if the LHS stays as a variable.).
   - a CHoleCan should stay a CHoleCan
+  - a CIrredCan should stay a CIrredCan with its cc_insol flag intact
 
 Why?, for example:
 - For CDictCan, the @TcSimplify.expandSuperClasses@ step, which runs after the
@@ -1375,21 +1381,27 @@ Why?, for example:
 
 - For CHoleCan, once we forget that it's a hole, we can never recover that info.
 
+- For CIrredCan we want to see if a constraint is insoluble with insolubleWC
+
 NB: we do not expect to see any CFunEqCans, because zonkCt is only
 called on unflattened constraints.
+
 NB: Constraints are always re-flattened etc by the canonicaliser in
 @TcCanonical@ even if they come in as CDictCan. Only canonical constraints that
 are actually in the inert set carry all the guarantees. So it is okay if zonkCt
 creates e.g. a CDictCan where the cc_tyars are /not/ function free.
 -}
+
 zonkCt :: Ct -> TcM Ct
 zonkCt ct@(CHoleCan { cc_ev = ev })
   = do { ev' <- zonkCtEvidence ev
        ; return $ ct { cc_ev = ev' } }
+
 zonkCt ct@(CDictCan { cc_ev = ev, cc_tyargs = args })
   = do { ev'   <- zonkCtEvidence ev
        ; args' <- mapM zonkTcType args
        ; return $ ct { cc_ev = ev', cc_tyargs = args' } }
+
 zonkCt ct@(CTyEqCan { cc_ev = ev, cc_tyvar = tv, cc_rhs = rhs })
   = do { ev'    <- zonkCtEvidence ev
        ; tv_ty' <- zonkTcTyVar tv
@@ -1399,6 +1411,11 @@ zonkCt ct@(CTyEqCan { cc_ev = ev, cc_tyvar = tv, cc_rhs = rhs })
                                       , cc_tyvar = tv'
                                       , cc_rhs   = rhs' } }
            Nothing  -> return (mkNonCanonical ev') }
+
+zonkCt ct@(CIrredCan { cc_ev = ev }) -- Preserve the cc_insol flag
+  = do { ev' <- zonkCtEvidence ev
+       ; return (ct { cc_ev = ev' }) }
+
 zonkCt ct
   = ASSERT( not (isCFunEqCan ct) )
   -- We do not expect to see any CFunEqCans, because zonkCt is only called on

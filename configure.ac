@@ -27,7 +27,7 @@ AC_INIT([The Glorious Glasgow Haskell Compilation System], [8.3], [glasgow-haske
 # when the source distribution was created.
 
 if test ! -f mk/config.h.in; then
-   echo "mk/config.h.in doesn't exist: perhaps you haven't run 'perl boot'?"
+   echo "mk/config.h.in doesn't exist: perhaps you haven't run 'python3 boot'?"
    exit 1
 fi
 
@@ -605,13 +605,18 @@ fi
 RanlibCmd="$RANLIB"
 RANLIB="$RanlibCmd"
 
+dnl ** which strip to use?
+dnl --------------------------------------------------------------
+AC_CHECK_TARGET_TOOL([STRIP], [strip])
+StripCmd="$STRIP"
+AC_SUBST([StripCmd])
+
+
 dnl ** which libtool to use?
 dnl --------------------------------------------------------------
 # The host normalization on Windows breaks autoconf, it no longer
 # thinks that target == host so it never checks the unqualified
-# tools for Windows. I don't know why we do this whole normalization thing
-# as it just breaks everything.. but for now, just check the unqualified one
-# if on Windows.
+# tools for Windows. See #14274.
 if test "$HostOS" = "mingw32"
 then
     AC_PATH_PROG([LIBTOOL],[libtool])
@@ -627,7 +632,7 @@ AC_SUBST([LibtoolCmd])
 # tools we are looking for. In the past, GHC supported a number of
 # versions of LLVM simultaneously, but that stopped working around
 # 3.5/3.6 release of LLVM.
-LlvmVersion=4.0
+LlvmVersion=5.0
 AC_SUBST([LlvmVersion])
 sUPPORTED_LLVM_VERSION=$(echo \($LlvmVersion\) | sed 's/\./,/')
 AC_DEFINE_UNQUOTED([sUPPORTED_LLVM_VERSION], ${sUPPORTED_LLVM_VERSION}, [The supported LLVM version number])

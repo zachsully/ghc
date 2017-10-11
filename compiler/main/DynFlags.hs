@@ -91,6 +91,7 @@ module DynFlags (
         opt_windres, opt_lo, opt_lc, opt_lcc,
 
         -- ** Manipulating DynFlags
+        addPluginModuleName,
         defaultDynFlags,                -- Settings -> DynFlags
         defaultWays,
         interpWays,
@@ -164,6 +165,8 @@ module DynFlags (
   ) where
 
 #include "HsVersions.h"
+
+import GhcPrelude
 
 import Platform
 import PlatformConstants

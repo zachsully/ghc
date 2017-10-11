@@ -33,6 +33,7 @@ module GHC.TypeNats
     -- * Functions on type literals
   , type (<=), type (<=?), type (+), type (*), type (^), type (-)
   , CmpNat
+  , Div, Mod, Log2
 
   ) where
 
@@ -102,6 +103,8 @@ infixl 7 *
 infixr 8 ^
 
 -- | Comparison of type-level naturals, as a constraint.
+--
+-- @since 4.7.0.0
 type x <= y = (x <=? y) ~ 'True
 
 -- | Comparison of type-level naturals, as a function.
@@ -116,18 +119,42 @@ Please let us know, if you encounter discrepancies between the two. -}
 type family (m :: Nat) <=? (n :: Nat) :: Bool
 
 -- | Addition of type-level naturals.
+--
+-- @since 4.7.0.0
 type family (m :: Nat) + (n :: Nat) :: Nat
 
 -- | Multiplication of type-level naturals.
+--
+-- @since 4.7.0.0
 type family (m :: Nat) * (n :: Nat) :: Nat
 
 -- | Exponentiation of type-level naturals.
+--
+-- @since 4.7.0.0
 type family (m :: Nat) ^ (n :: Nat) :: Nat
 
 -- | Subtraction of type-level naturals.
 --
 -- @since 4.7.0.0
 type family (m :: Nat) - (n :: Nat) :: Nat
+
+-- | Division (round down) of natural numbers.
+-- @Div x 0@ is undefined (i.e., it cannot be reduced).
+--
+-- @since 4.11.0.0
+type family Div (m :: Nat) (n :: Nat) :: Nat
+
+-- | Modulus of natural numbers.
+-- @Mod x 0@ is undefined (i.e., it cannot be reduced).
+--
+-- @since 4.11.0.0
+type family Mod (m :: Nat) (n :: Nat) :: Nat
+
+-- | Log base 2 (round down) of natural numbers.
+-- @Log 0@ is undefined (i.e., it cannot be reduced).
+--
+-- @since 4.11.0.0
+type family Log2 (m :: Nat) :: Nat
 
 --------------------------------------------------------------------------------
 

@@ -78,10 +78,10 @@ module TcType (
   isSigmaTy, isRhoTy, isRhoExpTy, isOverloadedTy,
   isFloatingTy, isDoubleTy, isFloatTy, isIntTy, isWordTy, isStringTy,
   isIntegerTy, isBoolTy, isUnitTy, isCharTy, isCallStackTy, isCallStackPred,
-  isTauTy, isTauTyCon, tcIsTyVarTy, tcIsForAllTy,
+  hasIPPred, isTauTy, isTauTyCon, tcIsTyVarTy, tcIsForAllTy,
   isPredTy, isTyVarClassPred, isTyVarExposed, isInsolubleOccursCheck,
   checkValidClsArgs, hasTyVarHead,
-  isRigidEqPred, isRigidTy,
+  isRigidTy,
 
   ---------------------------------
   -- Misc type manipulators
@@ -100,7 +100,7 @@ module TcType (
   isImprovementPred,
 
   -- * Finding type instances
-  tcTyFamInsts,
+  tcTyFamInsts, isTyFamFree,
 
   -- * Finding "exact" (non-dead) type variables
   exactTyCoVarsOfType, exactTyCoVarsOfTypes,
@@ -198,6 +198,8 @@ module TcType (
 #include "HsVersions.h"
 
 -- friends:
+import GhcPrelude
+
 import Kind
 import TyCoRep
 import Class
@@ -821,6 +823,10 @@ tcTyFamInsts (CastTy ty _)      = tcTyFamInsts ty
 tcTyFamInsts (CoercionTy _)     = []  -- don't count tyfams in coercions,
                                       -- as they never get normalized, anyway
 
+isTyFamFree :: Type -> Bool
+-- ^ Check that a type does not contain any type family applications.
+isTyFamFree = null . tcTyFamInsts
+
 {-
 ************************************************************************
 *                                                                      *
@@ -1294,7 +1300,7 @@ mkInfSigmaTy tyvars theta ty = mkSigmaTy (mkTyVarBinders Inferred tyvars) theta 
 -- | Make a sigma ty where all type variables are "specified". That is,
 -- they can be used with visible type application
 mkSpecSigmaTy :: [TyVar] -> [PredType] -> Type -> Type
-mkSpecSigmaTy tyvars ty = mkSigmaTy (mkTyVarBinders Specified tyvars) ty
+mkSpecSigmaTy tyvars preds ty = mkSigmaTy (mkTyVarBinders Specified tyvars) preds ty
 
 mkPhiTy :: [PredType] -> Type -> Type
 mkPhiTy = mkFunTys
@@ -1875,7 +1881,7 @@ pickQuantifiablePreds qtvs theta
       = case classifyPredType pred of
 
           ClassPred cls tys
-            | Just {} <- isCallStackPred pred
+            | Just {} <- isCallStackPred cls tys
               -- NEVER infer a CallStack constraint
               -- Otherwise, we let the constraints bubble up to be
               -- solved from the outer context, or be defaulted when we
@@ -2118,13 +2124,22 @@ isCallStackTy ty
 -- | Is a 'PredType' a 'CallStack' implicit parameter?
 --
 -- If so, return the name of the parameter.
-isCallStackPred :: PredType -> Maybe FastString
-isCallStackPred pred
-  | Just (str, ty) <- isIPPred_maybe pred
-  , isCallStackTy ty
-  = Just str
+isCallStackPred :: Class -> [Type] -> Maybe FastString
+isCallStackPred cls tys
+  | [ty1, ty2] <- tys
+  , isIPClass cls
+  , isCallStackTy ty2
+  = isStrLitTy ty1
   | otherwise
   = Nothing
+
+hasIPPred :: PredType -> Bool
+hasIPPred pred
+  = case classifyPredType pred of
+      ClassPred cls tys
+        | isIPClass     cls -> True
+        | isCTupleClass cls -> any hasIPPred tys
+      _other -> False
 
 is_tc :: Unique -> Type -> Bool
 -- Newtypes are opaque to this
@@ -2187,21 +2202,6 @@ isRigidTy ty
   | Just {} <- tcSplitAppTy_maybe ty        = True
   | isForAllTy ty                           = True
   | otherwise                               = False
-
-isRigidEqPred :: TcLevel -> PredTree -> Bool
--- ^ True of all Nominal equalities that are solidly insoluble
--- This means all equalities *except*
---   * Meta-tv non-SigTv on LHS
---   * Meta-tv SigTv on LHS, tyvar on right
-isRigidEqPred tc_lvl (EqPred NomEq ty1 _)
-  | Just tv1 <- tcGetTyVar_maybe ty1
-  = ASSERT2( tcIsTcTyVar tv1, ppr tv1 )
-    not (isMetaTyVar tv1) || isTouchableMetaTyVar tc_lvl tv1
-
-  | otherwise  -- LHS is not a tyvar
-  = True
-
-isRigidEqPred _ _ = False  -- Not an equality
 
 {-
 ************************************************************************

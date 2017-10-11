@@ -7,6 +7,8 @@
 {-# LANGUAGE CPP #-}
 module WorkWrap ( wwTopBinds ) where
 
+import GhcPrelude
+
 import CoreSyn
 import CoreUnfold       ( certainlyWillInline, mkWwInlineRule, mkWorkerUnfolding )
 import CoreUtils        ( exprType, exprIsHNF )
@@ -180,7 +182,7 @@ If we have
 
 where f is strict in y, we might get a more efficient loop by w/w'ing
 f.  But that would make a new unfolding which would overwrite the old
-one! So the function would no longer be ININABLE, and in particular
+one! So the function would no longer be INLNABLE, and in particular
 will not be specialised at call sites in other modules.
 
 This comes in practice (Trac #6056).
@@ -230,7 +232,7 @@ has no wrapper, the worker for g will rebox p. So we get
 
   g x y p = case p of (I# p#) -> $wg x y p#
 
-Now, in this case the reboxing will float into the True branch, an so
+Now, in this case the reboxing will float into the True branch, and so
 the allocation will only happen on the error path. But it won't float
 inwards if there are multiple branches that call (f p), so the reboxing
 will happen on every call of g. Disaster.

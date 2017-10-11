@@ -189,6 +189,8 @@ typedef struct _CONCURRENT_FLAGS {
 typedef struct _MISC_FLAGS {
     Time    tickInterval;        /* units: TIME_RESOLUTION */
     bool install_signal_handlers;
+    bool install_seh_handlers;
+    bool generate_dump_file;
     bool machineReadable;
     StgWord linkerMemBase;       /* address to ask the OS for memory
                                   * for the linker, NULL ==> off */

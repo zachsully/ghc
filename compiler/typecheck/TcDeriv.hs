@@ -13,6 +13,8 @@ module TcDeriv ( tcDeriving, DerivInfo(..), mkDerivInfos ) where
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import HsSyn
 import DynFlags
 
@@ -865,7 +867,7 @@ kind parameters. Consider this code (also from Trac #11732):
 
     newtype Fun a b = Fun (a -> b) deriving (Cat k)
 
-Even though we requested an derived instance of the form (Cat k Fun), the
+Even though we requested a derived instance of the form (Cat k Fun), the
 kind unification will actually generate (Cat * Fun) (i.e., the same thing as if
 the user wrote deriving (Cat *)).
 

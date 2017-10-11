@@ -34,7 +34,7 @@ module TcEnv(
         isTypeClosedLetBndr,
 
         tcLookup, tcLookupLocated, tcLookupLocalIds,
-        tcLookupId, tcLookupTyVar,
+        tcLookupId, tcLookupIdMaybe, tcLookupTyVar,
         tcLookupLcl_maybe,
         getInLocalScope,
         wrongThingErr, pprBinders,
@@ -70,6 +70,8 @@ module TcEnv(
   ) where
 
 #include "HsVersions.h"
+
+import GhcPrelude
 
 import HsSyn
 import IfaceEnv
@@ -350,11 +352,18 @@ tcLookupId :: Name -> TcM Id
 --
 -- The Id is never a DataCon. (Why does that matter? see TcExpr.tcId)
 tcLookupId name = do
-    thing <- tcLookup name
+    thing <- tcLookupIdMaybe name
     case thing of
-        ATcId { tct_id = id} -> return id
-        AGlobal (AnId id)    -> return id
-        _                    -> pprPanic "tcLookupId" (ppr name)
+        Just id -> return id
+        _       -> pprPanic "tcLookupId" (ppr name)
+
+tcLookupIdMaybe :: Name -> TcM (Maybe Id)
+tcLookupIdMaybe name
+  = do { thing <- tcLookup name
+       ; case thing of
+           ATcId { tct_id = id} -> return $ Just id
+           AGlobal (AnId id)    -> return $ Just id
+           _                    -> return Nothing }
 
 tcLookupLocalIds :: [Name] -> TcM [TcId]
 -- We expect the variables to all be bound, and all at
@@ -820,7 +829,7 @@ default the 'a' to (), rather than to Integer (which is what would otherwise hap
 and then GHCi doesn't attempt to print the ().  So in interactive mode, we add
 () to the list of defaulting types.  See Trac #1200.
 
-Additonally, the list type [] is added as a default specialization for
+Additionally, the list type [] is added as a default specialization for
 Traversable and Foldable. As such the default default list now has types of
 varying kinds, e.g. ([] :: * -> *)  and (Integer :: *).
 

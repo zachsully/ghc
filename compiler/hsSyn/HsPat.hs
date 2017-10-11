@@ -41,6 +41,8 @@ module HsPat (
         Cop(..)
     ) where
 
+import GhcPrelude
+
 import {-# SOURCE #-} HsExpr            (SyntaxExpr, LHsExpr, HsSplice, pprLExpr, pprSplice)
 
 -- friends:

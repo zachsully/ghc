@@ -4,6 +4,8 @@
 
 module Llvm.AbsSyn where
 
+import GhcPrelude
+
 import Llvm.MetaData
 import Llvm.Types
 
@@ -106,7 +108,7 @@ data LlvmAtomicOp
 -- | Llvm Statements
 data LlvmStatement
   {- |
-    Assign an expression to an variable:
+    Assign an expression to a variable:
       * dest:   Variable to assign to
       * source: Source expression
   -}
@@ -258,7 +260,7 @@ data LlvmExpression
   | ALoad LlvmSyncOrdering SingleThreaded LlvmVar
 
   {- |
-    Navigate in an structure, selecting elements
+    Navigate in a structure, selecting elements
       * inbound: Is the pointer inbounds? (computed pointer doesn't overflow)
       * ptr:     Location of the structure
       * indexes: A list of indexes to select the correct value.

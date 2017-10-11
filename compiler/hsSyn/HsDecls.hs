@@ -89,6 +89,8 @@ module HsDecls (
     ) where
 
 -- friends:
+import GhcPrelude
+
 import {-# SOURCE #-}   HsExpr( LHsExpr, HsExpr, HsSplice, pprExpr,
                                 pprSpliceDecl )
         -- Because Expr imports Decls via HsBracket
@@ -705,6 +707,10 @@ pp_vanilla_decl_head thing (HsQTvs { hsq_explicit = tyvars }) fixity context
  = hsep [pprHsContext context, pp_tyvars tyvars]
   where
     pp_tyvars (varl:varsr)
+      | fixity == Infix && length varsr > 1
+         = hsep [char '(',ppr (unLoc varl), pprInfixOcc (unLoc thing)
+                , (ppr.unLoc) (head varsr), char ')'
+                , hsep (map (ppr.unLoc) (tail varsr))]
       | fixity == Infix
          = hsep [ppr (unLoc varl), pprInfixOcc (unLoc thing)
          , hsep (map (ppr.unLoc) varsr)]
@@ -1112,8 +1118,9 @@ instance (SourceTextX pass, OutputableBndrId pass)
         -- This complexity is to distinguish between
         --    deriving Show
         --    deriving (Show)
-        pp_dct [a@(HsIB { hsib_body = L _ HsAppsTy{} })] = parens (ppr a)
-        pp_dct [a] = ppr a
+        pp_dct [a@(HsIB { hsib_body = ty })]
+          | isCompoundHsType ty = parens (ppr a)
+          | otherwise           = ppr a
         pp_dct _   = parens (interpp'SP dct)
 
 data NewOrData

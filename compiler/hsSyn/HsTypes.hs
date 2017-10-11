@@ -65,8 +65,11 @@ module HsTypes (
 
         -- Printing
         pprHsType, pprHsForAll, pprHsForAllTvs, pprHsForAllExtra,
-        pprHsContext, pprHsContextNoArrow, pprHsContextMaybe
+        pprHsContext, pprHsContextNoArrow, pprHsContextMaybe,
+        isCompoundHsType
     ) where
+
+import GhcPrelude
 
 import {-# SOURCE #-} HsExpr ( HsSplice, pprSplice )
 
@@ -1051,11 +1054,13 @@ splitLHsSigmaTy ty
 
 splitLHsForAllTy :: LHsType pass -> ([LHsTyVarBndr pass], LHsType pass)
 splitLHsForAllTy (L _ (HsForAllTy { hst_bndrs = tvs, hst_body = body })) = (tvs, body)
-splitLHsForAllTy body                                                    = ([], body)
+splitLHsForAllTy (L _ (HsParTy t)) = splitLHsForAllTy t
+splitLHsForAllTy body              = ([], body)
 
 splitLHsQualTy :: LHsType pass -> (LHsContext pass, LHsType pass)
 splitLHsQualTy (L _ (HsQualTy { hst_ctxt = ctxt, hst_body = body })) = (ctxt,     body)
-splitLHsQualTy body                                                  = (noLoc [], body)
+splitLHsQualTy (L _ (HsParTy t)) = splitLHsQualTy t
+splitLHsQualTy body              = (noLoc [], body)
 
 splitLHsInstDeclTy :: LHsSigType GhcRn
                    -> ([Name], LHsContext GhcRn, LHsType GhcRn)
@@ -1125,10 +1130,7 @@ mkFieldOcc rdr = FieldOcc rdr PlaceHolder
 data AmbiguousFieldOcc pass
   = Unambiguous (Located RdrName) (PostRn pass (IdP pass))
   | Ambiguous   (Located RdrName) (PostTc pass (IdP pass))
-deriving instance ( Data pass
-                  , Data (PostTc pass (IdP pass))
-                  , Data (PostRn pass (IdP pass)))
-                  => Data (AmbiguousFieldOcc pass)
+deriving instance DataId pass => Data (AmbiguousFieldOcc pass)
 
 instance Outputable (AmbiguousFieldOcc pass) where
   ppr = ppr . rdrNameAmbiguousFieldOcc
@@ -1364,3 +1366,13 @@ ppr_app_ty (HsAppPrefix ty) = ppr_mono_lty ty
 ppr_tylit :: HsTyLit -> SDoc
 ppr_tylit (HsNumTy _ i) = integer i
 ppr_tylit (HsStrTy _ s) = text (show s)
+
+
+-- | Return True for compound types that will need parens.
+isCompoundHsType :: LHsType pass -> Bool
+isCompoundHsType (L _ HsAppTy{} ) = True
+isCompoundHsType (L _ HsAppsTy{}) = True
+isCompoundHsType (L _ HsEqTy{}  ) = True
+isCompoundHsType (L _ HsFunTy{} ) = True
+isCompoundHsType (L _ HsOpTy{}  ) = True
+isCompoundHsType _                = False

@@ -62,6 +62,8 @@ where
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import GHC.PackageDb
 import PackageConfig
 import DynFlags
@@ -122,7 +124,7 @@ import Data.Version
 --     Let @depExposedPackages@ be the transitive closure from @exposedPackages@ of
 --     their dependencies.
 --
---   * When searching for a module from an preload import declaration,
+--   * When searching for a module from a preload import declaration,
 --     only the exposed modules in @exposedPackages@ are valid.
 --
 --   * When searching for a module from an implicit import, all modules
@@ -1876,8 +1878,10 @@ listVisibleModuleNames dflags =
 -- | Find all the 'PackageConfig' in both the preload packages from 'DynFlags' and corresponding to the list of
 -- 'PackageConfig's
 getPreloadPackagesAnd :: DynFlags -> [PreloadUnitId] -> IO [PackageConfig]
-getPreloadPackagesAnd dflags pkgids =
+getPreloadPackagesAnd dflags pkgids0 =
   let
+      pkgids  = pkgids0 ++ map (toInstalledUnitId . moduleUnitId . snd)
+                               (thisUnitIdInsts dflags)
       state   = pkgState dflags
       pkg_map = pkgIdMap state
       preload = preloadPackages state
