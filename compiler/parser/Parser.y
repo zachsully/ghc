@@ -2904,7 +2904,7 @@ dests : dests ';' dest                      { $3 : $1 }
       | {- empty -}                         { [] }
 
 dest :: { DestDecl GhcPs }
-dest : qcon '::' sigtype                  { mkDestDecl [$1] (mkLHsSigType $3) }
+dest : con '::' sigtype                  { mkDestDecl [$1] (mkLHsSigType $3) }
 
 
 ------------------
@@ -2930,8 +2930,8 @@ coalt :: { (Copattern,LHsExpr GhcPs) }
 coalt : cop '->' exp             { ( $1 , $3 ) }
 
 cop :: { Copattern }
-cop : con cop                   { QDest $1 $2 }
-    | cop1                       { $1 }
+cop : con acop                    { QDest $1 $2 }
+    | cop1                        { $1 }
 
 cop1 :: { Copattern }
 cop1 : acop '(' pat ')'      { QPat $1 $3 }
@@ -2940,6 +2940,14 @@ cop1 : acop '(' pat ')'      { QPat $1 $3 }
 acop :: { Copattern }
 acop : '\#'                      { QHead }
      | '(' cop ')'               { $2 }
+
+dcop :: { Copattern }
+dcop : con adcop  { QDest $1 $2 }
+     | adcop
+
+adcop :: { Copattern }
+adcop : '(' dcop ')'  { $2 }
+      | '\#'          { QHead }
 
 -----------------------------------------------------------------------------
 -- Statement sequences

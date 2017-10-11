@@ -1827,7 +1827,7 @@ transExtendedExpr (ExtFCocase (FCocase (fq,u) def)) =
                    ; return (nlHsApps (unLoc . mkSetterName $ h) [u',def']) }
     FQPat  p -> do { def' <- transDefault def
                    ; u' <- transExtendedExpr u
-                   ; x <- freshVar "transEEpat"
+                   ; x <- freshVar "p"
                    ; let matches = [mkSimpleMatch CaseAlt [p] u'
                                    ,mkSimpleMatch CaseAlt [noLoc . WildPat $ PlaceHolder] def']
                    ; return (mkHsLam [noLoc . VarPat $ x]
