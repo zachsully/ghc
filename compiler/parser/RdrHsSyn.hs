@@ -1719,9 +1719,6 @@ transCodata (L loc _other) = unitOL . L loc . TyClD $ _other
 mapWithIndex :: (Int -> a -> b) -> [a] -> [b]
 mapWithIndex f = foldlWithIndex (\i a x -> f i x : a) []
 
-foldrWithIndex :: (Int -> a -> b -> b) -> b -> [a] -> b
-foldrWithIndex f b = snd . foldr (\a (i,x) -> (i+1,f i a x)) (0,b)
-
 foldlWithIndex :: (Int -> b -> a -> b) -> b -> [a] -> b
 foldlWithIndex f b = snd . foldl (\(i,x) a -> (i+1,f i x a)) (0,b)
 
@@ -1785,10 +1782,17 @@ flattenCocase (Cocase coalts) =
         WildPat _ -> return . ExtExpr $ mkHsLam [p] u
         VarPat _  -> return . ExtExpr $ mkHsLam [p] u
 
-        -- R-QPat  -- Broken
-        _ -> do { ec <- flattenCocase (Cocase coalts)
-                ; return . ExtFCocase $
-                    FCocase (FQPat p, ExtExpr u) (DefExtExpr ec)
+        -- R-QPat
+        _ -> do { coalts' <- flattenCocase (Cocase coalts)
+                ; r   <- transExtendedExpr coalts'
+                ; x   <- freshVar "x"
+                ; let matches = [ mkSimpleMatch CaseAlt [p] u
+                                , mkSimpleMatch CaseAlt [noLoc . WildPat $ PlaceHolder]
+                                    (nlHsApp r (noLoc . HsVar $ x))
+                                ]
+                ; return . ExtExpr $
+                    mkHsLam [noLoc . VarPat $ x]
+                            (nlHsCase (noLoc . HsVar $ x) matches)
                 }
 
     ((q,u):coalts) ->
@@ -1807,7 +1811,6 @@ flattenCocase (Cocase coalts) =
                            FQDest h -> nlHsApp (noLoc . HsVar . mkDestName $ h)
                                                (noLoc (HsVar v))
                            FQPat p -> nlHsApp (noLoc (HsVar v)) (noLoc (HsVar pv))
-                           _ -> panic "recursive pattern copatterns not done"
              ; u' <- flattenCocase (Cocase [ (qrest,u) , (QHead, def )])
              ; return
                  ( ExtLet v (ExtExpr r)
@@ -1815,7 +1818,6 @@ flattenCocase (Cocase coalts) =
                  $ FCocase (q'',u') (DefExtExpr (ExtExpr (noLoc (HsVar v))))
                  )
              }
-        _ -> panic "recursive cases not implemented"
 
 transExtendedExpr :: ExtendedHsExpr -> P (LHsExpr GhcPs)
 transExtendedExpr (ExtExpr u) = return u
