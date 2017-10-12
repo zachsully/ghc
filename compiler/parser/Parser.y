@@ -2923,25 +2923,19 @@ coalts1 : coalts1 ';' coalt               { $3 : $1 }
 coalt :: { (Copattern,LHsExpr GhcPs) }
 coalt : cop '->' exp             { ( $1 , $3 ) }
 
+{- Copatterns are parsed such that a sequence of atomic destructor copatterns
+are applied to # before parsing the patterns. -}
 cop :: { Copattern }
-cop : con acop                    { QDest $1 $2 }
-    | cop1                        { $1 }
+cop : acop                       { $1 }
+    | apcop                      { $1 }
 
-cop1 :: { Copattern }
-cop1 : acop '(' pat ')'      { QPat $1 $3 }
-     | acop                      { $1 }
+apcop :: { Copattern }
+apcop : con acop                 { QDest $1 $2 }
+      | acop pat                 { QPat $1 $2 }
 
 acop :: { Copattern }
-acop : '\#'                      { QHead }
-     | '(' cop ')'               { $2 }
-
-dcop :: { Copattern }
-dcop : con adcop  { QDest $1 $2 }
-     | adcop
-
-adcop :: { Copattern }
-adcop : '(' dcop ')'  { $2 }
-      | '\#'          { QHead }
+acop : '(' cop ')'               { $2 }
+     | '\#'                      { QHead }
 
 -----------------------------------------------------------------------------
 -- Statement sequences
