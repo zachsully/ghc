@@ -2355,6 +2355,7 @@ checkValidTyCon tc
                ; let ex_ok = existential_ok || gadt_ok
                      -- Data cons can have existential context
                ; mapM_ (checkValidDataCon dflags ex_ok tc) data_cons
+               ; mapM_ (checkPartialRecordField data_cons) (tyConFieldLabels tc)
 
                 -- Check that fields with the same name share a type
                ; mapM_ check_fields groups }}
@@ -2400,6 +2401,29 @@ checkValidTyCon tc
             where
                 (_, _, _, res2) = dataConSig con2
                 fty2 = dataConFieldType con2 lbl
+
+checkPartialRecordField :: [DataCon] -> FieldLabel -> TcM ()
+-- Check the partial record field selector, and warns.
+-- See Note [Checking partial record field]
+checkPartialRecordField all_cons fld
+  = setSrcSpan loc $
+      warnIfFlag Opt_WarnPartialFields
+        (not is_exhaustive && not (startsWithUnderscore occ_name))
+        (sep [text "Use of partial record field selector" <> colon,
+              nest 2 $ quotes (ppr occ_name)])
+  where
+    sel_name = flSelector fld
+    loc    = getSrcSpan sel_name
+    occ_name = getOccName sel_name
+
+    (cons_with_field, cons_without_field) = partition has_field all_cons
+    has_field con = fld `elem` (dataConFieldLabels con)
+    is_exhaustive = all (dataConCannotMatch inst_tys) cons_without_field
+
+    con1 = ASSERT( not (null cons_with_field) ) head cons_with_field
+    (univ_tvs, _, eq_spec, _, _, _) = dataConFullSig con1
+    eq_subst = mkTvSubstPrs (map eqSpecPair eq_spec)
+    inst_tys = substTyVars eq_subst univ_tvs
 
 checkFieldCompat :: FieldLabelString -> DataCon -> DataCon
                  -> Type -> Type -> Type -> Type -> TcM ()
@@ -2796,7 +2820,7 @@ checkFamFlag tc_name
        ; checkTc idx_tys err_msg }
   where
     err_msg = hang (text "Illegal family declaration for" <+> quotes (ppr tc_name))
-                 2 (text "Use TypeFamilies to allow indexed type families")
+                 2 (text "Enable TypeFamilies to allow indexed type families")
 
 {- Note [Class method constraints]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2957,6 +2981,24 @@ A solution to this problem is to use tcSplitNestedSigmaTys instead of
 tcSplitSigmaTy. tcSplitNestedSigmaTys will always split any foralls that it
 sees until it can't go any further, so if you called it on the default type
 signature for `each`, it would return (a -> f b) -> s -> f t like we desired.
+
+Note [Checking partial record field]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+This check checks the partial record field selector, and warns (Trac #7169).
+
+For example:
+
+  data T a = A { m1 :: a, m2 :: a } | B { m1 :: a }
+
+The function 'm2' is partial record field, and will fail when it is applied to
+'B'. The warning identifies such partial fields. The check is performed at the
+declaration of T, not at the call-sites of m2.
+
+The warning can be suppressed by prefixing the field-name with an underscore.
+For example:
+
+  data T a = A { m1 :: a, _m2 :: a } | B { m1 :: a }
+
 
 ************************************************************************
 *                                                                      *
@@ -3163,20 +3205,20 @@ classArityErr n cls
   where
     mkErr howMany allowWhat =
         vcat [text (howMany ++ " parameters for class") <+> quotes (ppr cls),
-              parens (text ("Use MultiParamTypeClasses to allow "
+              parens (text ("Enable MultiParamTypeClasses to allow "
                                     ++ allowWhat ++ " classes"))]
 
 classFunDepsErr :: Class -> SDoc
 classFunDepsErr cls
   = vcat [text "Fundeps in class" <+> quotes (ppr cls),
-          parens (text "Use FunctionalDependencies to allow fundeps")]
+          parens (text "Enable FunctionalDependencies to allow fundeps")]
 
 badMethPred :: Id -> TcPredType -> SDoc
 badMethPred sel_id pred
   = vcat [ hang (text "Constraint" <+> quotes (ppr pred)
                  <+> text "in the type of" <+> quotes (ppr sel_id))
               2 (text "constrains only the class type variables")
-         , text "Use ConstrainedClassMethods to allow it" ]
+         , text "Enable ConstrainedClassMethods to allow it" ]
 
 noClassTyVarErr :: Class -> TyCon -> SDoc
 noClassTyVarErr clas fam_tc
@@ -3235,14 +3277,14 @@ badDataConTyCon data_con res_ty_tmpl actual_res_ty
 badGadtDecl :: Name -> SDoc
 badGadtDecl tc_name
   = vcat [ text "Illegal generalised algebraic data declaration for" <+> quotes (ppr tc_name)
-         , nest 2 (parens $ text "Use GADTs to allow GADTs") ]
+         , nest 2 (parens $ text "Enable the GADTs extension to allow this") ]
 
 badExistential :: DataCon -> SDoc
 badExistential con
   = hang (text "Data constructor" <+> quotes (ppr con) <+>
                 text "has existential type variables, a context, or a specialised result type")
        2 (vcat [ ppr con <+> dcolon <+> ppr (dataConUserType con)
-               , parens $ text "Use ExistentialQuantification or GADTs to allow this" ])
+               , parens $ text "Enable ExistentialQuantification or GADTs to allow this" ])
 
 badGADT :: DataCon -> [EqSpec] -> SDoc
 badGADT con eq_specs
