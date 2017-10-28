@@ -732,8 +732,8 @@ data Cop p
   = HeadCop
     -- ^ the trivil copattern
 
-  | DestCop (Located ConLike)
+  | DestCop (Located (IdP p)) (LCop p)
 
 
-  | PatCop (LPat p)
+  | PatCop (Cop p) (LPat p)
 deriving instance (DataId p) => Data (Cop p)

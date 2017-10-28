@@ -953,7 +953,6 @@ topdecls :: { OrdList (LHsDecl GhcPs) }
 -- May have trailing semicolons, can be empty
 topdecls_semi :: { OrdList (LHsDecl GhcPs) }
         : topdecls_semi topdecl semis1      {% ams $2 $3 >> return ($1 `snocOL` $2) }
-        | topdecls_semi codata_decl semis1  { $1 `mappend` transCodata $2 }
         | {- empty -}                       { nilOL }
 
 topdecl :: { LHsDecl GhcPs }
@@ -1060,6 +1059,10 @@ ty_decl :: { LTyClDecl GhcPs }
                                    -- We need the location on tycl_hdr in case
                                    -- constrs and deriving are both empty
                     ((fst $ unLoc $1):(fst $ unLoc $4)++(fst $ unLoc $5)) }
+
+          -- A codata declaration, which is similar to the GADT declaration
+        | 'codata' tycl_hdr dest_list
+            {%  amms (mkTyCodata noSrcSpan $2 (fmap noLoc (reverse $3))) [] }
 
           -- data/newtype family
         | 'data' 'family' type opt_datafam_kind_sig
@@ -2071,6 +2074,22 @@ gadt_constr :: { LConDecl GhcPs }
                 {% ams (sLL $1 $> (mkGadtDecl (unLoc $1) (mkLHsSigType $3)))
                        [mu AnnDcolon $2] }
 
+-- Codata destructors
+dest_list :: { [DestDecl GhcPs] }
+dest_list : 'where' '{'        dests '}'    { $3 }
+          | 'where' vocurly    dests close  { $3 }
+          | {- empty -}                     { [] }
+
+dests :: { [DestDecl GhcPs] }
+dests : dests ';' dest                      { $3 : $1 }
+      | dests ';'                           { $1 }
+      | dest                                { [$1] }
+      | {- empty -}                         { [] }
+
+dest :: { DestDecl GhcPs }
+dest : con '::' sigtype                  { mkDestDecl [$1] (mkLHsSigType $3) }
+
+
 {- Note [Difference in parsing GADT and data constructors]
    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 GADT constructors have simpler syntax than usual data constructors:
@@ -2415,7 +2434,7 @@ exp10_top :: { LHsExpr GhcPs }
                                                    FromSource (snd $ unLoc $4)))
                                                (mj AnnCase $1:mj AnnOf $3
                                                   :(fst $ unLoc $4)) }
-        | coaltlist                     {% transExtendedExpr =<< flattenCocase (Cocase $1) }
+        | coaltslist                    { sL1 $1 (HsCocase (CMG $1 [] placeHolderType)) }
         | '-' fexp                      {% ams (sLL $1 $> $ NegApp $2 noSyntaxExpr)
                                                [mj AnnMinus $1] }
 
@@ -2875,67 +2894,42 @@ apats  :: { [LPat GhcPs] }
         | {- empty -}           { [] }
 
 -----------------------------------------------------------------------------
--- Copatterns syntax extension parsing
-{- Parsing copatterns requires parsing a cocase connective (which can contain
-copatterns that need a special parser) and codata declarations which are similar
-to GADT declarations. -}
+-- Coalternatives and copatterns
 
----------------------
--- Codata parsing
-codata_decl :: { LTyClDecl GhcPs }
-codata_decl : 'codata' tycl_hdr dest_list
-   {%  amms (mkTyCodata noSrcSpan $2 (fmap noLoc (reverse $3))) [] }
+coaltslist  :: { Located [LComatch GhcPs] }
+coaltslist  :          '{'     coalts '}'      { sL1 $2 (reverse (unLoc $2)) }
+            |          '{'            '}'      { noLoc [] }
+            | 'cocase' vocurly coalts close    { sLL $1 $3 (reverse (unLoc $3)) }
+            | 'cocase' vocurly        close    { noLoc [] }
+            | 'cocase' '{'     coalts '}'      { sLL $1 $3 (reverse (unLoc $3)) }
+            | 'cocase' '{'            '}'      { noLoc [] }
 
-dest_list :: { [DestDecl GhcPs] }
-dest_list : 'where' '{'        dests '}'    { $3 }
-          | 'where' vocurly    dests close  { $3 }
-          | {- empty -}                     { [] }
-
-dests :: { [DestDecl GhcPs] }
-dests : dests ';' dest                      { $3 : $1 }
-      | dests ';'                           { $1 }
-      | dest                                { [$1] }
-      | {- empty -}                         { [] }
-
-dest :: { DestDecl GhcPs }
-dest : con '::' sigtype                  { mkDestDecl [$1] (mkLHsSigType $3) }
-
-
-------------------
--- Coalternatives
-coaltlist  :: { [(Copattern,LHsExpr GhcPs)] }
-coaltlist  :          '{'     coalts '}'      { reverse $2 }
-           |          '{'            '}'      { [] }
-           | 'cocase' vocurly coalts close    { reverse $3 }
-           | 'cocase' vocurly        close    { [] }
-           | 'cocase' '{'     coalts '}'      { reverse $3 }
-           | 'cocase' '{'            '}'      { [] }
-
-coalts :: { [(Copattern,LHsExpr GhcPs)] }
+coalts :: { Located [LComatch GhcPs] }
 coalts : coalts1                       { $1 }
        | ';' coalts                    { $2 }
 
-coalts1 :: { [(Copattern,LHsExpr GhcPs)] }
-coalts1 : coalts1 ';' coalt               { $3 : $1 }
+coalts1 :: { Located [LComatch GhcPs] }
+coalts1 : coalts1 ';' coalt               { sLL $1 $3 ($3 : (unLoc $1)) }
         | coalts1 ';'                     { $1 }
-        | coalt                           { [$1] }
+        | coalt                           { sL1 $1 [$1] }
 
-coalt :: { (Copattern,LHsExpr GhcPs) }
-coalt : cop '->' exp             { ( $1 , $3 ) }
+coalt :: { LComatch GhcPs }
+coalt : cop '->' exp             { sLL $1 $3 (Comatch $1 $3) }
 
 {- Copatterns are parsed such that a sequence of atomic destructor copatterns
 are applied to # before parsing the patterns. -}
-cop :: { Copattern }
+cop :: { LCop GhcPs }
 cop : acop                       { $1 }
     | apcop                      { $1 }
 
-apcop :: { Copattern }
-apcop : con acop                 { QDest $1 $2 }
-      | acop pat                 { QPat $1 $2 }
+apcop :: { LCop GhcPs }
+apcop : con acop                 { sLL $1 $2 (DestCop $1 $2) }
+      | acop pat                 { sLL $1 $2 (PatCop (unLoc $1) $2) }
 
-acop :: { Copattern }
+acop :: { LCop GhcPs }
 acop : '(' cop ')'               { $2 }
-     | '\#'                      { QHead }
+     | '\#'                      { sL1 $1 HeadCop }
+
 
 -----------------------------------------------------------------------------
 -- Statement sequences

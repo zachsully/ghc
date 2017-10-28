@@ -402,7 +402,7 @@ data HsExpr p
   --       'ApiAnnotation.AnnThen','ApiAnnotation.AnnSemi',
   --       'ApiAnnotation.AnnElse',
 
-  | HsCoCase  (ComatchGroup p (LHsExpr p))
+  | HsCocase  (ComatchGroup p)
 
   -- For details on above see note [Api annotations] in ApiAnnotation
   | HsIf        (Maybe (SyntaxExpr p)) -- cond function
@@ -935,7 +935,7 @@ ppr_expr (HsCase expr matches)
   = sep [ sep [text "case", nest 4 (ppr expr), ptext (sLit "of")],
           nest 2 (pprMatches matches) ]
 
-ppr_expr (HsCoCase _) = panic "ppr_expr HsCoCase"
+ppr_expr (HsCocase _) = panic "ppr_expr HsCocase"
 
 ppr_expr (HsIf _ e1 e2 e3)
   = sep [hsep [text "if", nest 2 (ppr e1), ptext (sLit "then")],
@@ -1599,22 +1599,22 @@ pp_rhs ctxt rhs = matchSeparator ctxt <+> pprDeeper (ppr rhs)
 ************************************************************************
 -}
 
-data ComatchGroup p body
+data ComatchGroup p
   = CMG
-  { cmg_alts    :: Located [LComatch p body]
+  { cmg_alts    :: Located [LComatch p]
   , cmg_arg_tys :: [PostTc p Type]
   , cmg_res_ty  :: PostTc p Type
   }
 
-deriving instance (Data body,DataId p) => Data (ComatchGroup p body)
+deriving instance (DataId p) => Data (ComatchGroup p)
 
-type LComatch id body = Located (Comatch id body)
+type LComatch id = Located (Comatch id)
 
-data Comatch p body
+data Comatch p
   = Comatch
   { copat :: LCop p
   , rhs   :: LHsExpr p }
-deriving instance (Data body,DataId p) => Data (Comatch p body)
+deriving instance (DataId p) => Data (Comatch p)
 
 {-
 ************************************************************************
