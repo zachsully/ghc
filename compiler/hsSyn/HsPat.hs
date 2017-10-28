@@ -38,7 +38,7 @@ module HsPat (
         pprParendLPat, pprConArgs,
 
         -- Copatterns
-        Cop(..)
+        Cop(..), LCop(..)
     ) where
 
 import GhcPrelude
@@ -726,6 +726,8 @@ collectEvVarsPat pat =
 -- | Copatterns
 --
 
+type LCop p = Located (Cop p)
+
 data Cop p
   = HeadCop
     -- ^ the trivil copattern
@@ -734,3 +736,4 @@ data Cop p
 
 
   | PatCop (LPat p)
+deriving instance (DataId p) => Data (Cop p)

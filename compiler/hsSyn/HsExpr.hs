@@ -402,7 +402,7 @@ data HsExpr p
   --       'ApiAnnotation.AnnThen','ApiAnnotation.AnnSemi',
   --       'ApiAnnotation.AnnElse',
 
-  | HsCoCase  (CoMatch p (LHsExpr p))
+  | HsCoCase  (ComatchGroup p (LHsExpr p))
 
   -- For details on above see note [Api annotations] in ApiAnnotation
   | HsIf        (Maybe (SyntaxExpr p)) -- cond function
@@ -1594,13 +1594,27 @@ pp_rhs ctxt rhs = matchSeparator ctxt <+> pprDeeper (ppr rhs)
 {-
 ************************************************************************
 *                                                                      *
-\subsection{CoMatch}
+\subsection{Comatch}
 *                                                                      *
 ************************************************************************
 -}
 
-data CoMatch p body
-deriving instance (Data body,DataId p) => Data (CoMatch p body)
+data ComatchGroup p body
+  = CMG
+  { cmg_alts    :: Located [LComatch p body]
+  , cmg_arg_tys :: [PostTc p Type]
+  , cmg_res_ty  :: PostTc p Type
+  }
+
+deriving instance (Data body,DataId p) => Data (ComatchGroup p body)
+
+type LComatch id body = Located (Comatch id body)
+
+data Comatch p body
+  = Comatch
+  { copat :: LCop p
+  , rhs   :: LHsExpr p }
+deriving instance (Data body,DataId p) => Data (Comatch p body)
 
 {-
 ************************************************************************
