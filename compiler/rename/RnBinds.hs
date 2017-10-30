@@ -22,6 +22,7 @@ module RnBinds (
    -- Other bindings
    rnMethodBinds, renameSigs,
    rnMatchGroup, rnGRHSs, rnGRHS, rnSrcFixityDecl,
+   rnComatchGroup,
    makeMiniFixityEnv, MiniFixityEnv,
    HsSigCtxt(..)
    ) where
@@ -1176,6 +1177,18 @@ emptyCaseErr ctxt = hang (text "Empty list of alternatives in" <+> pp_ctxt)
                 CaseAlt    -> text "case expression"
                 LambdaExpr -> text "\\case expression"
                 _ -> text "(unexpected)" <+> pprMatchContextNoun ctxt
+
+{-
+************************************************************************
+*                                                                      *
+\subsection{Comatch}
+*                                                                      *
+************************************************************************
+-}
+
+rnComatchGroup :: ComatchGroup GhcPs
+               -> RnM (ComatchGroup GhcRn, FreeVars)
+rnComatchGroup = undefined
 
 {-
 ************************************************************************
