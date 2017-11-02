@@ -22,7 +22,7 @@ module HsUtils(
   -- Terms
   mkHsPar, mkHsApp, mkHsAppType, mkHsAppTypes, mkHsAppTypeOut, mkHsCaseAlt,
   mkSimpleMatch, unguardedGRHSs, unguardedRHS,
-  mkMatchGroup, mkMatch, mkPrefixFunRhs, mkHsLam, mkHsIf,
+  mkMatchGroup, mkComatchGroup, mkMatch, mkPrefixFunRhs, mkHsLam, mkHsIf,
   mkHsWrap, mkLHsWrap, mkHsWrapCo, mkHsWrapCoR, mkLHsWrapCo,
   mkHsDictLet, mkHsLams,
   mkHsOpApp, mkHsDo, mkHsComp, mkHsWrapPat, mkHsWrapPatCo,
@@ -169,6 +169,13 @@ mkMatchGroup origin matches = MG { mg_alts = mkLocatedList matches
                                  , mg_arg_tys = []
                                  , mg_res_ty = placeHolderType
                                  , mg_origin = origin }
+
+mkComatchGroup :: (PostTc name Type ~ PlaceHolder)
+               => [LComatch name]
+               -> ComatchGroup name
+mkComatchGroup comatches = CMG { cmg_coalts = mkLocatedList comatches
+                               , cmg_arg_tys = []
+                               , cmg_res_ty = placeHolderType }
 
 mkLocatedList ::  [Located a] -> Located [Located a]
 mkLocatedList [] = noLoc []

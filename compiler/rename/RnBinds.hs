@@ -1181,18 +1181,6 @@ emptyCaseErr ctxt = hang (text "Empty list of alternatives in" <+> pp_ctxt)
 {-
 ************************************************************************
 *                                                                      *
-\subsection{Comatch}
-*                                                                      *
-************************************************************************
--}
-
-rnComatchGroup :: ComatchGroup GhcPs
-               -> RnM (ComatchGroup GhcRn, FreeVars)
-rnComatchGroup = undefined
-
-{-
-************************************************************************
-*                                                                      *
 \subsubsection{Guarded right-hand sides (GRHSs)}
 *                                                                      *
 ************************************************************************
@@ -1233,6 +1221,26 @@ rnGRHS' ctxt rnBody (GRHS guards rhs)
     is_standard_guard []                       = True
     is_standard_guard [L _ (BodyStmt _ _ _ _)] = True
     is_standard_guard _                        = False
+
+{-
+************************************************************************
+*                                                                      *
+\subsection{Comatch}
+*                                                                      *
+************************************************************************
+-}
+
+rnComatchGroup :: ComatchGroup GhcPs
+               -> RnM (ComatchGroup GhcRn, FreeVars)
+rnComatchGroup cmg@(CMG { cmg_coalts = L _ coalts }) =
+  do { (new_coalts, coalts_fvs) <- mapFvRn rnComatch coalts
+     ; return (mkComatchGroup new_coalts, coalts_fvs)}
+
+rnComatch :: LComatch GhcPs -> RnM (LComatch GhcRn, FreeVars)
+rnComatch (L l (Comatch { cop = cop , rhs = rhs})) =
+  rnLCop cop $ \new_cop ->
+    do { (new_rhs, fvs) <- rnLExpr rhs
+       ; return (L l (Comatch new_cop new_rhs),fvs) }
 
 {-
 *********************************************************

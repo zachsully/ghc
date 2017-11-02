@@ -29,8 +29,11 @@ module RnPat (-- main entry points
               -- Literals
               rnLit, rnOverLit,
 
-             -- Pattern Error messages that are also used elsewhere
-             checkTupSize, patSigErr
+              -- Pattern Error messages that are also used elsewhere
+              checkTupSize, patSigErr,
+
+              -- Copatterns
+              rnLCop
              ) where
 
 -- ENH: thin imports to only what is necessary for patterns
@@ -143,6 +146,12 @@ lookupConCps con_rdr
                     ; return (r, addOneFV fvs (unLoc con_name)) })
     -- We add the constructor name to the free vars
     -- See Note [Patterns are uses]
+
+lookupDestCps :: Located RdrName -> CpsRn (Located Name)
+lookupDestCps dest_rdr
+  = CpsRn (\k -> do { dest_name <- lookupLocatedOccRn dest_rdr
+                    ; (r, fvs) <- k dest_name
+                    ; return (r, addOneFV fvs (unLoc dest_name)) })
 
 {-
 Note [Patterns are uses]
@@ -893,6 +902,25 @@ rnOverLit origLit
                   ; return ((lit' { ol_val = negateOverLitVal val }, Just negate_name)
                                   , fvs1 `plusFV` fvs2) }
           else return ((lit', Nothing), fvs1) }
+
+{-
+************************************************************************
+*                                                                      *
+\subsubsection{Copatterns}
+*                                                                      *
+************************************************************************
+-}
+
+rnLCop :: LCop GhcPs
+      -> (LCop GhcRn -> RnM (a,FreeVars))
+      -> RnM (a,FreeVars)
+rnLCop (L l HeadCop) f = f (L l HeadCop)
+rnLCop _ _ = panic ""
+-- rnLCop (L l (DestCop h q)) f =
+--   rnLCop q $ \new_q ->
+--      do { new_h <- lookupDestCps h
+--         ; f (L l (DestCop new_h new_q)) }
+-- rnLCop (L l (PatCop p q)) f = f (L l HeadCop)
 
 {-
 ************************************************************************

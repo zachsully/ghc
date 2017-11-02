@@ -1601,7 +1601,7 @@ pp_rhs ctxt rhs = matchSeparator ctxt <+> pprDeeper (ppr rhs)
 
 data ComatchGroup p
   = CMG
-  { cmg_alts    :: Located [LComatch p]
+  { cmg_coalts  :: Located [LComatch p]
   , cmg_arg_tys :: [PostTc p Type]
   , cmg_res_ty  :: PostTc p Type
   }
@@ -1612,8 +1612,8 @@ type LComatch id = Located (Comatch id)
 
 data Comatch p
   = Comatch
-  { copat :: LCop p
-  , rhs   :: LHsExpr p }
+  { cop :: LCop p
+  , rhs :: LHsExpr p }
 deriving instance (DataId p) => Data (Comatch p)
 
 {-
