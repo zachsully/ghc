@@ -1799,25 +1799,40 @@ flattenCocase (Cocase coalts) =
       case unplugCopattern q of
         (_,Nothing) -> panic "the head copattern should have already been matched"
         (qrest,Just q') ->
+          -- the non-sharing version
           do { coalts' <- flattenCocase (Cocase coalts)
              ; r <- transExtendedExpr coalts'
-             ; v <- freshVar "coalt"
              ; pv <- freshVar "p"
              ; let q'' = case q' of
                            FQPat p -> FQPat . noLoc $ AsPat pv p
                            _ -> q'
              ; let def = case q' of
                            FQHead -> r
-                           FQDest h -> nlHsApp (noLoc . HsVar . mkDestName $ h)
-                                               (noLoc (HsVar v))
-                           FQPat p -> nlHsApp (noLoc (HsVar v)) (noLoc (HsVar pv))
+                           FQDest h -> nlHsApp (noLoc . HsVar . mkDestName $ h) r
+                           FQPat p -> nlHsApp r (noLoc (HsVar pv))
              ; u' <- flattenCocase (Cocase [ (qrest,u) , (QHead, def )])
-             ; return
-                 ( ExtLet v (ExtExpr r)
-                 $ ExtFCocase
-                 $ FCocase (q'',u') (DefExtExpr (ExtExpr (noLoc (HsVar v))))
-                 )
+             ; return (ExtFCocase (FCocase (q'',u') (DefExtExpr (ExtExpr r))))
              }
+         -- the sharing version
+          -- do { coalts' <- flattenCocase (Cocase coalts)
+          --    ; r <- transExtendedExpr coalts'
+          --    ; v <- freshVar "coalt"
+          --    ; pv <- freshVar "p"
+          --    ; let q'' = case q' of
+          --                  FQPat p -> FQPat . noLoc $ AsPat pv p
+          --                  _ -> q'
+          --    ; let def = case q' of
+          --                  FQHead -> r
+          --                  FQDest h -> nlHsApp (noLoc . HsVar . mkDestName $ h)
+          --                                      (noLoc (HsVar v))
+          --                  FQPat p -> nlHsApp (noLoc (HsVar v)) (noLoc (HsVar pv))
+          --    ; u' <- flattenCocase (Cocase [ (qrest,u) , (QHead, def )])
+          --    ; return
+          --        ( ExtLet v (ExtExpr r)
+          --        $ ExtFCocase
+          --        $ FCocase (q'',u') (DefExtExpr (ExtExpr (noLoc (HsVar v))))
+          --        )
+          --    }
 
 transExtendedExpr :: ExtendedHsExpr -> P (LHsExpr GhcPs)
 transExtendedExpr (ExtExpr u) = return u
