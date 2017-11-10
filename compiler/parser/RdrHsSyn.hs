@@ -1851,7 +1851,8 @@ transExtendedExpr (ExtFCocase (FCocase (fq,u) def)) =
                    ; u' <- transExtendedExpr u
                    ; x <- freshVar "p"
                    ; let matches = [mkSimpleMatch CaseAlt [p] u'
-                                   ,mkSimpleMatch CaseAlt [noLoc . WildPat $ PlaceHolder] def']
+                                   ,mkSimpleMatch CaseAlt [noLoc . WildPat $ PlaceHolder]
+                                                  (nlHsApp def' (noLoc . HsVar $ x))]
                    ; return (mkHsLam [noLoc . VarPat $ x]
                                      (nlHsCase (noLoc . HsVar $ x) matches))
                    }
@@ -1868,7 +1869,8 @@ mkHsLet :: Located RdrName -> LHsExpr GhcPs -> LHsExpr GhcPs -> HsExpr GhcPs
 mkHsLet (L l v) a b =
    let bind =  mk_easy_FunBind l v [] a in
    HsLet (noLoc (HsValBinds (ValBindsIn (unitBag bind)
-                            [noLoc (TypeSig [L l v] (mkHsWildCardBndrs . mkHsImplicitBndrs . nlHsTyVar . mkUnqual tvName . fsLit $ "a"))]
+                            []
+                            -- [noLoc (TypeSig [L l v] (mkHsWildCardBndrs . mkHsImplicitBndrs . nlHsTyVar . mkUnqual tvName . fsLit $ "a"))]
    )))
          b
 
