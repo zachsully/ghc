@@ -101,7 +101,7 @@ import PrelNames        ( forall_tv_RDR, eqTyCon_RDR, allNameStrings )
 import SrcLoc
 import Unique           ( hasKey )
 import OrdList          ( OrdList, fromOL, unitOL, mapOL, toOL)
-import Bag              ( emptyBag, consBag )
+import Bag              ( emptyBag, consBag, unitBag )
 import Outputable
 import FastString
 import Maybes
@@ -1749,10 +1749,13 @@ data ExtendedHsExpr
   | ExtLet     (Located RdrName) ExtendedHsExpr ExtendedHsExpr
 
 hsUnmatchedPattern :: LHsExpr GhcPs
-hsUnmatchedPattern = noLoc $
-  ExprWithTySig (nlHsApp (nlHsVar . mkVarUnqual . fsLit $ "error")
-                         (nlHsLit . mkHsString $ "unmatched (co)case"))
-                (mkHsWildCardBndrs . mkHsImplicitBndrs . nlHsTyVar . mkUnqual tvName . fsLit $ "a")
+hsUnmatchedPattern = nlHsApp (nlHsVar . mkVarUnqual . fsLit $ "error")
+                             (nlHsLit . mkHsString $ "unmatched (co)case")
+
+   --                  noLoc $
+   -- ExprWithTySig (nlHsApp (nlHsVar . mkVarUnqual . fsLit $ "error")
+   --                       (nlHsLit . mkHsString $ "unmatched (co)case"))
+   --               (mkHsWildCardBndrs . mkHsImplicitBndrs . nlHsTyVar . mkUnqual tvName . fsLit $ "a")
 
 -- returns the rest of the pattern and maybe the innermost flat pattern
 unplugCopattern :: Copattern -> (Copattern,Maybe FCopattern)
@@ -1852,14 +1855,23 @@ transExtendedExpr (ExtFCocase (FCocase (fq,u) def)) =
                    ; return (mkHsLam [noLoc . VarPat $ x]
                                      (nlHsCase (noLoc . HsVar $ x) matches))
                    }
+
 transExtendedExpr (ExtLet v a b) =
   do { a' <- transExtendedExpr a
      ; b' <- transExtendedExpr b
-     -- TODO add tying annotation to let
-     ; let lett =  HsLet (noLoc (HsValBinds (ValBindsIn (undefined) (undefined))))
-                         b'
-     ; return . nlHsApp (mkHsLam [noLoc . VarPat $ v] b') $ a'
+     ; return . noLoc $ mkHsLet v a' b'
+     -- ; return . nlHsApp (mkHsLam [noLoc . VarPat $ v] b') $ a'
      }
+
+
+mkHsLet :: Located RdrName -> LHsExpr GhcPs -> LHsExpr GhcPs -> HsExpr GhcPs
+mkHsLet (L l v) a b =
+   let bind =  mk_easy_FunBind l v [] a in
+   HsLet (noLoc (HsValBinds (ValBindsIn (unitBag bind)
+                            [noLoc (TypeSig [L l v] (mkHsWildCardBndrs . mkHsImplicitBndrs . nlHsTyVar . mkUnqual tvName . fsLit $ "a"))]
+   )))
+         b
+
 
 transDefault :: Default -> P (LHsExpr GhcPs)
 transDefault (DefExtExpr e) = transExtendedExpr e
