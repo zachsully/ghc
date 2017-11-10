@@ -1749,8 +1749,10 @@ data ExtendedHsExpr
   | ExtLet     (Located RdrName) ExtendedHsExpr ExtendedHsExpr
 
 hsUnmatchedPattern :: LHsExpr GhcPs
-hsUnmatchedPattern = nlHsApp (nlHsVar . mkVarUnqual . fsLit $ "error")
-                             (nlHsLit . mkHsString $ "unmatched (co)case")
+hsUnmatchedPattern = noLoc $
+  ExprWithTySig (nlHsApp (nlHsVar . mkVarUnqual . fsLit $ "error")
+                         (nlHsLit . mkHsString $ "unmatched (co)case"))
+                (mkHsWildCardBndrs . mkHsImplicitBndrs . nlHsTyVar . mkUnqual tvName . fsLit $ "a")
 
 -- returns the rest of the pattern and maybe the innermost flat pattern
 unplugCopattern :: Copattern -> (Copattern,Maybe FCopattern)
@@ -1800,39 +1802,39 @@ flattenCocase (Cocase coalts) =
         (_,Nothing) -> panic "the head copattern should have already been matched"
         (qrest,Just q') ->
           -- the non-sharing version
-          do { coalts' <- flattenCocase (Cocase coalts)
-             ; r <- transExtendedExpr coalts'
-             ; pv <- freshVar "p"
-             ; let q'' = case q' of
-                           FQPat p -> FQPat . noLoc $ AsPat pv p
-                           _ -> q'
-             ; let def = case q' of
-                           FQHead -> r
-                           FQDest h -> nlHsApp (noLoc . HsVar . mkDestName $ h) r
-                           FQPat p -> nlHsApp r (noLoc (HsVar pv))
-             ; u' <- flattenCocase (Cocase [ (qrest,u) , (QHead, def )])
-             ; return (ExtFCocase (FCocase (q'',u') (DefExtExpr (ExtExpr r))))
-             }
-         -- the sharing version
           -- do { coalts' <- flattenCocase (Cocase coalts)
           --    ; r <- transExtendedExpr coalts'
-          --    ; v <- freshVar "coalt"
           --    ; pv <- freshVar "p"
           --    ; let q'' = case q' of
           --                  FQPat p -> FQPat . noLoc $ AsPat pv p
           --                  _ -> q'
           --    ; let def = case q' of
           --                  FQHead -> r
-          --                  FQDest h -> nlHsApp (noLoc . HsVar . mkDestName $ h)
-          --                                      (noLoc (HsVar v))
-          --                  FQPat p -> nlHsApp (noLoc (HsVar v)) (noLoc (HsVar pv))
+          --                  FQDest h -> nlHsApp (noLoc . HsVar . mkDestName $ h) r
+          --                  FQPat p -> nlHsApp r (noLoc (HsVar pv))
           --    ; u' <- flattenCocase (Cocase [ (qrest,u) , (QHead, def )])
-          --    ; return
-          --        ( ExtLet v (ExtExpr r)
-          --        $ ExtFCocase
-          --        $ FCocase (q'',u') (DefExtExpr (ExtExpr (noLoc (HsVar v))))
-          --        )
+          --    ; return (ExtFCocase (FCocase (q'',u') (DefExtExpr (ExtExpr r))))
           --    }
+         -- the sharing version
+          do { coalts' <- flattenCocase (Cocase coalts)
+             ; r <- transExtendedExpr coalts'
+             ; v <- freshVar "coalt"
+             ; pv <- freshVar "p"
+             ; let q'' = case q' of
+                           FQPat p -> FQPat . noLoc $ AsPat pv p
+                           _ -> q'
+             ; let def = case q' of
+                           FQHead -> r
+                           FQDest h -> nlHsApp (noLoc . HsVar . mkDestName $ h)
+                                               (noLoc (HsVar v))
+                           FQPat p -> nlHsApp (noLoc (HsVar v)) (noLoc (HsVar pv))
+             ; u' <- flattenCocase (Cocase [ (qrest,u) , (QHead, def )])
+             ; return
+                 ( ExtLet v (ExtExpr r)
+                 $ ExtFCocase
+                 $ FCocase (q'',u') (DefExtExpr (ExtExpr (noLoc (HsVar v))))
+                 )
+             }
 
 transExtendedExpr :: ExtendedHsExpr -> P (LHsExpr GhcPs)
 transExtendedExpr (ExtExpr u) = return u
@@ -1853,6 +1855,9 @@ transExtendedExpr (ExtFCocase (FCocase (fq,u) def)) =
 transExtendedExpr (ExtLet v a b) =
   do { a' <- transExtendedExpr a
      ; b' <- transExtendedExpr b
+     -- TODO add tying annotation to let
+     ; let lett =  HsLet (noLoc (HsValBinds (ValBindsIn (undefined) (undefined))))
+                         b'
      ; return . nlHsApp (mkHsLam [noLoc . VarPat $ v] b') $ a'
      }
 
