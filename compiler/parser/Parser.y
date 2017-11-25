@@ -2926,16 +2926,21 @@ coalt : cop '->' exp             { ( $1 , $3 ) }
 {- Copatterns are parsed such that a sequence of atomic destructor copatterns
 are applied to # before parsing the patterns. -}
 cop :: { Copattern }
-cop : acop                       { $1 }
-    | apcop                      { $1 }
+cop : pcop                      { $1 }
+    | fcop                      { $1 }
+    | acop                      { $1 }
 
-apcop :: { Copattern }
-apcop : con acop                 { QDest $1 $2 }
-      | acop pat                 { QPat $1 $2 }
+pcop :: { Copattern }
+pcop : cop apat                 { QPat $1 $2 }
+
+fcop :: { Copattern }
+fcop : con acop                 { QDest $1 $2 }
 
 acop :: { Copattern }
-acop : '(' cop ')'               { $2 }
+acop : '[' cop ']'               { $2 }
+     | '(' cop ')'               { $2 }
      | '\#'                      { QHead }
+
 
 -----------------------------------------------------------------------------
 -- Statement sequences
