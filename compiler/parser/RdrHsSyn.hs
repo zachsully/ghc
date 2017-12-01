@@ -1722,7 +1722,7 @@ transCodata (L loc c@(CodataDecl {})) = unitOL dataDecl
                                                           then nlHsVar varX
                                                           else nlHsApp ( nlHsVar
                                                                        . unLoc
-                                                                       . mkDestName
+                                                                       . mkDestName'
                                                                        . head
                                                                        . dest_names
                                                                        . unLoc $ p )
