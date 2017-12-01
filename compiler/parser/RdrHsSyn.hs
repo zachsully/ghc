@@ -1626,6 +1626,9 @@ mkSetterName = pendRdrName "set_" True varName
 mkDestName :: Located RdrName -> Located RdrName
 mkDestName = pendRdrName "obs_" True varName
 
+mkDestName' :: Located RdrName -> Located RdrName
+mkDestName' n = pendRdrName "'" False varName (mkDestName n)
+
 -------------------------------------
 -- codata declaration translation
 mkTyCodata
@@ -1661,7 +1664,9 @@ mkDestDecl names ty = DestDecl { dest_names = names
                                , dest_doc   = Nothing }
 
 transCodata :: LTyClDecl GhcPs -> OrdList (LHsDecl GhcPs)
-transCodata (L loc c@(CodataDecl {})) = unitOL dataDecl `mappend` setters
+transCodata (L loc c@(CodataDecl {})) = unitOL dataDecl
+                              `mappend` getters
+                              `mappend` setters
   where dataDecl = L loc . TyClD
                  $ DataDecl { tcdLName    = tccdLName c
                             , tcdTyVars   = tccdTyVars c
@@ -1683,38 +1688,50 @@ transCodata (L loc c@(CodataDecl {})) = unitOL dataDecl `mappend` setters
         fields :: [LConDeclField GhcPs]
         fields = fmap (\(L loc d) ->
                        L loc ( ConDeclField
-                             { cd_fld_names = fmap (\n -> noLoc (FieldOcc (mkDestName n) PlaceHolder))
+                             { cd_fld_names = fmap (\n -> noLoc (FieldOcc (mkDestName' n) PlaceHolder))
                                                    (dest_names d)
                              , cd_fld_type  = (tyFunDom . getLHsInstDeclHead . dest_type $ d)
                              , cd_fld_doc = Nothing }))
                       (cdd_dests . tccdCodataDefn $ c)
         tyFunDom (L loc (HsFunTy _ d)) = d
         tyFunDom _ = panic "codata field must be a projection"
-        setters = toOL . reverse . mapWithIndex mkSetter . cdd_dests . tccdCodataDefn $ c
         num_fields = length . cdd_dests . tccdCodataDefn $ c
         dests = cdd_dests . tccdCodataDefn $ c
+        getters = toOL . concatMap (\d -> [mkGetterType (unLoc d), mkGetterTerm (unLoc d)]) $ dests
+        mkGetterType d = noLoc . SigD
+                       $ TypeSig (fmap mkDestName (dest_names d))
+                                 (mkHsWildCardBndrs . dest_type $ d)
+        mkGetterTerm d = noLoc . ValD . unLoc
+                       $ mk_easy_FunBind
+                           noSrcSpan
+                           (unLoc . mkDestName . head . dest_names $ d)
+                           []
+                           (nlHsVar (unLoc . mkDestName' . head . dest_names $ d))
         consName = mkConstructorName (tccdLName c)
         getSetterName d = unLoc . mkSetterName . head . dest_names $ d
         varX = mkVarUnqual . fsLit $ "x"
         varD = mkVarUnqual . fsLit $ "d"
+        setters = toOL . reverse . mapWithIndex mkSetter . cdd_dests . tccdCodataDefn $ c
         mkSetter i (L _ d) = noLoc . ValD . unLoc
-                           $ mk_easy_FunBind noSrcSpan
-                                             (unLoc . mkSetterName . head . dest_names $ d)
-                                             (fmap (noLoc . VarPat . noLoc) [varX,varD])
-                                             (foldlWithIndex (\j c p ->
-                                                               let t' = if i == j
-                                                                        then nlHsVar varX
-                                                                        else nlHsApp ( nlHsVar
-                                                                                     . unLoc
-                                                                                     . mkDestName
-                                                                                     . head
-                                                                                     . dest_names
-                                                                                     . unLoc $ p )
-                                                                                     (nlHsVar varD)
+                           $ mk_easy_FunBind
+                               noSrcSpan
+                               (unLoc . mkSetterName . head . dest_names $ d)
+                               (fmap (noLoc . VarPat . noLoc) [varX,varD])
+                               (foldlWithIndex (\j c p ->
+                                                 let t' = if i == j
+                                                          then nlHsVar varX
+                                                          else nlHsApp ( nlHsVar
+                                                                       . unLoc
+                                                                       . mkDestName
+                                                                       . head
+                                                                       . dest_names
+                                                                       . unLoc $ p )
+                                                                       (nlHsVar varD)
                                                                in nlHsApp c t')
-                                                             (nlHsVar . unLoc $ consName)
-                                                             dests)
+                                               (nlHsVar . unLoc $ consName)
+                                               dests)
 transCodata (L loc _other) = unitOL . L loc . TyClD $ _other
+
 
 mapWithIndex :: (Int -> a -> b) -> [a] -> [b]
 mapWithIndex f = foldlWithIndex (\i a x -> f i x : a) []
@@ -1751,11 +1768,6 @@ data ExtendedHsExpr
 hsUnmatchedPattern :: LHsExpr GhcPs
 hsUnmatchedPattern = nlHsApp (nlHsVar . mkVarUnqual . fsLit $ "error")
                              (nlHsLit . mkHsString $ "unmatched (co)case")
-
-   --                  noLoc $
-   -- ExprWithTySig (nlHsApp (nlHsVar . mkVarUnqual . fsLit $ "error")
-   --                       (nlHsLit . mkHsString $ "unmatched (co)case"))
-   --               (mkHsWildCardBndrs . mkHsImplicitBndrs . nlHsTyVar . mkUnqual tvName . fsLit $ "a")
 
 -- returns the rest of the pattern and maybe the innermost flat pattern
 unplugCopattern :: Copattern -> (Copattern,Maybe FCopattern)
@@ -1804,20 +1816,6 @@ flattenCocase (Cocase coalts) =
       case unplugCopattern q of
         (_,Nothing) -> panic "the head copattern should have already been matched"
         (qrest,Just q') ->
-          -- the non-sharing version
-          -- do { coalts' <- flattenCocase (Cocase coalts)
-          --    ; r <- transExtendedExpr coalts'
-          --    ; pv <- freshVar "p"
-          --    ; let q'' = case q' of
-          --                  FQPat p -> FQPat . noLoc $ AsPat pv p
-          --                  _ -> q'
-          --    ; let def = case q' of
-          --                  FQHead -> r
-          --                  FQDest h -> nlHsApp (noLoc . HsVar . mkDestName $ h) r
-          --                  FQPat p -> nlHsApp r (noLoc (HsVar pv))
-          --    ; u' <- flattenCocase (Cocase [ (qrest,u) , (QHead, def )])
-          --    ; return (ExtFCocase (FCocase (q'',u') (DefExtExpr (ExtExpr r))))
-          --    }
          -- the sharing version
           do { coalts' <- flattenCocase (Cocase coalts)
              ; r <- transExtendedExpr coalts'
@@ -1860,19 +1858,13 @@ transExtendedExpr (ExtFCocase (FCocase (fq,u) def)) =
 transExtendedExpr (ExtLet v a b) =
   do { a' <- transExtendedExpr a
      ; b' <- transExtendedExpr b
-     ; return . noLoc $ mkHsLet v a' b'
-     -- ; return . nlHsApp (mkHsLam [noLoc . VarPat $ v] b') $ a'
-     }
+     ; return . noLoc $ mkHsLet v a' b' }
 
 
 mkHsLet :: Located RdrName -> LHsExpr GhcPs -> LHsExpr GhcPs -> HsExpr GhcPs
 mkHsLet (L l v) a b =
    let bind =  mk_easy_FunBind l v [] a in
-   HsLet (noLoc (HsValBinds (ValBindsIn (unitBag bind)
-                            []
-                            -- [noLoc (TypeSig [L l v] (mkHsWildCardBndrs . mkHsImplicitBndrs . nlHsTyVar . mkUnqual tvName . fsLit $ "a"))]
-   )))
-         b
+   HsLet (noLoc (HsValBinds (ValBindsIn (unitBag bind) []))) b
 
 
 transDefault :: Default -> P (LHsExpr GhcPs)
