@@ -11,11 +11,11 @@
 {-# LANGUAGE CPP, MultiWayIf, ScopedTypeVariables #-}
 
 module SysTools (
-        -- Initialisation
+        -- * Initialisation
         initSysTools,
-        initLlvmTargets,
+        initLlvmConfig,
 
-        -- Interface to system tools
+        -- * Interface to system tools
         module SysTools.Tasks,
         module SysTools.Info,
 
@@ -24,12 +24,14 @@ module SysTools (
         copy,
         copyWithHeader,
 
+        -- * General utilities
         Option(..),
+        expandTopDir,
 
-        -- platform-specifics
+        -- * Platform-specifics
         libmLinkOpts,
 
-        -- frameworks
+        -- * Mac OS X frameworks
         getPkgFrameworkOpts,
         getFrameworkOpts
  ) where
@@ -43,10 +45,10 @@ import Packages
 import Config
 import Outputable
 import ErrUtils
-import Panic
 import Platform
 import Util
 import DynFlags
+import Fingerprint
 
 import System.FilePath
 import System.IO
@@ -54,60 +56,15 @@ import System.Directory
 import SysTools.ExtraObj
 import SysTools.Info
 import SysTools.Tasks
-import Data.List
-
-#if defined(mingw32_HOST_OS)
-#if MIN_VERSION_Win32(2,5,0)
-import qualified System.Win32.Types as Win32
-#else
-import qualified System.Win32.Info as Win32
-#endif
-import Data.Char
-import Exception
-import Foreign
-import Foreign.C.String
-import System.Win32.Types (DWORD, LPTSTR, HANDLE)
-import System.Win32.Types (failIfNull, failIf, iNVALID_HANDLE_VALUE)
-import System.Win32.File (createFile,closeHandle, gENERIC_READ, fILE_SHARE_READ, oPEN_EXISTING, fILE_ATTRIBUTE_NORMAL, fILE_FLAG_BACKUP_SEMANTICS )
-import System.Win32.DLL (loadLibrary, getProcAddress)
-#endif
-
-#if defined(mingw32_HOST_OS)
-# if defined(i386_HOST_ARCH)
-#  define WINDOWS_CCONV stdcall
-# elif defined(x86_64_HOST_ARCH)
-#  define WINDOWS_CCONV ccall
-# else
-#  error Unknown mingw32 arch
-# endif
-#endif
+import SysTools.BaseDir
 
 {-
-How GHC finds its files
-~~~~~~~~~~~~~~~~~~~~~~~
-
-[Note topdir]
-
-GHC needs various support files (library packages, RTS etc), plus
-various auxiliary programs (cp, gcc, etc).  It starts by finding topdir,
-the root of GHC's support files
-
-On Unix:
-  - ghc always has a shell wrapper that passes a -B<dir> option
-
-On Windows:
-  - ghc never has a shell wrapper.
-  - we can find the location of the ghc binary, which is
-        $topdir/<foo>/<something>.exe
-    where <something> may be "ghc", "ghc-stage2", or similar
-  - we strip off the "<foo>/<something>.exe" to leave $topdir.
-
-from topdir we can find package.conf, ghc-asm, etc.
-
+Note [How GHC finds toolchain utilities]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 SysTools.initSysProgs figures out exactly where all the auxiliary programs
 are, and initialises mutable variables to make it easy to call them.
-To to this, it makes use of definitions in Config.hs, which is a Haskell
+To do this, it makes use of definitions in Config.hs, which is a Haskell
 file containing variables whose value is figured out by the build system.
 
 Config.hs contains two sorts of things
@@ -121,7 +78,6 @@ Config.hs contains two sorts of things
   cUNLIT_DIR   The *path* to the directory containing unlit, split etc
   cSPLIT_DIR   *relative* to the root of the build tree,
                    for use when running *in-place* in a build tree (only)
-
 
 
 ---------------------------------------------
@@ -154,30 +110,36 @@ stuff.
 ************************************************************************
 -}
 
-initLlvmTargets :: Maybe String
-                -> IO LlvmTargets
-initLlvmTargets mbMinusB
-  = do top_dir <- findTopDir mbMinusB
-       let llvmTargetsFile = top_dir </> "llvm-targets"
-       llvmTargetsStr <- readFile llvmTargetsFile
-       case maybeReadFuzzy llvmTargetsStr of
-         Just s -> return (fmap mkLlvmTarget <$> s)
-         Nothing -> pgmError ("Can't parse " ++ show llvmTargetsFile)
+initLlvmConfig :: String
+               -> IO LlvmConfig
+initLlvmConfig top_dir
+  = do
+      targets <- readAndParse "llvm-targets" mkLlvmTarget
+      passes <- readAndParse "llvm-passes" id
+      return (targets, passes)
   where
+    readAndParse name builder =
+      do let llvmConfigFile = top_dir </> name
+         llvmConfigStr <- readFile llvmConfigFile
+         case maybeReadFuzzy llvmConfigStr of
+           Just s -> return (fmap builder <$> s)
+           Nothing -> pgmError ("Can't parse " ++ show llvmConfigFile)
+
     mkLlvmTarget :: (String, String, String) -> LlvmTarget
     mkLlvmTarget (dl, cpu, attrs) = LlvmTarget dl cpu (words attrs)
 
 
-initSysTools :: Maybe String    -- Maybe TopDir path (without the '-B' prefix)
+initSysTools :: String          -- TopDir path
              -> IO Settings     -- Set all the mutable variables above, holding
                                 --      (a) the system programs
                                 --      (b) the package-config file
                                 --      (c) the GHC usage message
-initSysTools mbMinusB
-  = do top_dir <- findTopDir mbMinusB
-             -- see [Note topdir]
+initSysTools top_dir
+  = do       -- see Note [topdir: How GHC finds its files]
              -- NB: top_dir is assumed to be in standard Unix
              -- format, '/' separated
+       mtool_dir <- findToolDir top_dir
+             -- see Note [tooldir: How GHC finds mingw and perl on Windows]
 
        let settingsFile = top_dir </> "settings"
            platformConstantsFile = top_dir </> "platformConstants"
@@ -200,16 +162,9 @@ initSysTools mbMinusB
                                 pgmError ("Can't parse " ++
                                           show platformConstantsFile)
        let getSetting key = case lookup key mySettings of
-                            Just xs ->
-                                return $ case stripPrefix "$topdir" xs of
-                                         Just [] ->
-                                             top_dir
-                                         Just xs'@(c:_)
-                                          | isPathSeparator c ->
-                                             top_dir ++ xs'
-                                         _ ->
-                                             xs
+                            Just xs -> return $ expandTopDir top_dir xs
                             Nothing -> pgmError ("No entry for " ++ show key ++ " in " ++ show settingsFile)
+           getToolSetting key = expandToolDir mtool_dir <$> getSetting key
            getBooleanSetting key = case lookup key mySettings of
                                    Just "YES" -> return True
                                    Just "NO" -> return False
@@ -231,14 +186,15 @@ initSysTools mbMinusB
        targetHasSubsectionsViaSymbols <- readSetting "target has subsections via symbols"
        myExtraGccViaCFlags <- getSetting "GCC extra via C opts"
        -- On Windows, mingw is distributed with GHC,
-       -- so we look in TopDir/../mingw/bin
+       -- so we look in TopDir/../mingw/bin,
+       -- as well as TopDir/../../mingw/bin for hadrian.
        -- It would perhaps be nice to be able to override this
        -- with the settings file, but it would be a little fiddly
        -- to make that possible, so for now you can't.
-       gcc_prog <- getSetting "C compiler command"
+       gcc_prog <- getToolSetting "C compiler command"
        gcc_args_str <- getSetting "C compiler flags"
        gccSupportsNoPie <- getBooleanSetting "C compiler supports -no-pie"
-       cpp_prog <- getSetting "Haskell CPP command"
+       cpp_prog <- getToolSetting "Haskell CPP command"
        cpp_args_str <- getSetting "Haskell CPP flags"
        let unreg_gcc_args = if targetUnregisterised
                             then ["-DNO_REGS", "-DUSE_MINIINTERPRETER"]
@@ -256,7 +212,7 @@ initSysTools mbMinusB
        ldSupportsBuildId       <- getBooleanSetting "ld supports build-id"
        ldSupportsFilelist      <- getBooleanSetting "ld supports filelist"
        ldIsGnuLd               <- getBooleanSetting "ld is GNU ld"
-       perl_path <- getSetting "perl command"
+       perl_path <- getToolSetting "perl command"
 
        let pkgconfig_path = installed "package.conf.d"
            ghc_usage_msg_path  = installed "ghc-usage.txt"
@@ -269,14 +225,14 @@ initSysTools mbMinusB
              -- split is a Perl script
            split_script  = libexec cGHC_SPLIT_PGM
 
-       windres_path <- getSetting "windres command"
-       libtool_path <- getSetting "libtool command"
-       ar_path <- getSetting "ar command"
-       ranlib_path <- getSetting "ranlib command"
+       windres_path <- getToolSetting "windres command"
+       libtool_path <- getToolSetting "libtool command"
+       ar_path <- getToolSetting "ar command"
+       ranlib_path <- getToolSetting "ranlib command"
 
        tmpdir <- getTemporaryDirectory
 
-       touch_path <- getSetting "touch command"
+       touch_path <- getToolSetting "touch command"
 
        let -- On Win32 we don't want to rely on #!/bin/perl, so we prepend
            -- a call to Perl to get the invocation of split.
@@ -287,7 +243,7 @@ initSysTools mbMinusB
            (split_prog,  split_args)
              | isWindowsHost = (perl_path,    [Option split_script])
              | otherwise     = (split_script, [])
-       mkdll_prog <- getSetting "dllwrap command"
+       mkdll_prog <- getToolSetting "dllwrap command"
        let mkdll_args = []
 
        -- cpp is derived from gcc on all platforms
@@ -325,6 +281,7 @@ initSysTools mbMinusB
                     sTmpDir         = normalise tmpdir,
                     sGhcUsagePath   = ghc_usage_msg_path,
                     sGhciUsagePath  = ghci_usage_msg_path,
+                    sToolDir        = mtool_dir,
                     sTopDir         = top_dir,
                     sRawSettings    = mySettings,
                     sExtraGccViaCFlags = words myExtraGccViaCFlags,
@@ -355,6 +312,7 @@ initSysTools mbMinusB
                     sPgm_i   = iserv_prog,
                     sOpt_L       = [],
                     sOpt_P       = [],
+                    sOpt_P_fingerprint = fingerprint0,
                     sOpt_F       = [],
                     sOpt_c       = [],
                     sOpt_a       = [],
@@ -367,17 +325,6 @@ initSysTools mbMinusB
                     sPlatformConstants = platformConstants
              }
 
--- returns a Unix-format path (relying on getBaseDir to do so too)
-findTopDir :: Maybe String -- Maybe TopDir path (without the '-B' prefix).
-           -> IO String    -- TopDir (in Unix format '/' separated)
-findTopDir (Just minusb) = return (normalise minusb)
-findTopDir Nothing
-    = do -- Get directory of executable
-         maybe_exec_dir <- getBaseDir
-         case maybe_exec_dir of
-             -- "Just" on Windows, "Nothing" on unix
-             Nothing  -> throwGhcExceptionIO (InstallationError "missing -B<dir> option")
-             Just dir -> return dir
 
 {- Note [Windows stack usage]
 
@@ -441,98 +388,6 @@ copyWithHeader dflags purpose maybe_header from to = do
 *                                                                      *
 ************************************************************************
 -}
-
------------------------------------------------------------------------------
--- Define       getBaseDir     :: IO (Maybe String)
-
-getBaseDir :: IO (Maybe String)
-#if defined(mingw32_HOST_OS)
--- Assuming we are running ghc, accessed by path  $(stuff)/<foo>/ghc.exe,
--- return the path $(stuff)/lib.
-getBaseDir = try_size 2048 -- plenty, PATH_MAX is 512 under Win32.
-  where
-    try_size size = allocaArray (fromIntegral size) $ \buf -> do
-        ret <- c_GetModuleFileName nullPtr buf size
-        case ret of
-          0 -> return Nothing
-          _ | ret < size -> do
-                path <- peekCWString buf
-                real <- getFinalPath path -- try to resolve symlinks paths
-                let libdir = (rootDir . sanitize . maybe path id) real
-                exists <- doesDirectoryExist libdir
-                if exists
-                   then return $ Just libdir
-                   else fail path
-            | otherwise  -> try_size (size * 2)
-
-    -- getFinalPath returns paths in full raw form.
-    -- Unfortunately GHC isn't set up to handle these
-    -- So if the call succeeded, we need to drop the
-    -- \\?\ prefix.
-    sanitize s = if "\\\\?\\" `isPrefixOf` s
-                    then drop 4 s
-                    else s
-
-    rootDir s = case splitFileName $ normalise s of
-                (d, ghc_exe)
-                 | lower ghc_exe `elem` ["ghc.exe",
-                                         "ghc-stage1.exe",
-                                         "ghc-stage2.exe",
-                                         "ghc-stage3.exe"] ->
-                    case splitFileName $ takeDirectory d of
-                    -- ghc is in $topdir/bin/ghc.exe
-                    (d', _) -> takeDirectory d' </> "lib"
-                _ -> fail s
-
-    fail s = panic ("can't decompose ghc.exe path: " ++ show s)
-    lower = map toLower
-
-foreign import WINDOWS_CCONV unsafe "windows.h GetModuleFileNameW"
-  c_GetModuleFileName :: Ptr () -> CWString -> Word32 -> IO Word32
-
--- Attempt to resolve symlinks in order to find the actual location GHC
--- is located at. See Trac #11759.
-getFinalPath :: FilePath -> IO (Maybe FilePath)
-getFinalPath name = do
-    dllHwnd <- failIfNull "LoadLibrary"     $ loadLibrary "kernel32.dll"
-    -- Note: The API GetFinalPathNameByHandleW is only available starting from Windows Vista.
-    -- This means that we can't bind directly to it since it may be missing.
-    -- Instead try to find it's address at runtime and if we don't succeed consider the
-    -- function failed.
-    addr_m  <- (fmap Just $ failIfNull "getProcAddress" $ getProcAddress dllHwnd "GetFinalPathNameByHandleW")
-                  `catch` (\(_ :: SomeException) -> return Nothing)
-    case addr_m of
-      Nothing   -> return Nothing
-      Just addr -> do handle  <- failIf (==iNVALID_HANDLE_VALUE) "CreateFile"
-                                        $ createFile name
-                                                     gENERIC_READ
-                                                     fILE_SHARE_READ
-                                                     Nothing
-                                                     oPEN_EXISTING
-                                                     (fILE_ATTRIBUTE_NORMAL .|. fILE_FLAG_BACKUP_SEMANTICS)
-                                                     Nothing
-                      let fnPtr = makeGetFinalPathNameByHandle $ castPtrToFunPtr addr
-                      -- First try to resolve the path to get the actual path
-                      -- of any symlinks or other file system redirections that
-                      -- may be in place. However this function can fail, and in
-                      -- the event it does fail, we need to try using the
-                      -- original path and see if we can decompose that.
-                      -- If the call fails Win32.try will raise an exception
-                      -- that needs to be caught. See #14159
-                      path    <- (Win32.try "GetFinalPathName"
-                                    (\buf len -> fnPtr handle buf len 0) 512
-                                    `finally` closeHandle handle)
-                                `catch`
-                                 (\(_ :: IOException) -> return name)
-                      return $ Just path
-
-type GetFinalPath = HANDLE -> LPTSTR -> DWORD -> DWORD -> IO DWORD
-
-foreign import WINDOWS_CCONV unsafe "dynamic"
-  makeGetFinalPathNameByHandle :: FunPtr GetFinalPath -> GetFinalPath
-#else
-getBaseDir = return Nothing
-#endif
 
 linkDynLib :: DynFlags -> [String] -> [InstalledUnitId] -> IO ()
 linkDynLib dflags0 o_files dep_packages
@@ -683,6 +538,7 @@ linkDynLib dflags0 o_files dep_packages
                  ++ map Option pkg_lib_path_opts
                  ++ map Option pkg_link_opts
                  ++ map Option pkg_framework_opts
+                 ++ [ Option "-Wl,-dead_strip_dylibs" ]
               )
         _ -> do
             -------------------------------------------------------------------
@@ -690,9 +546,12 @@ linkDynLib dflags0 o_files dep_packages
             -------------------------------------------------------------------
 
             let output_fn = case o_file of { Just s -> s; Nothing -> "a.out"; }
+                unregisterised = platformUnregisterised (targetPlatform dflags)
             let bsymbolicFlag = -- we need symbolic linking to resolve
-                                -- non-PIC intra-package-relocations
-                                ["-Wl,-Bsymbolic"]
+                                -- non-PIC intra-package-relocations for
+                                -- performance (where symbolic linking works)
+                                -- See Note [-Bsymbolic assumptions by GHC]
+                                ["-Wl,-Bsymbolic" | not unregisterised]
 
             runLink dflags (
                     map Option verbFlags
@@ -749,3 +608,27 @@ getFrameworkOpts dflags platform
     -- reverse because they're added in reverse order from the cmd line:
     framework_opts = concat [ ["-framework", fw]
                             | fw <- reverse frameworks ]
+
+{-
+Note [-Bsymbolic assumptions by GHC]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+GHC has a few assumptions about interaction of relocations in NCG and linker:
+
+1. -Bsymbolic resolves internal references when the shared library is linked,
+   which is important for performance.
+2. When there is a reference to data in a shared library from the main program,
+   the runtime linker relocates the data object into the main program using an
+   R_*_COPY relocation.
+3. If we used -Bsymbolic, then this results in multiple copies of the data
+   object, because some references have already been resolved to point to the
+   original instance. This is bad!
+
+We work around [3.] for native compiled code by avoiding the generation of
+R_*_COPY relocations.
+
+Unregisterised compiler can't evade R_*_COPY relocations easily thus we disable
+-Bsymbolic linking there.
+
+See related Trac tickets: #4210, #15338
+-}

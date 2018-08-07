@@ -68,6 +68,7 @@ module Lexer (
    explicitNamespacesEnabled,
    patternSynonymsEnabled,
    sccProfilingOn, hpcEnabled,
+   starIsTypeEnabled,
    addWarning,
    lexTokenStream,
    addAnnotation,AddAnn,addAnnsAt,mkParensApiAnn,
@@ -105,7 +106,7 @@ import Outputable
 import StringBuffer
 import FastString
 import UniqFM
-import Util             ( readRational )
+import Util             ( readRational, readHexRational )
 
 -- compiler/main
 import ErrUtils
@@ -129,38 +130,38 @@ import ApiAnnotation
 
 -- NB: The logic behind these definitions is also reflected in basicTypes/Lexeme.hs
 -- Any changes here should likely be reflected there.
-$unispace    = \x05 -- Trick Alex into handling Unicode. See alexGetByte.
+$unispace    = \x05 -- Trick Alex into handling Unicode. See [Unicode in Alex].
 $nl          = [\n\r\f]
 $whitechar   = [$nl\v\ $unispace]
 $white_no_nl = $whitechar # \n -- TODO #8424
 $tab         = \t
 
 $ascdigit  = 0-9
-$unidigit  = \x03 -- Trick Alex into handling Unicode. See alexGetByte.
+$unidigit  = \x03 -- Trick Alex into handling Unicode. See [Unicode in Alex].
 $decdigit  = $ascdigit -- for now, should really be $digit (ToDo)
 $digit     = [$ascdigit $unidigit]
 
 $special   = [\(\)\,\;\[\]\`\{\}]
 $ascsymbol = [\!\#\$\%\&\*\+\.\/\<\=\>\?\@\\\^\|\-\~\:]
-$unisymbol = \x04 -- Trick Alex into handling Unicode. See alexGetByte.
+$unisymbol = \x04 -- Trick Alex into handling Unicode. See [Unicode in Alex].
 $symbol    = [$ascsymbol $unisymbol] # [$special \_\"\']
 
-$unilarge  = \x01 -- Trick Alex into handling Unicode. See alexGetByte.
+$unilarge  = \x01 -- Trick Alex into handling Unicode. See [Unicode in Alex].
 $asclarge  = [A-Z]
 $large     = [$asclarge $unilarge]
 
-$unismall  = \x02 -- Trick Alex into handling Unicode. See alexGetByte.
+$unismall  = \x02 -- Trick Alex into handling Unicode. See [Unicode in Alex].
 $ascsmall  = [a-z]
 $small     = [$ascsmall $unismall \_]
 
-$unigraphic = \x06 -- Trick Alex into handling Unicode. See alexGetByte.
+$unigraphic = \x06 -- Trick Alex into handling Unicode. See [Unicode in Alex].
 $graphic   = [$small $large $symbol $digit $special $unigraphic \"\']
 
 $binit     = 0-1
 $octit     = 0-7
 $hexit     = [$decdigit A-F a-f]
 
-$uniidchar = \x07 -- Trick Alex into handling Unicode. See alexGetByte.
+$uniidchar = \x07 -- Trick Alex into handling Unicode. See [Unicode in Alex].
 $idchar    = [$small $large $digit $uniidchar \']
 
 $pragmachar = [$small $large $digit]
@@ -177,11 +178,14 @@ $docsym    = [\| \^ \* \$]
 @varsym    = ($symbol # \:) $symbol*  -- variable (operator) symbol
 @consym    = \: $symbol*              -- constructor (operator) symbol
 
-@decimal     = $decdigit+
-@binary      = $binit+
-@octal       = $octit+
-@hexadecimal = $hexit+
-@exponent    = [eE] [\-\+]? @decimal
+-- See Note [Lexing NumericUnderscores extension] and #14473
+@numspc       = _*                   -- numeric spacer (#14473)
+@decimal      = $decdigit(@numspc $decdigit)*
+@binary       = $binit(@numspc $binit)*
+@octal        = $octit(@numspc $octit)*
+@hexadecimal  = $hexit(@numspc $hexit)*
+@exponent     = @numspc [eE] [\-\+]? @decimal
+@bin_exponent = @numspc [pP] [\-\+]? @decimal
 
 @qual = (@conid \.)+
 @qvarid = @qual @varid
@@ -189,7 +193,8 @@ $docsym    = [\| \^ \* \$]
 @qvarsym = @qual @varsym
 @qconsym = @qual @consym
 
-@floating_point = @decimal \. @decimal @exponent? | @decimal @exponent
+@floating_point = @numspc @decimal \. @decimal @exponent? | @numspc @decimal @exponent
+@hex_floating_point = @numspc @hexadecimal \. @hexadecimal @bin_exponent? | @numspc @hexadecimal @bin_exponent
 
 -- normal signed numerical literals can only be explicitly negative,
 -- not explicitly positive (contrast @exponent)
@@ -367,11 +372,6 @@ $tab          { warnTab }
 -- "special" symbols
 
 <0> {
-  "[:" / { ifExtension parrEnabled }    { token ITopabrack }
-  ":]" / { ifExtension parrEnabled }    { token ITcpabrack }
-}
-
-<0> {
   "[|"        / { ifExtension thQuotesEnabled } { token (ITopenExpQuote NoE
                                                                 NormalSyntax) }
   "[||"       / { ifExtension thQuotesEnabled } { token (ITopenTExpQuote NoE) }
@@ -483,21 +483,34 @@ $tab          { warnTab }
 
 -- For the normal boxed literals we need to be careful
 -- when trying to be close to Haskell98
+
+-- Note [Lexing NumericUnderscores extension] (#14473)
+--
+-- NumericUnderscores extension allows underscores in numeric literals.
+-- Multiple underscores are represented with @numspc macro.
+-- To be simpler, we have only the definitions with underscores.
+-- And then we have a separate function (tok_integral and tok_frac)
+-- that validates the literals.
+-- If extensions are not enabled, check that there are no underscores.
+--
 <0> {
   -- Normal integral literals (:: Num a => a, from Integer)
   @decimal                                                               { tok_num positive 0 0 decimal }
-  0[bB] @binary                / { ifExtension binaryLiteralsEnabled }   { tok_num positive 2 2 binary }
-  0[oO] @octal                                                           { tok_num positive 2 2 octal }
-  0[xX] @hexadecimal                                                     { tok_num positive 2 2 hexadecimal }
+  0[bB] @numspc @binary        / { ifExtension binaryLiteralsEnabled }   { tok_num positive 2 2 binary }
+  0[oO] @numspc @octal                                                   { tok_num positive 2 2 octal }
+  0[xX] @numspc @hexadecimal                                             { tok_num positive 2 2 hexadecimal }
   @negative @decimal           / { ifExtension negativeLiteralsEnabled } { tok_num negative 1 1 decimal }
-  @negative 0[bB] @binary      / { ifExtension negativeLiteralsEnabled `alexAndPred`
-                                   ifExtension binaryLiteralsEnabled }   { tok_num negative 3 3 binary }
-  @negative 0[oO] @octal       / { ifExtension negativeLiteralsEnabled } { tok_num negative 3 3 octal }
-  @negative 0[xX] @hexadecimal / { ifExtension negativeLiteralsEnabled } { tok_num negative 3 3 hexadecimal }
+  @negative 0[bB] @numspc @binary  / { ifExtension negativeLiteralsEnabled `alexAndPred`
+                                       ifExtension binaryLiteralsEnabled }   { tok_num negative 3 3 binary }
+  @negative 0[oO] @numspc @octal   / { ifExtension negativeLiteralsEnabled } { tok_num negative 3 3 octal }
+  @negative 0[xX] @numspc @hexadecimal / { ifExtension negativeLiteralsEnabled } { tok_num negative 3 3 hexadecimal }
 
   -- Normal rational literals (:: Fractional a => a, from Rational)
-  @floating_point                                                        { strtoken tok_float }
-  @negative @floating_point    / { ifExtension negativeLiteralsEnabled } { strtoken tok_float }
+  @floating_point                                                        { tok_frac 0 tok_float }
+  @negative @floating_point    / { ifExtension negativeLiteralsEnabled } { tok_frac 0 tok_float }
+  0[xX] @numspc @hex_floating_point     / { ifExtension hexFloatLiteralsEnabled } { tok_frac 0 tok_hex_float }
+  @negative 0[xX] @numspc @hex_floating_point / { ifExtension hexFloatLiteralsEnabled `alexAndPred`
+                                                  ifExtension negativeLiteralsEnabled } { tok_frac 0 tok_hex_float }
 }
 
 <0> {
@@ -505,26 +518,26 @@ $tab          { warnTab }
   -- It's simpler (and faster?) to give separate cases to the negatives,
   -- especially considering octal/hexadecimal prefixes.
   @decimal                     \# / { ifExtension magicHashEnabled } { tok_primint positive 0 1 decimal }
-  0[bB] @binary                \# / { ifExtension magicHashEnabled `alexAndPred`
+  0[bB] @numspc @binary        \# / { ifExtension magicHashEnabled `alexAndPred`
                                       ifExtension binaryLiteralsEnabled } { tok_primint positive 2 3 binary }
-  0[oO] @octal                 \# / { ifExtension magicHashEnabled } { tok_primint positive 2 3 octal }
-  0[xX] @hexadecimal           \# / { ifExtension magicHashEnabled } { tok_primint positive 2 3 hexadecimal }
+  0[oO] @numspc @octal         \# / { ifExtension magicHashEnabled } { tok_primint positive 2 3 octal }
+  0[xX] @numspc @hexadecimal   \# / { ifExtension magicHashEnabled } { tok_primint positive 2 3 hexadecimal }
   @negative @decimal           \# / { ifExtension magicHashEnabled } { tok_primint negative 1 2 decimal }
-  @negative 0[bB] @binary      \# / { ifExtension magicHashEnabled `alexAndPred`
-                                      ifExtension binaryLiteralsEnabled } { tok_primint negative 3 4 binary }
-  @negative 0[oO] @octal       \# / { ifExtension magicHashEnabled } { tok_primint negative 3 4 octal }
-  @negative 0[xX] @hexadecimal \# / { ifExtension magicHashEnabled } { tok_primint negative 3 4 hexadecimal }
+  @negative 0[bB] @numspc @binary  \# / { ifExtension magicHashEnabled `alexAndPred`
+                                          ifExtension binaryLiteralsEnabled } { tok_primint negative 3 4 binary }
+  @negative 0[oO] @numspc @octal   \# / { ifExtension magicHashEnabled } { tok_primint negative 3 4 octal }
+  @negative 0[xX] @numspc @hexadecimal \# / { ifExtension magicHashEnabled } { tok_primint negative 3 4 hexadecimal }
 
   @decimal                     \# \# / { ifExtension magicHashEnabled } { tok_primword 0 2 decimal }
-  0[bB] @binary                \# \# / { ifExtension magicHashEnabled `alexAndPred`
+  0[bB] @numspc @binary        \# \# / { ifExtension magicHashEnabled `alexAndPred`
                                          ifExtension binaryLiteralsEnabled } { tok_primword 2 4 binary }
-  0[oO] @octal                 \# \# / { ifExtension magicHashEnabled } { tok_primword 2 4 octal }
-  0[xX] @hexadecimal           \# \# / { ifExtension magicHashEnabled } { tok_primword 2 4 hexadecimal }
+  0[oO] @numspc @octal         \# \# / { ifExtension magicHashEnabled } { tok_primword 2 4 octal }
+  0[xX] @numspc @hexadecimal   \# \# / { ifExtension magicHashEnabled } { tok_primword 2 4 hexadecimal }
 
   -- Unboxed floats and doubles (:: Float#, :: Double#)
   -- prim_{float,double} work with signed literals
-  @signed @floating_point \# / { ifExtension magicHashEnabled } { init_strtoken 1 tok_primfloat }
-  @signed @floating_point \# \# / { ifExtension magicHashEnabled } { init_strtoken 2 tok_primdouble }
+  @signed @floating_point \# / { ifExtension magicHashEnabled } { tok_frac 1 tok_primfloat }
+  @signed @floating_point \# \# / { ifExtension magicHashEnabled } { tok_frac 2 tok_primdouble }
 }
 
 -- Strings and chars are lexed by hand-written code.  The reason is
@@ -624,6 +637,7 @@ data Token
   | ITstatic
   | ITstock
   | ITanyclass
+  | ITvia
 
   -- Backpack tokens
   | ITunit
@@ -639,7 +653,8 @@ data Token
   | ITrules_prag        SourceText
   | ITwarning_prag      SourceText
   | ITdeprecated_prag   SourceText
-  | ITline_prag
+  | ITline_prag         SourceText  -- not usually produced, see 'use_pos_prags'
+  | ITcolumn_prag       SourceText  -- not usually produced, see 'use_pos_prags'
   | ITscc_prag          SourceText
   | ITgenerated_prag    SourceText
   | ITcore_prag         SourceText         -- hdaume: core annotations
@@ -651,9 +666,6 @@ data Token
   | IToptions_prag String
   | ITinclude_prag String
   | ITlanguage_prag
-  | ITvect_prag         SourceText
-  | ITvect_scalar_prag  SourceText
-  | ITnovect_prag       SourceText
   | ITminimal_prag      SourceText
   | IToverlappable_prag SourceText  -- instance overlap mode
   | IToverlapping_prag  SourceText  -- instance overlap mode
@@ -672,10 +684,10 @@ data Token
   | ITrarrow            IsUnicodeSyntax
   | ITat
   | ITtilde
-  | ITtildehsh
   | ITdarrow            IsUnicodeSyntax
   | ITminus
   | ITbang
+  | ITstar              IsUnicodeSyntax
   | ITdot
 
   | ITbiglam                    -- GHC-extension symbols
@@ -829,6 +841,7 @@ reservedWordsFM = listToUFM $
          ( "static",         ITstatic,        0 ),
          ( "stock",          ITstock,         0 ),
          ( "anyclass",       ITanyclass,      0 ),
+         ( "via",            ITvia,           0 ),
          ( "group",          ITgroup,         xbit TransformComprehensionsBit),
          ( "by",             ITby,            xbit TransformComprehensionsBit),
          ( "using",          ITusing,         xbit TransformComprehensionsBit),
@@ -892,10 +905,11 @@ reservedSymsFM = listToUFM $
        ,("->",  ITrarrow NormalSyntax, always)
        ,("@",   ITat,                  always)
        ,("~",   ITtilde,               always)
-       ,("~#",  ITtildehsh,            magicHashEnabled)
        ,("=>",  ITdarrow NormalSyntax, always)
        ,("-",   ITminus,               always)
        ,("!",   ITbang,                always)
+
+       ,("*", ITstar NormalSyntax, starIsTypeEnabled)
 
         -- For 'forall a . t'
        ,(".", ITdot,  always) -- \i -> explicitForallEnabled i || inRulePrag i)
@@ -919,6 +933,8 @@ reservedSymsFM = listToUFM $
                                 \i -> unicodeSyntaxEnabled i && arrowsEnabled i)
        ,("⤜",   ITRarrowtail UnicodeSyntax,
                                 \i -> unicodeSyntaxEnabled i && arrowsEnabled i)
+       ,("★",   ITstar UnicodeSyntax,
+                  \i -> unicodeSyntaxEnabled i && starIsTypeEnabled i)
 
         -- ToDo: ideally, → and ∷ should be "specials", so that they cannot
         -- form part of a large operator.  This would let us have a better
@@ -953,11 +969,6 @@ skip_two_varid f span buf len
 strtoken :: (String -> Token) -> Action
 strtoken f span buf len =
   return (L span $! (f $! lexemeToString buf len))
-
-init_strtoken :: Int -> (String -> Token) -> Action
--- like strtoken, but drops the last N character(s)
-init_strtoken drop f span buf len =
-  return (L span $! (f $! lexemeToString buf (len-drop)))
 
 begin :: Int -> Action
 begin code _span _str _len = do pushLexState code; lexToken
@@ -1151,6 +1162,27 @@ rulePrag span buf len = do
   let !src = lexemeToString buf len
   return (L span (ITrules_prag (SourceText src)))
 
+-- When 'use_pos_prags' is not set, it is expected that we emit a token instead
+-- of updating the position in 'PState'
+linePrag :: Action
+linePrag span buf len = do
+  ps <- getPState
+  if use_pos_prags ps
+    then begin line_prag2 span buf len
+    else let !src = lexemeToString buf len
+         in return (L span (ITline_prag (SourceText src)))
+
+-- When 'use_pos_prags' is not set, it is expected that we emit a token instead
+-- of updating the position in 'PState'
+columnPrag :: Action
+columnPrag span buf len = do
+  ps <- getPState
+  let !src = lexemeToString buf len
+  if use_pos_prags ps
+    then begin column_prag span buf len
+    else let !src = lexemeToString buf len
+         in return (L span (ITcolumn_prag (SourceText src)))
+
 endPrag :: Action
 endPrag span _buf _len = do
   setExts (.&. complement (xbit InRulePragBit))
@@ -1226,15 +1258,14 @@ varid :: Action
 varid span buf len =
   case lookupUFM reservedWordsFM fs of
     Just (ITcase, _) -> do
-      lambdaCase <- extension lambdaCaseEnabled
-      keyword <- if lambdaCase
-                 then do
-                   lastTk <- getLastTk
-                   return $ case lastTk of
-                     Just ITlam -> ITlcase
-                     _          -> ITcase
-                 else
-                   return ITcase
+      lastTk <- getLastTk
+      keyword <- case lastTk of
+        Just ITlam -> do
+          lambdaCase <- extension lambdaCaseEnabled
+          if lambdaCase
+            then return ITlcase
+            else failMsgP "Illegal lambda-case (use -XLambdaCase)"
+        _ -> return ITcase
       maybe_layout keyword
       return $ L span keyword
     Just (ITstatic, _) -> do
@@ -1288,8 +1319,12 @@ tok_integral :: (SourceText -> Integer -> Token)
              -> Int -> Int
              -> (Integer, (Char -> Int))
              -> Action
-tok_integral itint transint transbuf translen (radix,char_to_int) span buf len
- = return $ L span $ itint (SourceText $ lexemeToString buf len)
+tok_integral itint transint transbuf translen (radix,char_to_int) span buf len = do
+  numericUnderscores <- extension numericUnderscoresEnabled  -- #14473
+  let src = lexemeToString buf len
+  if (not numericUnderscores) && ('_' `elem` src)
+    then failMsgP "Use NumericUnderscores to allow underscores in integer literals"
+    else return $ L span $ itint (SourceText src)
        $! transint $ parseUnsignedInteger
        (offsetBytes transbuf buf) (subtract translen len) radix char_to_int
 
@@ -1321,15 +1356,32 @@ octal = (8,octDecDigit)
 hexadecimal = (16,hexDigit)
 
 -- readRational can understand negative rationals, exponents, everything.
+tok_frac :: Int -> (String -> Token) -> Action
+tok_frac drop f span buf len = do
+  numericUnderscores <- extension numericUnderscoresEnabled  -- #14473
+  let src = lexemeToString buf (len-drop)
+  if (not numericUnderscores) && ('_' `elem` src)
+    then failMsgP "Use NumericUnderscores to allow underscores in floating literals"
+    else return (L span $! (f $! src))
+
 tok_float, tok_primfloat, tok_primdouble :: String -> Token
-tok_float      str  = ITrational   $! readFractionalLit str
-tok_primfloat  str  = ITprimfloat  $! readFractionalLit str
-tok_primdouble str  = ITprimdouble $! readFractionalLit str
+tok_float        str = ITrational   $! readFractionalLit str
+tok_hex_float    str = ITrational   $! readHexFractionalLit str
+tok_primfloat    str = ITprimfloat  $! readFractionalLit str
+tok_primdouble   str = ITprimdouble $! readFractionalLit str
 
 readFractionalLit :: String -> FractionalLit
 readFractionalLit str = ((FL $! (SourceText str)) $! is_neg) $! readRational str
                         where is_neg = case str of ('-':_) -> True
                                                    _       -> False
+readHexFractionalLit :: String -> FractionalLit
+readHexFractionalLit str =
+  FL { fl_text  = SourceText str
+     , fl_neg   = case str of
+                    '-' : _ -> True
+                    _       -> False
+     , fl_value = readHexRational str
+     }
 
 -- -----------------------------------------------------------------------------
 -- Layout processing
@@ -1875,6 +1927,10 @@ data PState = PState {
         -- token doesn't need to close anything:
         alr_justClosedExplicitLetBlock :: Bool,
 
+        -- If this is enabled, '{-# LINE ... -#}' and '{-# COLUMN ... #-}'
+        -- update the 'loc' field. Otherwise, those pragmas are lexed as tokens.
+        use_pos_prags :: Bool,
+
         -- The next three are used to implement Annotations giving the
         -- locations of 'noise' tokens in the source, so that users of
         -- the GHC API can do source to source conversions.
@@ -1990,27 +2046,29 @@ getLastTk = P $ \s@(PState { last_tk = last_tk }) -> POk s last_tk
 
 data AlexInput = AI RealSrcLoc StringBuffer
 
-alexInputPrevChar :: AlexInput -> Char
-alexInputPrevChar (AI _ buf) = prevChar buf '\n'
+{-
+Note [Unicode in Alex]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Although newer versions of Alex support unicode, this grammar is processed with
+the old style '--latin1' behaviour. This means that when implementing the
+functions
 
--- backwards compatibility for Alex 2.x
-alexGetChar :: AlexInput -> Maybe (Char,AlexInput)
-alexGetChar inp = case alexGetByte inp of
-                    Nothing    -> Nothing
-                    Just (b,i) -> c `seq` Just (c,i)
-                       where c = chr $ fromIntegral b
+    alexGetByte       :: AlexInput -> Maybe (Word8,AlexInput)
+    alexInputPrevChar :: AlexInput -> Char
 
-alexGetByte :: AlexInput -> Maybe (Word8,AlexInput)
-alexGetByte (AI loc s)
-  | atEnd s   = Nothing
-  | otherwise = byte `seq` loc' `seq` s' `seq`
-                --trace (show (ord c)) $
-                Just (byte, (AI loc' s'))
-  where (c,s') = nextChar s
-        loc'   = advanceSrcLoc loc c
-        byte   = fromIntegral $ ord adj_c
+which Alex uses to take apart our 'AlexInput', we must
 
-        non_graphic     = '\x00'
+  * return a latin1 character in the 'Word8' that 'alexGetByte' expects
+  * return a latin1 character in 'alexInputPrevChar'.
+
+We handle this in 'adjustChar' by squishing entire classes of unicode
+characters into single bytes.
+-}
+
+{-# INLINE adjustChar #-}
+adjustChar :: Char -> Word8
+adjustChar c = fromIntegral $ ord adj_c
+  where non_graphic     = '\x00'
         upper           = '\x01'
         lower           = '\x02'
         digit           = '\x03'
@@ -2055,6 +2113,32 @@ alexGetByte (AI loc s)
                   OtherSymbol           -> symbol
                   Space                 -> space
                   _other                -> non_graphic
+
+-- Getting the previous 'Char' isn't enough here - we need to convert it into
+-- the same format that 'alexGetByte' would have produced.
+--
+-- See Note [Unicode in Alex] and #13986.
+alexInputPrevChar :: AlexInput -> Char
+alexInputPrevChar (AI _ buf) = chr (fromIntegral (adjustChar pc))
+  where pc = prevChar buf '\n'
+
+-- backwards compatibility for Alex 2.x
+alexGetChar :: AlexInput -> Maybe (Char,AlexInput)
+alexGetChar inp = case alexGetByte inp of
+                    Nothing    -> Nothing
+                    Just (b,i) -> c `seq` Just (c,i)
+                       where c = chr $ fromIntegral b
+
+-- See Note [Unicode in Alex]
+alexGetByte :: AlexInput -> Maybe (Word8,AlexInput)
+alexGetByte (AI loc s)
+  | atEnd s   = Nothing
+  | otherwise = byte `seq` loc' `seq` s' `seq`
+                --trace (show (ord c)) $
+                Just (byte, (AI loc' s'))
+  where (c,s') = nextChar s
+        loc'   = advanceSrcLoc loc c
+        byte   = adjustChar c
 
 -- This version does not squash unicode characters, it is used when
 -- lexing strings.
@@ -2166,7 +2250,6 @@ data ExtBits
   = FfiBit
   | InterruptibleFfiBit
   | CApiFfiBit
-  | ParrBit
   | ArrowsBit
   | CopatternsBit
   | ThBit
@@ -2199,15 +2282,16 @@ data ExtBits
   | LambdaCaseBit
   | BinaryLiteralsBit
   | NegativeLiteralsBit
+  | HexFloatLiteralsBit
   | TypeApplicationsBit
   | StaticPointersBit
+  | NumericUnderscoresBit
+  | StarIsTypeBit
   deriving Enum
 
 
 always :: ExtsBitmap -> Bool
 always           _     = True
-parrEnabled :: ExtsBitmap -> Bool
-parrEnabled = xtest ParrBit
 arrowsEnabled :: ExtsBitmap -> Bool
 arrowsEnabled = xtest ArrowsBit
 copatternsEnabled :: ExtsBitmap -> Bool
@@ -2263,12 +2347,18 @@ binaryLiteralsEnabled :: ExtsBitmap -> Bool
 binaryLiteralsEnabled = xtest BinaryLiteralsBit
 negativeLiteralsEnabled :: ExtsBitmap -> Bool
 negativeLiteralsEnabled = xtest NegativeLiteralsBit
+hexFloatLiteralsEnabled :: ExtsBitmap -> Bool
+hexFloatLiteralsEnabled = xtest HexFloatLiteralsBit
 patternSynonymsEnabled :: ExtsBitmap -> Bool
 patternSynonymsEnabled = xtest PatternSynonymsBit
 typeApplicationEnabled :: ExtsBitmap -> Bool
 typeApplicationEnabled = xtest TypeApplicationsBit
 staticPointersEnabled :: ExtsBitmap -> Bool
 staticPointersEnabled = xtest StaticPointersBit
+numericUnderscoresEnabled :: ExtsBitmap -> Bool
+numericUnderscoresEnabled = xtest NumericUnderscoresBit
+starIsTypeEnabled :: ExtsBitmap -> Bool
+starIsTypeEnabled = xtest StarIsTypeBit
 
 -- PState for parsing options pragmas
 --
@@ -2287,47 +2377,56 @@ mkParserFlags flags =
     , pExtsBitmap = bitmap
     }
   where
-      bitmap =     FfiBit                      `setBitIf` xopt LangExt.ForeignFunctionInterface flags
-               .|. InterruptibleFfiBit         `setBitIf` xopt LangExt.InterruptibleFFI         flags
-               .|. CApiFfiBit                  `setBitIf` xopt LangExt.CApiFFI                  flags
-               .|. ParrBit                     `setBitIf` xopt LangExt.ParallelArrays           flags
-               .|. ArrowsBit                   `setBitIf` xopt LangExt.Arrows                   flags
-               .|. CopatternsBit               `setBitIf` xopt LangExt.Copatterns               flags
-               .|. ThBit                       `setBitIf` xopt LangExt.TemplateHaskell          flags
-               .|. ThQuotesBit                 `setBitIf` xopt LangExt.TemplateHaskellQuotes    flags
-               .|. QqBit                       `setBitIf` xopt LangExt.QuasiQuotes              flags
-               .|. IpBit                       `setBitIf` xopt LangExt.ImplicitParams           flags
-               .|. OverloadedLabelsBit         `setBitIf` xopt LangExt.OverloadedLabels         flags
-               .|. ExplicitForallBit           `setBitIf` xopt LangExt.ExplicitForAll           flags
-               .|. BangPatBit                  `setBitIf` xopt LangExt.BangPatterns             flags
-               .|. HaddockBit                  `setBitIf` gopt Opt_Haddock                      flags
-               .|. MagicHashBit                `setBitIf` xopt LangExt.MagicHash                flags
-               .|. RecursiveDoBit              `setBitIf` xopt LangExt.RecursiveDo              flags
-               .|. UnicodeSyntaxBit            `setBitIf` xopt LangExt.UnicodeSyntax            flags
-               .|. UnboxedTuplesBit            `setBitIf` xopt LangExt.UnboxedTuples            flags
-               .|. UnboxedSumsBit              `setBitIf` xopt LangExt.UnboxedSums              flags
-               .|. DatatypeContextsBit         `setBitIf` xopt LangExt.DatatypeContexts         flags
-               .|. TransformComprehensionsBit  `setBitIf` xopt LangExt.TransformListComp        flags
-               .|. TransformComprehensionsBit  `setBitIf` xopt LangExt.MonadComprehensions      flags
-               .|. RawTokenStreamBit           `setBitIf` gopt Opt_KeepRawTokenStream           flags
-               .|. HpcBit                      `setBitIf` gopt Opt_Hpc                          flags
-               .|. AlternativeLayoutRuleBit    `setBitIf` xopt LangExt.AlternativeLayoutRule    flags
-               .|. RelaxedLayoutBit            `setBitIf` xopt LangExt.RelaxedLayout            flags
-               .|. SccProfilingOnBit           `setBitIf` gopt Opt_SccProfilingOn               flags
-               .|. NondecreasingIndentationBit `setBitIf` xopt LangExt.NondecreasingIndentation flags
-               .|. SafeHaskellBit              `setBitIf` safeImportsOn                         flags
-               .|. TraditionalRecordSyntaxBit  `setBitIf` xopt LangExt.TraditionalRecordSyntax  flags
-               .|. ExplicitNamespacesBit       `setBitIf` xopt LangExt.ExplicitNamespaces flags
-               .|. LambdaCaseBit               `setBitIf` xopt LangExt.LambdaCase               flags
-               .|. BinaryLiteralsBit           `setBitIf` xopt LangExt.BinaryLiterals           flags
-               .|. NegativeLiteralsBit         `setBitIf` xopt LangExt.NegativeLiterals         flags
-               .|. PatternSynonymsBit          `setBitIf` xopt LangExt.PatternSynonyms          flags
-               .|. TypeApplicationsBit         `setBitIf` xopt LangExt.TypeApplications         flags
-               .|. StaticPointersBit           `setBitIf` xopt LangExt.StaticPointers           flags
+    bitmap = safeHaskellBit .|. langExtBits .|. optBits
+    safeHaskellBit =
+          SafeHaskellBit `setBitIf` safeImportsOn flags
+    langExtBits =
+          FfiBit                      `xoptBit` LangExt.ForeignFunctionInterface
+      .|. InterruptibleFfiBit         `xoptBit` LangExt.InterruptibleFFI
+      .|. CApiFfiBit                  `xoptBit` LangExt.CApiFFI
+      .|. ArrowsBit                   `xoptBit` LangExt.Arrows
+      .|. CopatternsBit               `setBitIf` xopt LangExt.Copatterns               flags
+      .|. ThBit                       `xoptBit` LangExt.TemplateHaskell
+      .|. ThQuotesBit                 `xoptBit` LangExt.TemplateHaskellQuotes
+      .|. QqBit                       `xoptBit` LangExt.QuasiQuotes
+      .|. IpBit                       `xoptBit` LangExt.ImplicitParams
+      .|. OverloadedLabelsBit         `xoptBit` LangExt.OverloadedLabels
+      .|. ExplicitForallBit           `xoptBit` LangExt.ExplicitForAll
+      .|. BangPatBit                  `xoptBit` LangExt.BangPatterns
+      .|. MagicHashBit                `xoptBit` LangExt.MagicHash
+      .|. RecursiveDoBit              `xoptBit` LangExt.RecursiveDo
+      .|. UnicodeSyntaxBit            `xoptBit` LangExt.UnicodeSyntax
+      .|. UnboxedTuplesBit            `xoptBit` LangExt.UnboxedTuples
+      .|. UnboxedSumsBit              `xoptBit` LangExt.UnboxedSums
+      .|. DatatypeContextsBit         `xoptBit` LangExt.DatatypeContexts
+      .|. TransformComprehensionsBit  `xoptBit` LangExt.TransformListComp
+      .|. TransformComprehensionsBit  `xoptBit` LangExt.MonadComprehensions
+      .|. AlternativeLayoutRuleBit    `xoptBit` LangExt.AlternativeLayoutRule
+      .|. RelaxedLayoutBit            `xoptBit` LangExt.RelaxedLayout
+      .|. NondecreasingIndentationBit `xoptBit` LangExt.NondecreasingIndentation
+      .|. TraditionalRecordSyntaxBit  `xoptBit` LangExt.TraditionalRecordSyntax
+      .|. ExplicitNamespacesBit       `xoptBit` LangExt.ExplicitNamespaces
+      .|. LambdaCaseBit               `xoptBit` LangExt.LambdaCase
+      .|. BinaryLiteralsBit           `xoptBit` LangExt.BinaryLiterals
+      .|. NegativeLiteralsBit         `xoptBit` LangExt.NegativeLiterals
+      .|. HexFloatLiteralsBit         `xoptBit` LangExt.HexFloatLiterals
+      .|. PatternSynonymsBit          `xoptBit` LangExt.PatternSynonyms
+      .|. TypeApplicationsBit         `xoptBit` LangExt.TypeApplications
+      .|. StaticPointersBit           `xoptBit` LangExt.StaticPointers
+      .|. NumericUnderscoresBit       `xoptBit` LangExt.NumericUnderscores
+      .|. StarIsTypeBit               `xoptBit` LangExt.StarIsType
+    optBits =
+          HaddockBit        `goptBit` Opt_Haddock
+      .|. RawTokenStreamBit `goptBit` Opt_KeepRawTokenStream
+      .|. HpcBit            `goptBit` Opt_Hpc
+      .|. SccProfilingOnBit `goptBit` Opt_SccProfilingOn
 
-      setBitIf :: ExtBits -> Bool -> ExtsBitmap
-      b `setBitIf` cond | cond      = xbit b
-                        | otherwise = 0
+    xoptBit bit ext = bit `setBitIf` xopt ext flags
+    goptBit bit opt = bit `setBitIf` gopt opt flags
+
+    setBitIf :: ExtBits -> Bool -> ExtsBitmap
+    b `setBitIf` cond | cond      = xbit b
+                      | otherwise = 0
 
 -- | Creates a parse state from a 'DynFlags' value
 mkPState :: DynFlags -> StringBuffer -> RealSrcLoc -> PState
@@ -2355,6 +2454,7 @@ mkPStatePure options buf loc =
       alr_context = [],
       alr_expecting_ocurly = Nothing,
       alr_justClosedExplicitLetBlock = False,
+      use_pos_prags = True,
       annotations = [],
       comment_q = [],
       annotations_comments = [],
@@ -2767,14 +2867,14 @@ reportLexError loc1 loc2 buf str
 lexTokenStream :: StringBuffer -> RealSrcLoc -> DynFlags -> ParseResult [Located Token]
 lexTokenStream buf loc dflags = unP go initState
     where dflags' = gopt_set (gopt_unset dflags Opt_Haddock) Opt_KeepRawTokenStream
-          initState = mkPState dflags' buf loc
+          initState = (mkPState dflags' buf loc) { use_pos_prags = False }
           go = do
             ltok <- lexer False return
             case ltok of
               L _ ITeof -> return []
               _ -> liftM (ltok:) go
 
-linePrags = Map.singleton "line" (begin line_prag2)
+linePrags = Map.singleton "line" linePrag
 
 fileHeaderPrags = Map.fromList([("options", lex_string_prag IToptions_prag),
                                  ("options_ghc", lex_string_prag IToptions_prag),
@@ -2810,8 +2910,6 @@ oneWordPrags = Map.fromList [
      ("unpack", strtoken (\s -> ITunpack_prag (SourceText s))),
      ("nounpack", strtoken (\s -> ITnounpack_prag (SourceText s))),
      ("ann", strtoken (\s -> ITann_prag (SourceText s))),
-     ("vectorize", strtoken (\s -> ITvect_prag (SourceText s))),
-     ("novectorize", strtoken (\s -> ITnovect_prag (SourceText s))),
      ("minimal", strtoken (\s -> ITminimal_prag (SourceText s))),
      ("overlaps", strtoken (\s -> IToverlaps_prag (SourceText s))),
      ("overlappable", strtoken (\s -> IToverlappable_prag (SourceText s))),
@@ -2819,10 +2917,10 @@ oneWordPrags = Map.fromList [
      ("incoherent", strtoken (\s -> ITincoherent_prag (SourceText s))),
      ("ctype", strtoken (\s -> ITctype (SourceText s))),
      ("complete", strtoken (\s -> ITcomplete_prag (SourceText s))),
-     ("column", begin column_prag)
+     ("column", columnPrag)
      ]
 
-twoWordPrags = Map.fromList([
+twoWordPrags = Map.fromList [
      ("inline conlike",
          strtoken (\s -> (ITinline_prag (SourceText s) Inline ConLike))),
      ("notinline conlike",
@@ -2830,9 +2928,8 @@ twoWordPrags = Map.fromList([
      ("specialize inline",
          strtoken (\s -> (ITspec_inline_prag (SourceText s) True))),
      ("specialize notinline",
-         strtoken (\s -> (ITspec_inline_prag (SourceText s) False))),
-     ("vectorize scalar",
-         strtoken (\s -> ITvect_scalar_prag (SourceText s)))])
+         strtoken (\s -> (ITspec_inline_prag (SourceText s) False)))
+     ]
 
 dispatch_pragmas :: Map String Action -> Action
 dispatch_pragmas prags span buf len = case Map.lookup (clean_pragma (lexemeToString buf len)) prags of
@@ -2854,8 +2951,6 @@ clean_pragma prag = canon_ws (map toLower (unprefix prag))
                           canonical prag' = case prag' of
                                               "noinline" -> "notinline"
                                               "specialise" -> "specialize"
-                                              "vectorise" -> "vectorize"
-                                              "novectorise" -> "novectorize"
                                               "constructorlike" -> "conlike"
                                               _ -> prag'
                           canon_ws s = unwords (map canonical (words s))

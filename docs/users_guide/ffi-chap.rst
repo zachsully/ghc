@@ -7,11 +7,8 @@ Foreign function interface (FFI)
    single: Foreign function interface
    single: interfacing with native code
 
-.. ghc-flag:: -XForeignFunctionInterface
-    :shortdesc: Enable :ref:`foreign function interface <ffi>`.
-    :type: dynamic
-    :reverse: -XNoForeignFunctionInterface
-    :category: language
+.. extension:: ForeignFunctionInterface
+    :shortdesc: Enable foreign function interface.
 
     :since: 6.8.1
 
@@ -22,7 +19,7 @@ definition is part of the Haskell Report on
 `http://www.haskell.org/ <http://www.haskell.org/>`__.
 
 FFI support is enabled by default, but can be enabled or disabled
-explicitly with the :ghc-flag:`-XForeignFunctionInterface` flag.
+explicitly with the :extension:`ForeignFunctionInterface` flag.
 
 GHC implements a number of GHC-specific extensions to the FFI Chapter of the
 Haskell 2010 Report. These extensions are described in :ref:`ffi-ghcexts`, but
@@ -38,16 +35,21 @@ GHC differences to the FFI Chapter
 Guaranteed call safety
 ~~~~~~~~~~~~~~~~~~~~~~
 
-The FFI addendum stipulates that an implementation is free to implement an
-``unsafe`` call by performing a ``safe`` call (and therefore may run in an
-arbitrary thread and may be subject to concurrent garbage collection). This
-greatly constrains library authors since it implies that it is never safe to
-pass any heap object reference to a foreign function, even if invoked with an
-``unsafe`` call. For instance, it is often desirable to pass an unpinned
-``ByteArray#``\s directly to native code to avoid making an
-otherwise-unnecessary copy. However, this can only be done safely under
-``unsafe`` call semantics as otherwise the array may be moved by the garbage
+The Haskell 2010 Report specifies that ``safe`` FFI calls must allow foreign
+calls to safely call into Haskell code. In practice, this means that the
+garbage collector must be able to run while these calls are in progress,
+moving heap-allocated Haskell values around arbitrarily.
+
+This greatly constrains library authors since it implies that it is not safe to
+pass any heap object reference to a ``safe`` foreign function call.  For
+instance, it is often desirable to pass an unpinned ``ByteArray#``\s directly
+to native code to avoid making an otherwise-unnecessary copy. However, this can
+only be done safely if the array is guaranteed not to be moved by the garbage
 collector in the middle of the call.
+
+The Chapter does *not* require implementations to refrain from doing the
+same for ``unsafe`` calls, so strictly Haskell 2010-conforming programs
+cannot pass heap-allocated references to ``unsafe`` FFI calls either.
 
 In previous releases, GHC would take advantage of the freedom afforded by the
 Chapter by performing ``safe`` foreign calls in place of ``unsafe`` calls in
@@ -56,7 +58,8 @@ compiled would fail under GHCi (e.g. :ghc-ticket:`13730`).
 
 However, since version 8.4 this is no longer the case: GHC **guarantees** that
 garbage collection will never occur during an ``unsafe`` call, even in the
-bytecode interpreter.
+bytecode interpreter, and further guarantees that ``unsafe`` calls will be
+performed in the calling thread.
 
 
 .. _ffi-ghcexts:
@@ -124,11 +127,8 @@ come with GHC. For more details see the
 Interruptible foreign calls
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. ghc-flag:: -XInterruptibleFFI
+.. extension:: InterruptibleFFI
     :shortdesc: Enable interruptible FFI.
-    :type: dynamic
-    :reverse: -XNoInterruptibleFFI
-    :category: language
 
     :since: 7.2.1
 
@@ -166,7 +166,7 @@ Unix systems
 
 Windows systems
     [Vista and later only] The RTS calls the Win32 function
-    ``CancelSynchronousIO``, which will cause a blocking I/O operation
+    ``CancelSynchronousIo``, which will cause a blocking I/O operation
     to return with the error ``ERROR_OPERATION_ABORTED``.
 
 If the system call is successfully interrupted, it will return to
@@ -181,11 +181,8 @@ it is not typically necessary to handle ``ERROR_OPERATION_ABORTED``.
 The CAPI calling convention
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. ghc-flag:: -XCApiFFI
-    :shortdesc: Enable :ref:`the CAPI calling convention <ffi-capi>`.
-    :type: dynamic
-    :reverse: -XNoCAPIFFI
-    :category: language
+.. extension:: CApiFFI
+    :shortdesc: Enable the CAPI calling convention.
 
     :since: 7.10.1
 

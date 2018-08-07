@@ -14,6 +14,7 @@ cwd = os.getcwd()
 parser = argparse.ArgumentParser()
 parser.add_argument('--validate', action='store_true', help='Run in validate mode')
 parser.add_argument('--required-tag', type=str, action='append', default=set())
+parser.add_argument('--hadrian', action='store_true', help='Do not assume the make base build system')
 args = parser.parse_args()
 
 def print_err(s):
@@ -97,7 +98,6 @@ def boot_pkgs():
         else:
             library_dirs.append(package)
 
-    print(library_dirs)
     for package in library_dirs:
         if package[-1] == '/':
             # drop trailing '/'
@@ -116,7 +116,7 @@ def boot_pkgs():
             if os.path.isfile(cabal):
                 # strip both .cabal and .in
                 pkg = os.path.splitext(os.path.splitext(os.path.basename(cabal))[0])[0]
-                top = package
+                top = os.path.join(*['..'] * len(os.path.normpath(package).split(os.path.sep)))
 
                 ghc_mk = os.path.join(package, 'ghc.mk')
                 print('Creating %s' % ghc_mk)
@@ -132,6 +132,17 @@ def boot_pkgs():
                                 pkg = pkg,
                                 dir = dir_)))
 
+                makefile = os.path.join(package, 'GNUmakefile')
+                with open(makefile, 'w') as f:
+                    f.write(dedent(
+                        """\
+                        dir = {package}
+                        TOP = {top}
+                        include $(TOP)/mk/sub-makefile.mk
+                        FAST_MAKE_OPTS += stage=0
+                        """.format(package = package, top = top)
+                    ))
+
 
 def autoreconf():
     # Run autoreconf on everything that needs it.
@@ -140,7 +151,7 @@ def autoreconf():
         # Get the normalized ACLOCAL_PATH for Windows
         # This is necessary since on Windows this will be a Windows
         # path, which autoreconf doesn't know doesn't know how to handle.
-        ac_local = os.environ['ACLOCAL_PATH']
+        ac_local = os.getenv('ACLOCAL_PATH', '')
         ac_local_arg = re.sub(r';', r':', ac_local)
         ac_local_arg = re.sub(r'\\', r'/', ac_local_arg)
         ac_local_arg = re.sub(r'(\w):/', r'/\1/', ac_local_arg)
@@ -180,6 +191,8 @@ def check_build_mk():
             """))
 
 check_for_url_rewrites()
-boot_pkgs()
+if not args.hadrian:
+    boot_pkgs()
 autoreconf()
-check_build_mk()
+if not args.hadrian:
+    check_build_mk()

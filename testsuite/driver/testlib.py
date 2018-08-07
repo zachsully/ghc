@@ -3,13 +3,9 @@
 # (c) Simon Marlow 2002
 #
 
-from __future__ import print_function
-
 import io
 import shutil
 import os
-import errno
-import string
 import re
 import traceback
 import time
@@ -18,6 +14,7 @@ import copy
 import glob
 import sys
 from math import ceil, trunc
+from pathlib import PurePath
 import collections
 import subprocess
 
@@ -25,25 +22,21 @@ from testglobals import *
 from testutil import *
 extra_src_files = {'T4198': ['exitminus1.c']} # TODO: See #12223
 
+global pool_sema
 if config.use_threads:
     import threading
-    try:
-        import thread
-    except ImportError: # Python 3
-        import _thread as thread
+    pool_sema = threading.BoundedSemaphore(value=config.threads)
 
 global wantToStop
 wantToStop = False
 
-global pool_sema
-if config.use_threads:
-    pool_sema = threading.BoundedSemaphore(value=config.threads)
-
 def stopNow():
     global wantToStop
     wantToStop = True
+
 def stopping():
     return wantToStop
+
 
 # Options valid for the current test only (these get reset to
 # testdir_testopts after each test).
@@ -143,7 +136,8 @@ def _reqlib( name, opts, lib ):
         cmd = strip_quotes(config.ghc_pkg)
         p = subprocess.Popen([cmd, '--no-user-package-db', 'describe', lib],
                              stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE)
+                             stderr=subprocess.PIPE,
+                             env=ghc_env)
         # read from stdout and stderr to avoid blocking due to
         # buffers filling
         p.communicate()
@@ -412,6 +406,12 @@ def compiler_profiled( ):
 def compiler_debugged( ):
     return config.compiler_debugged
 
+def have_gdb( ):
+    return config.have_gdb
+
+def have_readelf( ):
+    return config.have_readelf
+
 # ---
 
 def high_memory_usage(name, opts):
@@ -497,7 +497,6 @@ def no_check_hp(name, opts):
 
 def filter_stdout_lines( regex ):
     """ Filter lines of stdout with the given regular expression """
-    import re
     def f( name, opts ):
         _normalise_fun(name, opts, lambda s: '\n'.join(re.findall(regex, s)))
     return f
@@ -620,8 +619,9 @@ def newTestDir(tempdir, dir):
 testdir_suffix = '.run'
 
 def _newTestDir(name, opts, tempdir, dir):
+    testdir = os.path.join('', *(p for p in PurePath(dir).parts if p != '..'))
     opts.srcdir = os.path.join(os.getcwd(), dir)
-    opts.testdir = os.path.join(tempdir, dir, name + testdir_suffix)
+    opts.testdir = os.path.join(tempdir, testdir, name + testdir_suffix)
     opts.compiler_always_flags = config.compiler_always_flags
 
 # -----------------------------------------------------------------------------
@@ -809,7 +809,7 @@ def do_test(name, way, func, args, files):
     full_name = name + '(' + way + ')'
 
     if_verbose(2, "=====> {0} {1} of {2} {3}".format(
-        full_name, t.total_tests, len(allTestNames), 
+        full_name, t.total_tests, len(allTestNames),
         [len(t.unexpected_passes),
          len(t.unexpected_failures),
          len(t.framework_failures)]))
@@ -861,6 +861,7 @@ def do_test(name, way, func, args, files):
 
         if exit_code != 0:
             framework_fail(name, way, 'pre_cmd failed: {0}'.format(exit_code))
+            if_verbose(1, '** pre_cmd was "{0}". Running trace'.format(override_options(opts.pre_cmd)))
 
     result = func(*[name,way] + args)
 
@@ -962,8 +963,9 @@ def ghci_script( name, way, script):
 
     # We pass HC and HC_OPTS as environment variables, so that the
     # script can invoke the correct compiler by using ':! $HC $HC_OPTS'
-    cmd = ('HC={{compiler}} HC_OPTS="{flags}" {{compiler}} {flags} {way_flags}'
+    cmd = ('HC={{compiler}} HC_OPTS="{flags}" {{compiler}} {way_flags} {flags}'
           ).format(flags=flags, way_flags=way_flags)
+      # NB: put way_flags before flags so that flags in all.T can overrie others
 
     getTestOpts().stdin = script
     return simple_run( name, way, cmd, getTestOpts().extra_run_opts )
@@ -1429,7 +1431,7 @@ def stdout_ok(name, way):
                           expected_stdout_file, actual_stdout_file)
 
 def dump_stdout( name ):
-    with open(in_testdir(name, 'run.stdout')) as f:
+    with open(in_testdir(name, 'run.stdout'), encoding='utf8') as f:
         str = f.read().strip()
         if str:
             print("Stdout (", name, "):")
@@ -1445,7 +1447,7 @@ def stderr_ok(name, way):
                           whitespace_normaliser=normalise_whitespace)
 
 def dump_stderr( name ):
-    with open(in_testdir(name, 'run.stderr')) as f:
+    with open(in_testdir(name, 'run.stderr'), encoding='utf8') as f:
         str = f.read().strip()
         if str:
             print("Stderr (", name, "):")
@@ -1596,7 +1598,17 @@ def compare_outputs(way, kind, normaliser, expected_file, actual_file,
             if_verbose(1, 'Test is expected to fail. Not accepting new output.')
             return 0
         elif config.accept and actual_raw:
-            if_verbose(1, 'Accepting new output.')
+            if config.accept_platform:
+                if_verbose(1, 'Accepting new output for platform "'
+                              + config.platform + '".')
+                expected_path += '-' + config.platform
+            elif config.accept_os:
+                if_verbose(1, 'Accepting new output for os "'
+                              + config.os + '".')
+                expected_path += '-' + config.os
+            else:
+                if_verbose(1, 'Accepting new output.')
+
             write_file(expected_path, actual_raw)
             return 1
         elif config.accept:
@@ -1744,6 +1756,7 @@ def normalise_prof (str):
 
 def normalise_slashes_( str ):
     str = re.sub('\\\\', '/', str)
+    str = re.sub('//', '/', str)
     return str
 
 def normalise_exe_( str ):
@@ -1803,9 +1816,6 @@ def runCmd(cmd, stdin=None, stdout=None, stderr=None, timeout_multiplier=1.0, pr
     cmd = cmd.format(**config.__dict__)
     if_verbose(3, cmd + ('< ' + os.path.basename(stdin) if stdin else ''))
 
-    # declare the buffers to a default
-    stdin_buffer  = None
-
     stdin_file = io.open(stdin, 'rb') if stdin else None
     stdout_buffer = b''
     stderr_buffer = b''
@@ -1823,7 +1833,8 @@ def runCmd(cmd, stdin=None, stdout=None, stderr=None, timeout_multiplier=1.0, pr
         r = subprocess.Popen([timeout_prog, timeout, cmd],
                              stdin=stdin_file,
                              stdout=subprocess.PIPE,
-                             stderr=hStdErr)
+                             stderr=hStdErr,
+                             env=ghc_env)
 
         stdout_buffer, stderr_buffer = r.communicate()
     finally:
@@ -1911,7 +1922,7 @@ def in_srcdir(name, suffix=''):
 
 # Finding the sample output.  The filename is of the form
 #
-#   <test>.stdout[-ws-<wordsize>][-<platform>]
+#   <test>.stdout[-ws-<wordsize>][-<platform>|-<os>]
 #
 def find_expected_file(name, suff):
     basename = add_suffix(name, suff)
@@ -1928,7 +1939,6 @@ def find_expected_file(name, suff):
 
 if config.msys:
     import stat
-    import time
     def cleanup():
         testdir = getTestOpts().testdir
         max_attempts = 5
@@ -1982,7 +1992,7 @@ def findTFiles(roots):
     for root in roots:
         for path, dirs, files in os.walk(root, topdown=True):
             # Never pick up .T files in uncleaned .run directories.
-            dirs[:] = [dir for dir in sorted(dirs)  
+            dirs[:] = [dir for dir in sorted(dirs)
                            if not dir.endswith(testdir_suffix)]
             for filename in files:
                 if filename.endswith('.T'):

@@ -32,10 +32,12 @@ module Unique (
         mkUniqueGrimily,                -- Used in UniqSupply only!
         getKey,                         -- Used in Var, UniqFM, Name only!
         mkUnique, unpkUnique,           -- Used in BinIface only
+        eqUnique, ltUnique,
 
         deriveUnique,                   -- Ditto
         newTagUnique,                   -- Used in CgCase
         initTyVarUnique,
+        initExitJoinUnique,
         nonDetCmpUnique,
         isValidKnownKeyUnique,          -- Used in PrelInfo.knownKeyNamesOkay
 
@@ -47,7 +49,7 @@ module Unique (
         mkPrimOpIdUnique,
         mkPreludeMiscIdUnique, mkPreludeDataConUnique,
         mkPreludeTyConUnique, mkPreludeClassUnique,
-        mkPArrDataConUnique, mkCoVarUnique,
+        mkCoVarUnique,
 
         mkVarOccUnique, mkDataOccUnique, mkTvOccUnique, mkTcOccUnique,
         mkRegSingleUnique, mkRegPairUnique, mkRegClassUnique, mkRegSubUnique,
@@ -62,7 +64,7 @@ module Unique (
         -- *** From TyCon name uniques
         tyConRepNameUnique,
         -- *** From DataCon name uniques
-        dataConWorkerUnique, dataConRepNameUnique
+        dataConWorkerUnique, dataConTyRepNameUnique
     ) where
 
 #include "HsVersions.h"
@@ -239,6 +241,9 @@ use `deriving' because we want {\em precise} control of ordering
 eqUnique :: Unique -> Unique -> Bool
 eqUnique (MkUnique u1) (MkUnique u2) = u1 == u2
 
+ltUnique :: Unique -> Unique -> Bool
+ltUnique (MkUnique u1) (MkUnique u2) = u1 < u2
+
 -- Provided here to make it explicit at the call-site that it can
 -- introduce non-determinism.
 -- See Note [Unique Determinism]
@@ -364,7 +369,6 @@ mkPreludeTyConUnique   :: Int -> Unique
 mkPreludeDataConUnique :: Arity -> Unique
 mkPrimOpIdUnique       :: Int -> Unique
 mkPreludeMiscIdUnique  :: Int -> Unique
-mkPArrDataConUnique    :: Int -> Unique
 mkCoVarUnique          :: Int -> Unique
 
 mkAlphaTyVarUnique   i = mkUnique '1' i
@@ -396,16 +400,13 @@ tyConRepNameUnique  u = incrUnique u
 mkPreludeDataConUnique i              = mkUnique '6' (3*i)    -- Must be alphabetic
 
 --------------------------------------------------
-dataConRepNameUnique, dataConWorkerUnique :: Unique -> Unique
+dataConTyRepNameUnique, dataConWorkerUnique :: Unique -> Unique
 dataConWorkerUnique  u = incrUnique u
-dataConRepNameUnique u = stepUnique u 2
+dataConTyRepNameUnique u = stepUnique u 2
 
 --------------------------------------------------
 mkPrimOpIdUnique op         = mkUnique '9' op
 mkPreludeMiscIdUnique  i    = mkUnique '0' i
-
--- No numbers left anymore, so I pick something different for the character tag
-mkPArrDataConUnique a           = mkUnique ':' (2*a)
 
 -- The "tyvar uniques" print specially nicely: a, b, c, etc.
 -- See pprUnique for details
@@ -436,3 +437,6 @@ mkVarOccUnique  fs = mkUnique 'i' (uniqueOfFS fs)
 mkDataOccUnique fs = mkUnique 'd' (uniqueOfFS fs)
 mkTvOccUnique   fs = mkUnique 'v' (uniqueOfFS fs)
 mkTcOccUnique   fs = mkUnique 'c' (uniqueOfFS fs)
+
+initExitJoinUnique :: Unique
+initExitJoinUnique = mkUnique 's' 0

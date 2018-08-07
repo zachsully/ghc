@@ -3,8 +3,9 @@
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE MultiWayIf #-}
 
-{-# OPTIONS_GHC -O -funbox-strict-fields #-}
+{-# OPTIONS_GHC -O2 -funbox-strict-fields #-}
 -- We always optimise this, otherwise performance of a non-optimised
 -- compiler is severely affected
 
@@ -78,14 +79,10 @@ import qualified Data.ByteString.Unsafe   as BS
 import Data.IORef
 import Data.Char                ( ord, chr )
 import Data.Time
-#if MIN_VERSION_base(4,10,0)
 import Type.Reflection
 import Type.Reflection.Unsafe
 import Data.Kind (Type)
-import GHC.Exts (RuntimeRep(..), VecCount(..), VecElem(..))
-#else
-import Data.Typeable
-#endif
+import GHC.Exts (TYPE, RuntimeRep(..), VecCount(..), VecElem(..))
 import Control.Monad            ( when )
 import System.IO as IO
 import System.IO.Unsafe         ( unsafeInterleaveIO )
@@ -609,7 +606,6 @@ instance Binary (Bin a) where
 -- -----------------------------------------------------------------------------
 -- Instances for Data.Typeable stuff
 
-#if MIN_VERSION_base(4,10,0)
 instance Binary TyCon where
     put_ bh tc = do
         put_ bh (tyConPackage tc)
@@ -619,17 +615,7 @@ instance Binary TyCon where
         put_ bh (tyConKindRep tc)
     get bh =
         mkTyCon <$> get bh <*> get bh <*> get bh <*> get bh <*> get bh
-#else
-instance Binary TyCon where
-    put_ bh tc = do
-        put_ bh (tyConPackage tc)
-        put_ bh (tyConModule tc)
-        put_ bh (tyConName tc)
-    get bh =
-        mkTyCon3 <$> get bh <*> get bh <*> get bh
-#endif
 
-#if MIN_VERSION_base(4,10,0)
 instance Binary VecCount where
     put_ bh = putByte bh . fromIntegral . fromEnum
     get bh = toEnum . fromIntegral <$> getByte bh
@@ -748,14 +734,18 @@ getSomeTypeRep bh = do
                        ]
         3 -> do SomeTypeRep arg <- getSomeTypeRep bh
                 SomeTypeRep res <- getSomeTypeRep bh
-                case typeRepKind arg `eqTypeRep` (typeRep :: TypeRep Type) of
-                  Just HRefl ->
-                      case typeRepKind res `eqTypeRep` (typeRep :: TypeRep Type) of
-                        Just HRefl -> return $ SomeTypeRep $ Fun arg res
-                        Nothing -> failure "Kind mismatch" []
-                  _ -> failure "Kind mismatch" []
+                if
+                  | App argkcon _ <- typeRepKind arg
+                  , App reskcon _ <- typeRepKind res
+                  , Just HRefl <- argkcon `eqTypeRep` tYPErep
+                  , Just HRefl <- reskcon `eqTypeRep` tYPErep
+                  -> return $ SomeTypeRep $ Fun arg res
+                  | otherwise -> failure "Kind mismatch" []
         _ -> failure "Invalid SomeTypeRep" []
   where
+    tYPErep :: TypeRep TYPE
+    tYPErep = typeRep
+
     failure description info =
         fail $ unlines $ [ "Binary.getSomeTypeRep: "++description ]
                       ++ map ("    "++) info
@@ -776,17 +766,6 @@ instance Typeable a => Binary (TypeRep (a :: k)) where
 instance Binary SomeTypeRep where
     put_ bh (SomeTypeRep rep) = putTypeRep bh rep
     get = getSomeTypeRep
-#else
-instance Binary TypeRep where
-    put_ bh type_rep = do
-        let (ty_con, child_type_reps) = splitTyConApp type_rep
-        put_ bh ty_con
-        put_ bh child_type_reps
-    get bh = do
-        ty_con <- get bh
-        child_type_reps <- get bh
-        return (mkTyConApp ty_con child_type_reps)
-#endif
 
 -- -----------------------------------------------------------------------------
 -- Lazy reading/writing

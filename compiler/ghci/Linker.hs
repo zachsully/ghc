@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP, NondecreasingIndentation, TupleSections, RecordWildCards #-}
+{-# LANGUAGE BangPatterns #-}
 {-# OPTIONS_GHC -fno-cse #-}
 -- -fno-cse is needed for GLOBAL_VAR's to behave properly
 
@@ -63,6 +64,7 @@ import Control.Concurrent.MVar
 import System.FilePath
 import System.Directory
 import System.IO.Unsafe
+import System.Environment (lookupEnv)
 
 #if defined(mingw32_HOST_OS)
 import System.Win32.Info (getSystemDirectory)
@@ -70,7 +72,10 @@ import System.Win32.Info (getSystemDirectory)
 
 import Exception
 
-import Foreign (Ptr) -- needed for 2nd stage
+-- needed for 2nd stage
+#if STAGE >= 2
+import Foreign (Ptr)
+#endif
 
 {- **********************************************************************
 
@@ -82,35 +87,45 @@ import Foreign (Ptr) -- needed for 2nd stage
 The persistent linker state *must* match the actual state of the
 C dynamic linker at all times, so we keep it in a private global variable.
 
-The global IORef used for PersistentLinkerState actually contains another MVar.
-The reason for this is that we want to allow another loaded copy of the GHC
-library to side-effect the PLS and for those changes to be reflected here.
+The global IORef used for PersistentLinkerState actually contains another MVar,
+which in turn contains a Maybe PersistentLinkerState. The MVar serves to ensure
+mutual exclusion between multiple loaded copies of the GHC library. The Maybe
+may be Nothing to indicate that the linker has not yet been initialised.
 
 The PersistentLinkerState maps Names to actual closures (for
 interpreted code only), for use during linking.
 -}
 #if STAGE < 2
-GLOBAL_VAR_M(v_PersistentLinkerState, newMVar (panic "Dynamic linker not initialised"), MVar PersistentLinkerState)
-GLOBAL_VAR(v_InitLinkerDone, False, Bool) -- Set True when dynamic linker is initialised
+GLOBAL_VAR_M( v_PersistentLinkerState
+            , newMVar Nothing
+            , MVar (Maybe PersistentLinkerState))
 #else
 SHARED_GLOBAL_VAR_M( v_PersistentLinkerState
                    , getOrSetLibHSghcPersistentLinkerState
                    , "getOrSetLibHSghcPersistentLinkerState"
-                   , newMVar (panic "Dynamic linker not initialised")
-                   , MVar PersistentLinkerState)
--- Set True when dynamic linker is initialised
-SHARED_GLOBAL_VAR( v_InitLinkerDone
-                 , getOrSetLibHSghcInitLinkerDone
-                 , "getOrSetLibHSghcInitLinkerDone"
-                 , False
-                 , Bool)
+                   , newMVar Nothing
+                   , MVar (Maybe PersistentLinkerState))
 #endif
 
+uninitialised :: a
+uninitialised = panic "Dynamic linker not initialised"
+
 modifyPLS_ :: (PersistentLinkerState -> IO PersistentLinkerState) -> IO ()
-modifyPLS_ f = readIORef v_PersistentLinkerState >>= flip modifyMVar_ f
+modifyPLS_ f = readIORef v_PersistentLinkerState
+  >>= flip modifyMVar_ (fmap pure . f . fromMaybe uninitialised)
 
 modifyPLS :: (PersistentLinkerState -> IO (PersistentLinkerState, a)) -> IO a
-modifyPLS f = readIORef v_PersistentLinkerState >>= flip modifyMVar f
+modifyPLS f = readIORef v_PersistentLinkerState
+  >>= flip modifyMVar (fmapFst pure . f . fromMaybe uninitialised)
+  where fmapFst f = fmap (\(x, y) -> (f x, y))
+
+readPLS :: IO PersistentLinkerState
+readPLS = readIORef v_PersistentLinkerState
+  >>= fmap (fromMaybe uninitialised) . readMVar
+
+modifyMbPLS_
+  :: (Maybe PersistentLinkerState -> IO (Maybe PersistentLinkerState)) -> IO ()
+modifyMbPLS_ f = readIORef v_PersistentLinkerState >>= flip modifyMVar_ f
 
 data PersistentLinkerState
    = PersistentLinkerState {
@@ -165,10 +180,10 @@ extendLoadedPkgs pkgs =
 
 extendLinkEnv :: [(Name,ForeignHValue)] -> IO ()
 extendLinkEnv new_bindings =
-  modifyPLS_ $ \pls -> do
-    let ce = closure_env pls
-    let new_ce = extendClosureEnv ce new_bindings
-    return pls{ closure_env = new_ce }
+  modifyPLS_ $ \pls@PersistentLinkerState{..} -> do
+    let new_ce = extendClosureEnv closure_env new_bindings
+    return $! pls{ closure_env = new_ce }
+    -- strictness is important for not retaining old copies of the pls
 
 deleteFromLinkEnv :: [Name] -> IO ()
 deleteFromLinkEnv to_remove =
@@ -250,7 +265,7 @@ withExtendedLinkEnv new_env action
 -- | Display the persistent linker state.
 showLinkerState :: DynFlags -> IO ()
 showLinkerState dflags
-  = do pls <- readIORef v_PersistentLinkerState >>= readMVar
+  = do pls <- readPLS
        putLogMsg dflags NoReason SevDump noSrcSpan
           (defaultDumpStyle dflags)
                  (vcat [text "----- Linker state -----",
@@ -285,11 +300,10 @@ showLinkerState dflags
 --
 initDynLinker :: HscEnv -> IO ()
 initDynLinker hsc_env =
-  modifyPLS_ $ \pls0 -> do
-    done <- readIORef v_InitLinkerDone
-    if done then return pls0
-            else do writeIORef v_InitLinkerDone True
-                    reallyInitDynLinker hsc_env
+  modifyMbPLS_ $ \pls -> do
+    case pls of
+      Just  _ -> return pls
+      Nothing -> Just <$> reallyInitDynLinker hsc_env
 
 reallyInitDynLinker :: HscEnv -> IO PersistentLinkerState
 reallyInitDynLinker hsc_env = do
@@ -336,8 +350,15 @@ linkCmdLineLibs' hsc_env pls =
       -- See Note [Fork/Exec Windows]
       gcc_paths <- getGCCPaths dflags os
 
+      lib_paths_env <- addEnvPaths "LIBRARY_PATH" lib_paths_base
+
+      maybePutStrLn dflags "Search directories (user):"
+      maybePutStr dflags (unlines $ map ("  "++) lib_paths_env)
+      maybePutStrLn dflags "Search directories (gcc):"
+      maybePutStr dflags (unlines $ map ("  "++) gcc_paths)
+
       libspecs
-        <- mapM (locateLib hsc_env False lib_paths_base gcc_paths) minus_ls
+        <- mapM (locateLib hsc_env False lib_paths_env gcc_paths) minus_ls
 
       -- (d) Link .o files from the command-line
       classified_ld_inputs <- mapM (classifyLdInput dflags)
@@ -365,7 +386,8 @@ linkCmdLineLibs' hsc_env pls =
                                ++ [ takeDirectory dll | DLLPath dll <- libspecs ]
                       in nub $ map normalise paths
       let lib_paths = nub $ lib_paths_base ++ gcc_paths
-      pathCache <- mapM (addLibrarySearchPath hsc_env) all_paths
+      all_paths_env <- addEnvPaths "LD_LIBRARY_PATH" all_paths
+      pathCache <- mapM (addLibrarySearchPath hsc_env) all_paths_env
 
       pls1 <- foldM (preloadLib hsc_env lib_paths framework_paths) pls
                     cmdline_lib_specs
@@ -495,9 +517,17 @@ preloadLib hsc_env lib_paths framework_paths pls lib_spec = do
        = do b <- doesFileExist name
             if not b then return False
                      else do if dynamicGhc
-                                 then panic "Loading archives not supported"
+                                 then throwGhcExceptionIO $
+                                      CmdLineError dynamic_msg
                                  else loadArchive hsc_env name
                              return True
+      where
+        dynamic_msg = unlines
+          [ "User-specified static library could not be loaded ("
+            ++ name ++ ")"
+          , "Loading static libraries is not supported in this configuration."
+          , "Try using a dynamic library instead."
+          ]
 
 
 {- **********************************************************************
@@ -898,16 +928,14 @@ dynLoadObjs hsc_env pls objs = do
                       -- can resolve dependencies when it loads this
                       -- library.
                       ldInputs =
-                        concatMap
-                            (\(lp, l) ->
-                                 [ Option ("-L" ++ lp)
-                                 , Option "-Xlinker"
-                                 , Option "-rpath"
-                                 , Option "-Xlinker"
-                                 , Option lp
-                                 , Option ("-l" ++  l)
-                                 ])
-                            (temp_sos pls)
+                           concatMap (\l -> [ Option ("-l" ++ l) ])
+                                     (nub $ snd <$> temp_sos pls)
+                        ++ concatMap (\lp -> [ Option ("-L" ++ lp)
+                                                    , Option "-Xlinker"
+                                                    , Option "-rpath"
+                                                    , Option "-Xlinker"
+                                                    , Option lp ])
+                                     (nub $ fst <$> temp_sos pls)
                         ++ concatMap
                              (\lp ->
                                  [ Option ("-L" ++ lp)
@@ -1075,15 +1103,19 @@ unload_wkr :: HscEnv
 -- Does the core unload business
 -- (the wrapper blocks exceptions and deals with the PLS get and put)
 
-unload_wkr hsc_env keep_linkables pls = do
+unload_wkr hsc_env keep_linkables pls@PersistentLinkerState{..}  = do
+  -- NB. careful strictness here to avoid keeping the old PLS when
+  -- we're unloading some code.  -fghci-leak-check with the tests in
+  -- testsuite/ghci can detect space leaks here.
+
   let (objs_to_keep, bcos_to_keep) = partition isObjectLinkable keep_linkables
 
       discard keep l = not (linkableInSet l keep)
 
       (objs_to_unload, remaining_objs_loaded) =
-         partition (discard objs_to_keep) (objs_loaded pls)
+         partition (discard objs_to_keep) objs_loaded
       (bcos_to_unload, remaining_bcos_loaded) =
-         partition (discard bcos_to_keep) (bcos_loaded pls)
+         partition (discard bcos_to_keep) bcos_loaded
 
   mapM_ unloadObjs objs_to_unload
   mapM_ unloadObjs bcos_to_unload
@@ -1094,7 +1126,7 @@ unload_wkr hsc_env keep_linkables pls = do
                    filter (not . null . linkableObjs) bcos_to_unload))) $
     purgeLookupSymbolCache hsc_env
 
-  let bcos_retained = mkModuleSet $ map linkableModule remaining_bcos_loaded
+  let !bcos_retained = mkModuleSet $ map linkableModule remaining_bcos_loaded
 
       -- Note that we want to remove all *local*
       -- (i.e. non-isExternal) names too (these are the
@@ -1102,13 +1134,13 @@ unload_wkr hsc_env keep_linkables pls = do
       keep_name (n,_) = isExternalName n &&
                         nameModule n `elemModuleSet` bcos_retained
 
-      itbl_env'     = filterNameEnv keep_name (itbl_env pls)
-      closure_env'  = filterNameEnv keep_name (closure_env pls)
+      itbl_env'     = filterNameEnv keep_name itbl_env
+      closure_env'  = filterNameEnv keep_name closure_env
 
-      new_pls = pls { itbl_env = itbl_env',
-                      closure_env = closure_env',
-                      bcos_loaded = remaining_bcos_loaded,
-                      objs_loaded = remaining_objs_loaded }
+      !new_pls = pls { itbl_env = itbl_env',
+                       closure_env = closure_env',
+                       bcos_loaded = remaining_bcos_loaded,
+                       objs_loaded = remaining_objs_loaded }
 
   return new_pls
   where
@@ -1255,11 +1287,12 @@ linkPackage hsc_env pkg
                       ++ [ lib | '-':'l':lib <- Packages.ldOptions pkg ]
         -- See Note [Fork/Exec Windows]
         gcc_paths <- getGCCPaths dflags (platformOS platform)
+        dirs_env <- addEnvPaths "LIBRARY_PATH" dirs
 
         hs_classifieds
-           <- mapM (locateLib hsc_env True  dirs gcc_paths) hs_libs'
+           <- mapM (locateLib hsc_env True  dirs_env gcc_paths) hs_libs'
         extra_classifieds
-           <- mapM (locateLib hsc_env False dirs gcc_paths) extra_libs
+           <- mapM (locateLib hsc_env False dirs_env gcc_paths) extra_libs
         let classifieds = hs_classifieds ++ extra_classifieds
 
         -- Complication: all the .so's must be loaded before any of the .o's.
@@ -1271,7 +1304,8 @@ linkPackage hsc_env pkg
         -- Add directories to library search paths
         let dll_paths  = map takeDirectory known_dlls
             all_paths  = nub $ map normalise $ dll_paths ++ dirs
-        pathCache <- mapM (addLibrarySearchPath hsc_env) all_paths
+        all_paths_env <- addEnvPaths "LD_LIBRARY_PATH" all_paths
+        pathCache <- mapM (addLibrarySearchPath hsc_env) all_paths_env
 
         maybePutStr dflags
             ("Loading package " ++ sourcePackageIdString pkg ++ " ... ")
@@ -1313,8 +1347,8 @@ load_dyn hsc_env dll = do
   r <- loadDLL hsc_env dll
   case r of
     Nothing  -> return ()
-    Just err -> throwGhcExceptionIO (CmdLineError ("can't load .so/.DLL for: "
-                                                ++ dll ++ " (" ++ err ++ ")" ))
+    Just err -> cmdLineErrorIO ("can't load .so/.DLL for: "
+                                ++ dll ++ " (" ++ err ++ ")")
 
 loadFrameworks :: HscEnv -> Platform -> PackageConfig -> IO ()
 loadFrameworks hsc_env platform pkg
@@ -1326,8 +1360,8 @@ loadFrameworks hsc_env platform pkg
     load fw = do  r <- loadFramework hsc_env fw_dirs fw
                   case r of
                     Nothing  -> return ()
-                    Just err -> throwGhcExceptionIO (CmdLineError ("can't load framework: "
-                                                        ++ fw ++ " (" ++ err ++ ")" ))
+                    Just err -> cmdLineErrorIO ("can't load framework: "
+                                                ++ fw ++ " (" ++ err ++ ")" )
 
 -- Try to find an object file for a given library in the given paths.
 -- If it isn't present, we assume that addDLL in the RTS can find it,
@@ -1340,21 +1374,35 @@ locateLib :: HscEnv -> Bool -> [FilePath] -> [FilePath] -> String
 locateLib hsc_env is_hs lib_dirs gcc_dirs lib
   | not is_hs
     -- For non-Haskell libraries (e.g. gmp, iconv):
-    --   first look in library-dirs for a dynamic library (libfoo.so)
+    --   first look in library-dirs for a dynamic library (on User paths only)
+    --   (libfoo.so)
+    --   then  try looking for import libraries on Windows (on User paths only)
+    --   (.dll.a, .lib)
+    --   first look in library-dirs for a dynamic library (on GCC paths only)
+    --   (libfoo.so)
+    --   then  check for system dynamic libraries (e.g. kernel32.dll on windows)
+    --   then  try looking for import libraries on Windows (on GCC paths only)
+    --   (.dll.a, .lib)
     --   then  look in library-dirs for a static library (libfoo.a)
     --   then look in library-dirs and inplace GCC for a dynamic library (libfoo.so)
-    --   then  check for system dynamic libraries (e.g. kernel32.dll on windows)
     --   then  try looking for import libraries on Windows (.dll.a, .lib)
     --   then  look in library-dirs and inplace GCC for a static library (libfoo.a)
     --   then  try "gcc --print-file-name" to search gcc's search path
     --       for a dynamic library (#5289)
     --   otherwise, assume loadDLL can find it
     --
-  = findDll     `orElse`
-    findSysDll  `orElse`
-    tryImpLib   `orElse`
-    findArchive `orElse`
-    tryGcc      `orElse`
+    --   The logic is a bit complicated, but the rationale behind it is that
+    --   loading a shared library for us is O(1) while loading an archive is
+    --   O(n). Loading an import library is also O(n) so in general we prefer
+    --   shared libraries because they are simpler and faster.
+    --
+  = findDll   user `orElse`
+    tryImpLib user `orElse`
+    findDll   gcc  `orElse`
+    findSysDll     `orElse`
+    tryImpLib gcc  `orElse`
+    findArchive    `orElse`
+    tryGcc         `orElse`
     assumeDll
 
   | loading_dynamic_hs_libs -- search for .so libraries first.
@@ -1375,12 +1423,15 @@ locateLib hsc_env is_hs lib_dirs gcc_dirs lib
 
    where
      dflags = hsc_dflags hsc_env
-     dirs = lib_dirs ++ gcc_dirs
+     dirs   = lib_dirs ++ gcc_dirs
+     gcc    = False
+     user   = True
 
      obj_file     = lib <.> "o"
      dyn_obj_file = lib <.> "dyn_o"
      arch_files = [ "lib" ++ lib ++ lib_tag <.> "a"
                   , lib <.> "a" -- native code has no lib_tag
+                  , "lib" ++ lib, lib
                   ]
      lib_tag = if is_hs && loading_profiled_hs_libs then "_p" else ""
 
@@ -1405,7 +1456,8 @@ locateLib hsc_env is_hs lib_dirs gcc_dirs lib
      findArchive   = let local name = liftM (fmap Archive) $ findFile dirs name
                      in  apply (map local arch_files)
      findHSDll     = liftM (fmap DLLPath) $ findFile dirs hs_dyn_lib_file
-     findDll       = liftM (fmap DLLPath) $ findFile dirs dyn_lib_file
+     findDll    re = let dirs' = if re == user then lib_dirs else gcc_dirs
+                     in liftM (fmap DLLPath) $ findFile dirs' dyn_lib_file
      findSysDll    = fmap (fmap $ DLL . dropExtension . takeFileName) $
                         findSystemLibrary hsc_env so_name
      tryGcc        = let search   = searchForLibUsingGcc dflags
@@ -1415,10 +1467,11 @@ locateLib hsc_env is_hs lib_dirs gcc_dirs lib
                          gcc name = liftM (fmap Archive) $ search name lib_dirs
                          files    = import_libs ++ arch_files
                      in apply $ short : full : map gcc files
-     tryImpLib     = case os of
+     tryImpLib re = case os of
                        OSMinGW32 ->
-                        let implib name = liftM (fmap Archive) $
-                                            findFile dirs name
+                        let dirs' = if re == user then lib_dirs else gcc_dirs
+                            implib name = liftM (fmap Archive) $
+                                            findFile dirs' name
                         in apply (map implib import_libs)
                        _         -> return Nothing
 
@@ -1511,6 +1564,32 @@ getSystemDirectories :: IO [FilePath]
 getSystemDirectories = fmap (:[]) getSystemDirectory
 #else
 getSystemDirectories = return []
+#endif
+
+-- | Merge the given list of paths with those in the environment variable
+--   given. If the variable does not exist then just return the identity.
+addEnvPaths :: String -> [String] -> IO [String]
+addEnvPaths name list
+  = do -- According to POSIX (chapter 8.3) a zero-length prefix means current
+       -- working directory. Replace empty strings in the env variable with
+       -- `working_dir` (see also #14695).
+       working_dir <- getCurrentDirectory
+       values <- lookupEnv name
+       case values of
+         Nothing  -> return list
+         Just arr -> return $ list ++ splitEnv working_dir arr
+    where
+      splitEnv :: FilePath -> String -> [String]
+      splitEnv working_dir value =
+        case break (== envListSep) value of
+          (x, []    ) ->
+            [if null x then working_dir else x]
+          (x, (_:xs)) ->
+            (if null x then working_dir else x) : splitEnv working_dir xs
+#if defined(mingw32_HOST_OS)
+      envListSep = ';'
+#else
+      envListSep = ':'
 #endif
 
 -- ----------------------------------------------------------------------------
