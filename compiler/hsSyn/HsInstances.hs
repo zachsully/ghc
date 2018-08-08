@@ -144,6 +144,11 @@ deriving instance Data (HsDataDefn GhcPs)
 deriving instance Data (HsDataDefn GhcRn)
 deriving instance Data (HsDataDefn GhcTc)
 
+-- deriving instance (CodataIdLR p p) => Data (HsCodataDefn p)
+deriving instance Data (HsCodataDefn GhcPs)
+deriving instance Data (HsCodataDefn GhcRn)
+deriving instance Data (HsCodataDefn GhcTc)
+
 -- deriving instance (DataIdLR p p) => Data (HsDerivingClause p)
 deriving instance Data (HsDerivingClause GhcPs)
 deriving instance Data (HsDerivingClause GhcRn)
@@ -153,6 +158,11 @@ deriving instance Data (HsDerivingClause GhcTc)
 deriving instance Data (ConDecl GhcPs)
 deriving instance Data (ConDecl GhcRn)
 deriving instance Data (ConDecl GhcTc)
+
+-- deriving instance (DataIdLR p p) => Data (DestDecl p)
+deriving instance Data (DestDecl GhcPs)
+deriving instance Data (DestDecl GhcRn)
+deriving instance Data (DestDecl GhcTc)
 
 -- deriving instance DataIdLR p p   => Data (TyFamInstDecl p)
 deriving instance Data (TyFamInstDecl GhcPs)

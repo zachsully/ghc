@@ -766,9 +766,8 @@ data Token
   | ITLarrowtail IsUnicodeSyntax --  -<<
   | ITRarrowtail IsUnicodeSyntax --  >>-
 
-  -- Copattern notation extension
+  -- Codata extension
   | ITcodata
-  | ITcocase
   | IThash  -- used for the head copattern
 
   -- type application '@' (lexed differently than as-pattern '@',
@@ -868,10 +867,9 @@ reservedWordsFM = listToUFM $
                                               xbit RecursiveDoBit),
          ( "proc",           ITproc,          xbit ArrowsBit),
 
-         ( "codata",         ITcodata,        xbit CopatternsBit),
-         ( "cocase",         ITcocase,        xbit CopatternsBit),
-	 ( "#",              IThash,          xbit CopatternsBit),
-	 ( "□",              IThash,          xbit CopatternsBit)
+         ( "codata",         ITcodata,        xbit CodataBit),
+	 ( "#",              IThash,          xbit CodataBit),
+	 ( "□",              IThash,          xbit CodataBit)
      ]
 
 {-----------------------------------
@@ -2251,7 +2249,7 @@ data ExtBits
   | InterruptibleFfiBit
   | CApiFfiBit
   | ArrowsBit
-  | CopatternsBit
+  | CodataBit
   | ThBit
   | ThQuotesBit
   | IpBit
@@ -2295,7 +2293,7 @@ always           _     = True
 arrowsEnabled :: ExtsBitmap -> Bool
 arrowsEnabled = xtest ArrowsBit
 copatternsEnabled :: ExtsBitmap -> Bool
-copatternsEnabled = xtest CopatternsBit
+copatternsEnabled = xtest CodataBit
 thEnabled :: ExtsBitmap -> Bool
 thEnabled = xtest ThBit
 thQuotesEnabled :: ExtsBitmap -> Bool
@@ -2385,7 +2383,7 @@ mkParserFlags flags =
       .|. InterruptibleFfiBit         `xoptBit` LangExt.InterruptibleFFI
       .|. CApiFfiBit                  `xoptBit` LangExt.CApiFFI
       .|. ArrowsBit                   `xoptBit` LangExt.Arrows
-      .|. CopatternsBit               `setBitIf` xopt LangExt.Copatterns               flags
+      .|. CodataBit                   `xoptBit` LangExt.Codata
       .|. ThBit                       `xoptBit` LangExt.TemplateHaskell
       .|. ThQuotesBit                 `xoptBit` LangExt.TemplateHaskellQuotes
       .|. QqBit                       `xoptBit` LangExt.QuasiQuotes

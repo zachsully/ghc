@@ -476,9 +476,8 @@ are the most common patterns, rewritten as regular expressions for clarity:
  'javascript'   { L _ ITjavascriptcallconv }
  'proc'         { L _ ITproc }          -- for arrow notation extension
  'rec'          { L _ ITrec }           -- for arrow notation extension
- 'codata'       { L _ ITcodata }        -- for copattern notation extension
- 'cocase'       { L _ ITcocase }        -- for copattern notation extension
- '\#'           { L _ IThash }          -- for copattern notation extension
+ 'codata'       { L _ ITcodata }        -- for codata extension
+ '\#'           { L _ IThash }          -- for codata extension
  'group'    { L _ ITgroup }     -- for list transform extension
  'by'       { L _ ITby }        -- for list transform extension
  'using'    { L _ ITusing }     -- for list transform extension
@@ -2946,7 +2945,7 @@ apats  :: { [LPat GhcPs] }
         | {- empty -}           { [] }
 
 -----------------------------------------------------------------------------
--- Copatterns syntax extension parsing
+-- Codata extension parsing
 {- Parsing copatterns requires parsing a cocase connective (which can contain
 copatterns that need a special parser) and codata declarations which are similar
 to GADT declarations. -}
@@ -2977,10 +2976,6 @@ dest : con '::' sigtype                  { mkDestDecl [$1] (mkLHsSigType $3) }
 coaltlist  :: { [(Copattern,LHsExpr GhcPs)] }
 coaltlist  :          '{'     coalts '}'      { reverse $2 }
            |          '{'            '}'      { [] }
-           | 'cocase' vocurly coalts close    { reverse $3 }
-           | 'cocase' vocurly        close    { [] }
-           | 'cocase' '{'     coalts '}'      { reverse $3 }
-           | 'cocase' '{'            '}'      { [] }
 
 coalts :: { [(Copattern,LHsExpr GhcPs)] }
 coalts : coalts1                       { $1 }

@@ -263,6 +263,7 @@ type ForallXSpliceDecl (c :: * -> Constraint) (x :: *) =
 type family XFamDecl       x
 type family XSynDecl       x
 type family XDataDecl      x
+type family XCodataDecl    x
 type family XClassDecl     x
 type family XXTyClDecl     x
 
@@ -270,6 +271,7 @@ type ForallXTyClDecl (c :: * -> Constraint) (x :: *) =
        ( c (XFamDecl       x)
        , c (XSynDecl       x)
        , c (XDataDecl      x)
+       , c (XCodataDecl    x)
        , c (XClassDecl     x)
        , c (XXTyClDecl     x)
        )
@@ -319,6 +321,16 @@ type ForallXHsDataDefn (c :: * -> Constraint) (x :: *) =
        )
 
 -- -------------------------------------
+-- HsCodataDefn type families
+type family XCodataDefn      x
+type family XXHsCodataDefn   x
+
+type ForallXHsCodataDefn (c :: * -> Constraint) (x :: *) =
+       ( c (XCodataDefn       x)
+       , c (XXHsCodataDefn    x)
+       )
+
+-- -------------------------------------
 -- HsDerivingClause type families
 type family XCHsDerivingClause      x
 type family XXHsDerivingClause      x
@@ -338,6 +350,16 @@ type ForallXConDecl (c :: * -> Constraint) (x :: *) =
        ( c (XConDeclGADT    x)
        , c (XConDeclH98     x)
        , c (XXConDecl       x)
+       )
+
+-- -------------------------------------
+-- DestDecl type families
+type family XDestDeclGADT   x
+type family XXDestDecl      x
+
+type ForallXDestDecl (c :: * -> Constraint) (x :: *) =
+       ( c (XDestDeclGADT    x)
+       , c (XXDestDecl       x)
        )
 
 -- -------------------------------------
@@ -508,6 +530,7 @@ type family XExplicitSum    x
 type family XCase           x
 type family XIf             x
 type family XMultiIf        x
+type family XCoalts         x
 type family XLet            x
 type family XDo             x
 type family XExplicitList   x

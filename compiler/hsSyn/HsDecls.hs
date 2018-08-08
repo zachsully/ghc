@@ -65,8 +65,8 @@ module HsDecls (
   HsConDeclDetails, hsConDeclArgTys, hsConDeclTheta,
   getConNames, getConArgs,
 
-  -- -- ** Codata-destructor declarations
-  -- HsCodataDefn(..),DestDecl(..), LDestDecl,
+  -- ** Codata-destructor declarations
+  HsCodataDefn(..), LDestDecl, DestDecl(..),
 
   -- ** Document comments
   DocDecl(..), LDocDecl, docDeclDoc,
@@ -511,14 +511,6 @@ data TyClDecl pass
             , tcdFixity :: LexicalFixity    -- ^ Fixity used in the declaration
             , tcdRhs    :: LHsType pass }         -- ^ RHS of type declaration
 
-    -- For details on above see note [Api annotations] in ApiAnnotation
-  -- negative data
-  -- | CodataDecl { tccdLName      :: Located (IdP pass)
-  --              , tccdTyVars     :: LHsQTyVars pass
-  --              , tccdFixity     :: LexicalFixity
-  --              , tccdCodataDefn :: HsCodataDefn pass }
-
-
   | -- | @data@ declaration
     --
     --  - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnData',
@@ -532,6 +524,13 @@ data TyClDecl pass
                               -- See Note [TyVar binders for associated declarations]
              , tcdFixity   :: LexicalFixity        -- ^ Fixity used in the declaration
              , tcdDataDefn :: HsDataDefn pass }
+
+  | -- | @codata@ declaration
+    CodataDecl { tcdCdExt       :: XCodataDecl pass    -- ^ Post renamer, CUSK flag, FVs
+               , tccdLName      :: Located (IdP pass)  -- ^ Type constructor
+               , tccdTyVars     :: LHsQTyVars pass     -- ^ Type variables
+               , tccdFixity     :: LexicalFixity       -- ^ Fixity used in the declaration
+               , tccdCodataDefn :: HsCodataDefn pass }
 
   | ClassDecl { tcdCExt    :: XClassDecl pass,         -- ^ Post renamer, FVs
                 tcdCtxt    :: LHsContext pass,         -- ^ Context...
@@ -591,6 +590,10 @@ type instance XSynDecl      GhcTc = NameSet -- FVs
 type instance XDataDecl     GhcPs = NoExt
 type instance XDataDecl     GhcRn = DataDeclRn
 type instance XDataDecl     GhcTc = DataDeclRn
+
+type instance XCodataDecl   GhcPs = NoExt
+type instance XCodataDecl   GhcRn = NameSet -- FVs
+type instance XCodataDecl   GhcTc = NameSet -- FVs
 
 type instance XClassDecl    GhcPs = NoExt
 type instance XClassDecl    GhcRn = NameSet -- FVs
@@ -1495,22 +1498,61 @@ ppr_con_names = pprWithCommas (pprPrefixOcc . unLoc)
 *                                                                      *
 ********************************************************************* -}
 
--- data HsCodataDefn pass
---   = HsCodataDefn
---   { cdd_ctxt  :: LHsContext pass
---   , cdd_dests :: [LDestDecl pass]
---   }
+-- | Haskell Codata type Definition
+data HsCodataDefn pass
+  = -- | Declares a codata type, giving its constructors
+    -- @
+    --  data/newtype T a = <constrs>
+    --  data/newtype instance T [a] = <constrs>
+    -- @
+    HsCodataDefn { cdd_ext     :: XCodataDefn pass,
+                   cdd_ctxt    :: LHsContext pass,           -- ^ Context
+                   cdd_cType   :: Maybe (Located CType),
+                   cdd_kindSig :: Maybe (LHsKind pass),
+                     -- ^ Optional kind signature.
+                     --
+                     -- @(Just k)@ for a GADT-style @codata@,
+                   cdd_dests   :: [LDestDecl pass]
+                     -- ^ Codata destructors
+                     --
+                     -- For @codata T a where { T1 :: T a -> b }@
+                     --   the 'LDestDecls' all have 'DestDeclGADT'.
+    }
+  | XHsCodataDefn (XXHsCodataDefn pass)
 
--- type LDestDecl pass = Located (DestDecl pass)
+type instance XCodataDefn    (GhcPass _) = NoExt
+type instance XXHsCodataDefn (GhcPass _) = NoExt
 
--- data DestDecl pass
---   = DestDecl
---   { dest_names   :: [Located (IdP pass)]
---   , dest_type    :: LHsSigType pass
---     -- ^ The type after the ‘::’
---   , dest_doc     :: Maybe LHsDocString
---     -- ^ A possible Haddock comment.
---   }
+-- | Located Codata Destructor Declaration
+type LDestDecl pass = Located (DestDecl pass)
+
+-- | data Destructor Declaration
+data DestDecl pass
+  = DestDeclGADT
+      { dest_g_ext   :: XDestDeclGADT pass
+      , dest_names   :: [Located (IdP pass)]
+
+      -- The next four fields describe the type after the '::'
+      -- See Note [GADT abstract syntax]
+      -- The following field is Located to anchor API Annotations,
+      -- AnnForall and AnnDot.
+      , dest_forall  :: Located Bool      -- ^ True <=> explicit forall
+                                          --   False => hsq_explicit is empty
+      , dest_qvars   :: LHsQTyVars pass
+                       -- Whether or not there is an /explicit/ forall, we still
+                       -- need to capture the implicitly-bound type/kind variables
+
+      , dest_mb_cxt  :: Maybe (LHsContext pass) -- ^ User-written context (if any)
+      -- , dest_args    :: HsDestDeclDetails pass   -- ^ Arguments; never InfixCon
+      , dest_res_ty  :: LHsType pass            -- ^ Result type
+
+      , dest_doc     :: Maybe LHsDocString
+          -- ^ A possible Haddock comment.
+      }
+  | XDestDecl (XXDestDecl pass)
+
+type instance XDestDeclGADT (GhcPass _) = NoExt
+type instance XXDestDecl    (GhcPass _) = NoExt
 
 {-
 ************************************************************************

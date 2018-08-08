@@ -408,8 +408,6 @@ data HsExpr p
   --       'ApiAnnotation.AnnThen','ApiAnnotation.AnnSemi',
   --       'ApiAnnotation.AnnElse',
 
-  -- | HsCoCase  (CoMatch p (LHsExpr p))
-
   -- For details on above see note [Api annotations] in ApiAnnotation
   | HsIf        (XIf p)
                 (Maybe (SyntaxExpr p)) -- cond function
@@ -432,6 +430,8 @@ data HsExpr p
   -- - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnLet',
   --       'ApiAnnotation.AnnOpen' @'{'@,
   --       'ApiAnnotation.AnnClose' @'}'@,'ApiAnnotation.AnnIn'
+
+  | HsCoalts    (XCoalts p) -- (CoMatchGroup p (LHsExpr p))
 
   -- For details on above see note [Api annotations] in ApiAnnotation
   | HsLet       (XLet p)
@@ -742,6 +742,8 @@ type instance XIf            (GhcPass _) = NoExt
 type instance XMultiIf       GhcPs = NoExt
 type instance XMultiIf       GhcRn = NoExt
 type instance XMultiIf       GhcTc = Type
+
+type instance XCoalts        (GhcPass _) = NoExt
 
 type instance XLet           (GhcPass _) = NoExt
 

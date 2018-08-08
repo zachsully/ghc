@@ -4127,7 +4127,7 @@ xFlagsDeps = [
   flagSpec "BinaryLiterals"                   LangExt.BinaryLiterals,
   flagSpec "CApiFFI"                          LangExt.CApiFFI,
   flagSpec "CPP"                              LangExt.Cpp,
-  flagSpec "Copatterns"                       LangExt.Copatterns,
+  flagSpec "Codata"                           LangExt.Codata,
   flagSpec "ConstrainedClassMethods"          LangExt.ConstrainedClassMethods,
   flagSpec "ConstraintKinds"                  LangExt.ConstraintKinds,
   flagSpec "DataKinds"                        LangExt.DataKinds,
