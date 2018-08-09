@@ -560,6 +560,12 @@ data DataDeclRn = DataDeclRn
              , tcdFVs      :: NameSet }
   deriving Data
 
+-- This is the same as the Data version
+data CodataDeclRn = CodataDeclRn
+  { tccdCodataCusk :: Bool
+  , tccdFVs        :: NameSet }
+  deriving Data
+
 {- Note [TyVar binders for associated decls]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 For an /associated/ data, newtype, or type-family decl, the LHsQTyVars
@@ -592,8 +598,8 @@ type instance XDataDecl     GhcRn = DataDeclRn
 type instance XDataDecl     GhcTc = DataDeclRn
 
 type instance XCodataDecl   GhcPs = NoExt
-type instance XCodataDecl   GhcRn = NameSet -- FVs
-type instance XCodataDecl   GhcTc = NameSet -- FVs
+type instance XCodataDecl   GhcRn = CodataDeclRn -- FVs
+type instance XCodataDecl   GhcTc = CodataDeclRn -- FVs
 
 type instance XClassDecl    GhcPs = NoExt
 type instance XClassDecl    GhcRn = NameSet -- FVs
@@ -724,8 +730,8 @@ instance (p ~ GhcPass pass, OutputableBndrId p) => Outputable (TyClDecl p) where
                   , tcdDataDefn = defn })
       = pp_data_defn (pp_vanilla_decl_head ltycon tyvars fixity) defn
 
-    ppr (CodataDecl { tccdLName = ltycon, tccdTyVars = tyvars
-                    , tccdFixity = fixity, tccdCodataDefn = defn })
+    ppr (CodataDecl { tccdLName = ltycon, tccdTyVars = tyvars, tccdFixity = fixity
+                    , tccdCodataDefn = defn })
       = pp_codata_defn (pp_vanilla_decl_head ltycon tyvars fixity) defn
 
     ppr (ClassDecl {tcdCtxt = context, tcdLName = lclas, tcdTyVars = tyvars,
@@ -1613,7 +1619,7 @@ pprDestDecl (DestDeclGADT { dest_names = dests, dest_qvars = qvars
                           , dest_mb_cxt = mcxt
                           , dest_dom_ty = dom_ty, dest_mb_cod_ty = mcod_ty
                           , dest_doc = doc })
-  = ppr_mbDoc doc <+> ppr_dest_names dests <+> colon
+  = ppr_mbDoc doc <+> ppr_dest_names dests <+> dcolon
     <+> (sep [pprHsForAll (hsq_explicit qvars) cxt,
               sep [ppr dom_ty,arrow,pp_mct] ])
   where
@@ -1628,7 +1634,7 @@ pprDestDecl (DestDeclSimple { dest_name = name
                             , dest_doc = doc })
   = sep [ ppr_mbDoc doc
         , ppr name
-        , colon
+        , dcolon
         , pprHsForAll ex_tvs cxt
         , ppr cod_ty ]
   where

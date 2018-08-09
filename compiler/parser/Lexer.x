@@ -871,7 +871,8 @@ reservedWordsFM = listToUFM $
          ( "proc",           ITproc,          xbit ArrowsBit),
 
          ( "codata",         ITcodata,        xbit CodataBit),
-	 ( "#",              IThash,          xbit CodataBit)
+	 ( "#",              IThash,          xbit CodataBit),
+	 ( "&",              ITampersand,     xbit CodataBit)
      ]
 
 {-----------------------------------
@@ -940,6 +941,7 @@ reservedSymsFM = listToUFM $
         -- form part of a large operator.  This would let us have a better
         -- syntax for kinds: ɑ∷*→* would be a legal kind signature. (maybe).
        ,( "#", IThash, codataEnabled)
+       ,( "&", ITampersand, codataEnabled)
        ]
 
 -- -----------------------------------------------------------------------------

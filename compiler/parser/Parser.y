@@ -2987,7 +2987,7 @@ destrs : destrs '&' destr      { sLL $1 $3 ($3 : unLoc $1) }
 destr :: { LDestDecl GhcPs }
 -- destr : forall context_no_ops '=>' conid '::' atype
 --                 { sLL $1 $6 (mkDestDeclSimple $4 (snd $ unLoc $1) (Just $2) $6) }
-destr : con ':' ctype { sLL $1 $3 (mkDestDeclSimple $1 Nothing Nothing $3) }
+destr : con '::' ctype { sLL $1 $3 (mkDestDeclSimple $1 Nothing Nothing $3) }
 
 ------------------
 -- Coalternatives

@@ -1158,6 +1158,14 @@ hsLTyClDeclBinders (L loc (ClassDecl   { tcdLName = L _ cls_name
     , [])
 hsLTyClDeclBinders (L loc (DataDecl    { tcdLName = L _ name, tcdDataDefn = defn }))
   = (\ (xs, ys) -> (L loc name : xs, ys)) $ hsDataDefnBinders defn
+hsLTyClDeclBinders (L loc (CodataDecl  { tccdLName = L _ name, tccdCodataDefn = defn}))
+  = (L loc name : concatMap (\x -> case unLoc x of
+                                DestDeclGADT { dest_names = ns } -> ns
+                                DestDeclSimple { dest_name = n } -> [n]
+                                _ -> []
+                            )
+                            (cdd_dests defn)
+    , [])
 hsLTyClDeclBinders (L _ (XTyClDecl _)) = panic "hsLTyClDeclBinders"
 
 -------------------

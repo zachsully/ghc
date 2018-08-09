@@ -1518,6 +1518,11 @@ rnTyClDecl (DataDecl { tcdLName = tycon, tcdTyVars = tyvars,
                           , tcdDataDefn = defn'
                           , tcdDExt     = rn_info }, fvs) } }
 
+-- "codata" devlarations
+-- rnTyClDecl (CodataDecl { tccdLName = tycon, tccdTyVars = tyvars,
+--                          tccdFixity = fixity, tccdCodataDefn = defn })
+--   = do {}
+
 rnTyClDecl (ClassDecl { tcdCtxt = context, tcdLName = lcls,
                         tcdTyVars = tyvars, tcdFixity = fixity,
                         tcdFDs = fds, tcdSigs = sigs,
