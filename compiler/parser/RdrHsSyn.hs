@@ -40,7 +40,8 @@ module   RdrHsSyn (
         mkExtName,           -- RdrName -> CLabelString
         mkGadtDecl,          -- [Located RdrName] -> LHsType RdrName -> ConDecl RdrName
         mkConDeclH98,
-        mkDestDecl,
+        mkDestDeclGadt,
+        mkDestDeclSimple,
         mkATDefault,
 
         -- Bunch of functions in the parser monad for
@@ -727,10 +728,10 @@ nudgeHsSrcBangs details
       L l (HsBangTy noExt s (addCLoc lty lds (HsDocTy noExt lty lds)))
     go lty = lty
 
-mkDestDecl :: [Located RdrName]
-           -> LHsType GhcPs     -- Always a HsForAllTy
-           -> DestDecl GhcPs
-mkDestDecl names ty
+mkDestDeclGadt :: [Located RdrName]
+               -> LHsType GhcPs     -- Always a HsForAllTy
+               -> DestDecl GhcPs
+mkDestDeclGadt names ty
   = DestDeclGADT { dest_g_ext  = noExt
                  , dest_names  = names
                  , dest_forall = L l $ isLHsForAllTy ty'
@@ -758,6 +759,17 @@ mkDestDecl names ty
                                                        (ann++mkParensApiAnn l)
     peel_parens ty                   ann = (ty, ann)
 
+mkDestDeclSimple :: Located RdrName -> Maybe [LHsTyVarBndr GhcPs]
+                 -> Maybe (LHsContext GhcPs) -> LHsType GhcPs
+                 -> DestDecl GhcPs
+mkDestDeclSimple name mb_forall mb_cxt cod_ty =
+  DestDeclSimple { dest_ext  = noExt
+                 , dest_name  = name
+                 , dest_forall =  noLoc $ isJust mb_forall
+                 , dest_ex_tvs = mb_forall `orElse` []
+                 , dest_mb_cxt = mb_cxt
+                 , dest_cod_ty = cod_ty
+                 , dest_doc    = Nothing }
 
 setRdrNameSpace :: RdrName -> NameSpace -> RdrName
 -- ^ This rather gruesome function is used mainly by the parser.

@@ -1554,10 +1554,27 @@ data DestDecl pass
       , dest_doc       :: Maybe LHsDocString
           -- ^ A possible Haddock comment.
       }
+
+  | DestDeclSimple
+      { dest_ext    :: XDestDeclSimple pass
+      , dest_name   :: Located (IdP pass)
+      , dest_forall :: Located Bool
+                              -- ^ True <=> explicit user-written forall
+                              --     e.g. codata T a = forall b. MkT :: b
+                              --     dest_ex_tvs = {b}
+                              -- False => dest_ex_tvs is empty
+      , dest_ex_tvs :: [LHsTyVarBndr pass]      -- ^ Existentials only
+      , dest_mb_cxt :: Maybe (LHsContext pass)  -- ^ User-written context (if any)
+      , dest_cod_ty :: LHsType pass             -- ^ Projection type
+
+      , dest_doc    :: Maybe LHsDocString
+          -- ^ A possible Haddock comment.
+      }
   | XDestDecl (XXDestDecl pass)
 
-type instance XDestDeclGADT (GhcPass _) = NoExt
-type instance XXDestDecl    (GhcPass _) = NoExt
+type instance XDestDeclGADT   (GhcPass _) = NoExt
+type instance XDestDeclSimple (GhcPass _) = NoExt
+type instance XXDestDecl      (GhcPass _) = NoExt
 
 pp_codata_defn :: (OutputableBndrId (GhcPass p))
                => (HsContext (GhcPass p) -> SDoc)
@@ -1582,7 +1599,10 @@ pp_codata_defn _ (XHsCodataDefn x) = ppr x
 pp_dest_decls :: (OutputableBndrId (GhcPass p))
               => [LDestDecl (GhcPass p)]
               -> SDoc
-pp_dest_decls cs = hang (text "where") 2 (vcat (map ppr cs))
+pp_dest_decls cs@(L _ DestDeclGADT{} : _) -- In GADT syntax
+  = hang (text "where") 2 (vcat (map ppr cs))
+pp_dest_decls cs                          -- In Simple syntax
+  = equals <+> sep (punctuate (text " &") (map ppr cs))
 
 
 instance (p ~ GhcPass pass, OutputableBndrId p) => Outputable (DestDecl p) where
@@ -1593,14 +1613,26 @@ pprDestDecl (DestDeclGADT { dest_names = dests, dest_qvars = qvars
                           , dest_mb_cxt = mcxt
                           , dest_dom_ty = dom_ty, dest_mb_cod_ty = mcod_ty
                           , dest_doc = doc })
-  = ppr_mbDoc doc <+> ppr_dest_names dests <+> dcolon
+  = ppr_mbDoc doc <+> ppr_dest_names dests <+> colon
     <+> (sep [pprHsForAll (hsq_explicit qvars) cxt,
               sep [ppr dom_ty,arrow,pp_mct] ])
   where
     cxt = fromMaybe (noLoc []) mcxt
     pp_mct = case mcod_ty of
-               Nothing -> text "?"
+               Nothing -> empty
                Just ty -> ppr ty
+pprDestDecl (DestDeclSimple { dest_name = name
+                            , dest_ex_tvs = ex_tvs
+                            , dest_mb_cxt = mcxt
+                            , dest_cod_ty = cod_ty
+                            , dest_doc = doc })
+  = sep [ ppr_mbDoc doc
+        , ppr name
+        , colon
+        , pprHsForAll ex_tvs cxt
+        , ppr cod_ty ]
+  where
+    cxt = fromMaybe (noLoc []) mcxt
 pprDestDecl (XDestDecl x) = ppr x
 
 ppr_dest_names :: (OutputableBndr a) => [Located a] -> SDoc

@@ -549,8 +549,10 @@ $tab          { warnTab }
   \"                            { lex_string_tok }
 }
 
+-- Special Symbols for the Codata Extension
 <0> {
-  \# / { ifExtension copatternsEnabled } { special IThash }
+  \# / { ifExtension codataEnabled } { special IThash }
+  \& / { ifExtension codataEnabled } { special ITampersand }
 }
 
 -- Note [Lexing type applications]
@@ -769,6 +771,7 @@ data Token
   -- Codata extension
   | ITcodata
   | IThash  -- used for the head copattern
+  | ITampersand
 
   -- type application '@' (lexed differently than as-pattern '@',
   -- due to checking for preceding whitespace)

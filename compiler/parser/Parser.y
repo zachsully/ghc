@@ -478,6 +478,7 @@ are the most common patterns, rewritten as regular expressions for clarity:
  'rec'          { L _ ITrec }           -- for arrow notation extension
  'codata'       { L _ ITcodata }        -- for codata extension
  '\#'           { L _ IThash }          -- for codata extension
+ '&'            { L _ ITampersand }     -- for codata extension
  'group'    { L _ ITgroup }     -- for list transform extension
  'by'       { L _ ITby }        -- for list transform extension
  'using'    { L _ ITusing }     -- for list transform extension
@@ -1102,10 +1103,14 @@ ty_decl :: { LTyClDecl GhcPs }
                                    -- constrs and deriving are both empty
                     ((fst $ unLoc $1):(fst $ unLoc $4)++(fst $ unLoc $5)) }
 
-          -- codata declaration
+          -- GADT Codata declaration
         | 'codata' capi_ctype tycl_hdr opt_kind_sig
-                 dest_list
+                 gadt_dest_list
             {% mkTyCodata (comb3 $1 $3 $4) $2 $3 (snd $ unLoc $4) (reverse (unLoc $5)) }
+
+        --   -- Simple Codata declaration
+        | 'codata' capi_ctype tycl_hdr simple_dest_list
+            {% mkTyCodata (comb3 $1 $3 $4) $2 $3 Nothing (reverse (unLoc $4)) }
 
           -- data/newtype family
         | 'data' 'family' type opt_datafam_kind_sig
@@ -2957,20 +2962,32 @@ to GADT declarations. -}
 ---------------------
 -- Codata parsing
 
-dest_list :: { Located [LDestDecl GhcPs] }
-dest_list : 'where' '{'        dests '}'    { sL1 $2 $3 }
-          | 'where' vocurly    dests close  { sL1 $2 $3 }
-          | {- empty -}                     { sL0 [] }
+gadt_dest_list :: { Located [LDestDecl GhcPs] }
+gadt_dest_list : 'where' '{'        gadt_dests '}'    { sL1 $2 $3 }
+               | 'where' vocurly    gadt_dests close  { sL1 $2 $3 }
+               | {- empty -}                          { sL0 [] }
 
-dests :: { [LDestDecl GhcPs] }
-dests : dests ';' dest                      { $3 : $1 }
-      | dests ';'                           { $1 }
-      | dest                                { [$1] }
-      | {- empty -}                         { [] }
+gadt_dests :: { [LDestDecl GhcPs] }
+gadt_dests : gadt_dests ';' gadt_dest                 { $3 : $1 }
+           | gadt_dests ';'                           { $1 }
+           | gadt_dest                                { [$1] }
+           | {- empty -}                              { [] }
 
-dest :: { LDestDecl GhcPs }
-dest : con '::' sigtypedoc                  { sLL $1 $3 (mkDestDecl [$1] $3) }
+gadt_dest :: { LDestDecl GhcPs }
+gadt_dest : con '::' sigtypedoc              { sLL $1 $3 (mkDestDeclGadt [$1] $3) }
 
+
+simple_dest_list :: { Located [LDestDecl GhcPs] }
+simple_dest_list : '=' destrs { $2 }
+
+destrs :: { Located [LDestDecl GhcPs] }
+destrs : destrs '&' destr      { sLL $1 $3 ($3 : unLoc $1) }
+       | destr                 { sL1 $1 [$1] }
+
+destr :: { LDestDecl GhcPs }
+-- destr : forall context_no_ops '=>' conid '::' atype
+--                 { sLL $1 $6 (mkDestDeclSimple $4 (snd $ unLoc $1) (Just $2) $6) }
+destr : con ':' ctype { sLL $1 $3 (mkDestDeclSimple $1 Nothing Nothing $3) }
 
 ------------------
 -- Coalternatives
