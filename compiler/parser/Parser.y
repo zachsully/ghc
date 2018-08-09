@@ -87,7 +87,7 @@ import GhcPrelude
 import qualified GHC.LanguageExtensions as LangExt
 }
 
-%expect 236 -- shift/reduce conflicts
+%expect 240 -- shift/reduce conflicts
 
 {- Last updated: 04 June 2018
 
@@ -277,7 +277,7 @@ Same as State 354 for unboxed tuples.
 
 state 417 contains 67 shift/reduce conflicts.
 
-n    *** exp10 -> '-' fexp .
+    *** exp10 -> '-' fexp .
         fexp -> fexp . aexp
         fexp -> fexp . TYPEAPP atype
 
@@ -1022,7 +1022,6 @@ topdecls :: { OrdList (LHsDecl GhcPs) }
 -- May have trailing semicolons, can be empty
 topdecls_semi :: { OrdList (LHsDecl GhcPs) }
         : topdecls_semi topdecl semis1      {% ams $2 $3 >> return ($1 `snocOL` $2) }
-        | topdecls_semi codata_decl semis1  { $1 `mappend` transCodata $2 }
         | {- empty -}                       { nilOL }
 
 topdecl :: { LHsDecl GhcPs }
@@ -1102,6 +1101,11 @@ ty_decl :: { LTyClDecl GhcPs }
                                    -- We need the location on tycl_hdr in case
                                    -- constrs and deriving are both empty
                     ((fst $ unLoc $1):(fst $ unLoc $4)++(fst $ unLoc $5)) }
+
+          -- codata declaration
+        | 'codata' capi_ctype tycl_hdr opt_kind_sig
+                 dest_list
+            {% mkTyCodata (comb3 $1 $3 $4) $2 $3 (snd $ unLoc $4) (reverse (unLoc $5)) }
 
           -- data/newtype family
         | 'data' 'family' type opt_datafam_kind_sig
@@ -2476,9 +2480,6 @@ infixexp_top :: { LHsExpr GhcPs }
                                   {% ams (sLL $1 $> (OpApp noExt $1 $2 $3))
                                          [mj AnnVal $2] }
 
-
-        | coaltlist                     {% transExtendedExpr =<< flattenCocase (Cocase $1) }
-
 exp10_top :: { LHsExpr GhcPs }
         : '-' fexp                      {% ams (sLL $1 $> $ NegApp noExt $2 noSyntaxExpr)
                                                [mj AnnMinus $1] }
@@ -2597,6 +2598,9 @@ aexp    :: { LHsExpr GhcPs }
                            ams (sLL $1 $> $ HsProc noExt p (sLL $1 $> $ HsCmdTop noExt cmd))
                                             -- TODO: is LL right here?
                                [mj AnnProc $1,mu AnnRarrow $3] }
+
+        -- coalternative list from codata extension
+        | coaltlist                { sL1 $1 (HsCoalts noExt $! $1) }
 
         | aexp1                 { $1 }
 
@@ -2952,60 +2956,56 @@ to GADT declarations. -}
 
 ---------------------
 -- Codata parsing
-codata_decl :: { LTyClDecl GhcPs }
-codata_decl : 'codata' tycl_hdr dest_list
-   {%  amms (mkTyCodata noSrcSpan $2 (fmap noLoc (reverse $3))) [] }
 
-dest_list :: { [DestDecl GhcPs] }
-dest_list : 'where' '{'        dests '}'    { $3 }
-          | 'where' vocurly    dests close  { $3 }
-          | {- empty -}                     { [] }
+dest_list :: { Located [LDestDecl GhcPs] }
+dest_list : 'where' '{'        dests '}'    { sL1 $2 $3 }
+          | 'where' vocurly    dests close  { sL1 $2 $3 }
+          | {- empty -}                     { sL0 [] }
 
-dests :: { [DestDecl GhcPs] }
+dests :: { [LDestDecl GhcPs] }
 dests : dests ';' dest                      { $3 : $1 }
       | dests ';'                           { $1 }
       | dest                                { [$1] }
       | {- empty -}                         { [] }
 
-dest :: { DestDecl GhcPs }
-dest : con '::' sigtype                  { mkDestDecl [$1] (mkLHsSigType $3) }
+dest :: { LDestDecl GhcPs }
+dest : con '::' sigtypedoc                  { sLL $1 $3 (mkDestDecl [$1] $3) }
 
 
 ------------------
 -- Coalternatives
-coaltlist  :: { [(Copattern,LHsExpr GhcPs)] }
-coaltlist  :          '{'     coalts '}'      { reverse $2 }
-           |          '{'            '}'      { [] }
+coaltlist  :: { LComatchGroup GhcPs }
+coaltlist  :          '{'     coalts '}'      { sLL $1 $3 (ComatchGroup noExt (fmap reverse $2)) }
+           |          '{'            '}'      { sLL $1 $2 (ComatchGroup noExt (sLL $1 $2 [])) }
 
-coalts :: { [(Copattern,LHsExpr GhcPs)] }
+coalts :: { Located [LComatch GhcPs] }
 coalts : coalts1                       { $1 }
-       | ';' coalts                    { $2 }
+       | ';' coalts                    { sL1 $1 (unLoc $2) }
 
-coalts1 :: { [(Copattern,LHsExpr GhcPs)] }
-coalts1 : coalts1 ';' coalt               { $3 : $1 }
-        | coalts1 ';'                     { $1 }
-        | coalt                           { [$1] }
+coalts1 :: { Located [LComatch GhcPs] }
+coalts1 : coalts1 ';' coalt               { sLL $1 $3 ($3 : (unLoc $1)) }
+        | coalts1 ';'                     { sL1 $1 (unLoc $1) }
+        | coalt                           { sL1 $1 [$1] }
 
-coalt :: { (Copattern,LHsExpr GhcPs) }
-coalt : cop '->' exp             { ( $1 , $3 ) }
+coalt :: { LComatch GhcPs }
+coalt : cop '->' exp             { sLL $1 $3 (Comatch noExt $1 $3) }
 
 {- Copatterns are parsed such that a sequence of atomic destructor copatterns
 are applied to # before parsing the patterns. -}
-cop :: { Copattern }
+cop :: { LCopattern GhcPs }
 cop : pcop                      { $1 }
     | fcop                      { $1 }
     | acop                      { $1 }
 
-pcop :: { Copattern }
-pcop : cop apat                 { QPat $1 $2 }
+pcop :: { LCopattern GhcPs }
+pcop : cop apat                 { sLL $1 $2 (PatCopattern noExt $1 $2) }
 
-fcop :: { Copattern }
-fcop : con acop                 { QDest $1 $2 }
+fcop :: { LCopattern GhcPs }
+fcop : con acop                 { sLL $1 $2 (DestCopattern noExt $1 $2) }
 
-acop :: { Copattern }
+acop :: { LCopattern GhcPs }
 acop : '[' cop ']'               { $2 }
-     | '(' cop ')'               { $2 }
-     | '\#'                      { QHead }
+     | '\#'                      { sL1 $1 (HeadCopattern noExt) }
 
 
 -----------------------------------------------------------------------------

@@ -431,7 +431,7 @@ data HsExpr p
   --       'ApiAnnotation.AnnOpen' @'{'@,
   --       'ApiAnnotation.AnnClose' @'}'@,'ApiAnnotation.AnnIn'
 
-  | HsCoalts    (XCoalts p) -- (CoMatchGroup p (LHsExpr p))
+  | HsCoalts    (XCoalts p) (LComatchGroup p)
 
   -- For details on above see note [Api annotations] in ApiAnnotation
   | HsLet       (XLet p)
@@ -1046,7 +1046,8 @@ ppr_expr (HsCase _ expr matches)
   = sep [ sep [text "case", nest 4 (ppr expr), ptext (sLit "of")],
           nest 2 (pprMatches matches) ]
 
--- ppr_expr (HsCoCase _) = panic "ppr_expr HsCoCase"
+ppr_expr (HsCoalts _ comatches)
+  = text "{" $$ nest 2 (pprComatches (unLoc comatches)) $$ text "}"
 
 ppr_expr (HsIf _ _ e1 e2 e3)
   = sep [hsep [text "if", nest 2 (ppr e1), ptext (sLit "then")],
@@ -1806,13 +1807,46 @@ pp_rhs ctxt rhs = matchSeparator ctxt <+> pprDeeper (ppr rhs)
 {-
 ************************************************************************
 *                                                                      *
-\subsection{CoMatch}
+\subsection{ComatchGroup and  Comatch}
 *                                                                      *
 ************************************************************************
 -}
 
--- data CoMatch p body
--- deriving instance (Data body) => Data (CoMatch p body)
+type LComatchGroup p = Located (ComatchGroup p)
+
+data ComatchGroup p
+  = ComatchGroup { cmg_ext    :: XCMG p
+                 , cmg_coalts :: Located [LComatch p] }
+  | XComatchGroup (XXComatchGroup p)
+
+type instance XCMG           (GhcPass _) = NoExt
+type instance XXComatchGroup (GhcPass _) = NoExt
+
+pprComatches :: (OutputableBndrId (GhcPass p))
+             => ComatchGroup (GhcPass p)
+             -> SDoc
+pprComatches (ComatchGroup { cmg_coalts = comatches })
+    = vcat (map pprComatch (map unLoc (unLoc comatches)))
+pprComatches (XComatchGroup x) = ppr x
+
+type LComatch p = Located (Comatch p)
+
+data Comatch p
+  = Comatch { cm_ext       :: XCM p
+            , cm_copattern :: LCopattern p
+            , cm_rhs       :: LHsExpr p }
+  | XComatch (XXComatch p)
+
+type instance XCM       (GhcPass _) = NoExt
+type instance XXComatch (GhcPass _) = NoExt
+
+pprComatch :: (OutputableBndrId (GhcPass p)) => Comatch (GhcPass p) -> SDoc
+pprComatch (Comatch { cm_copattern = q
+                    , cm_rhs = rhs })
+  = ppr q <+> arrow $$ nest 2 (ppr rhs)
+pprComatch (XComatch x) = ppr x
+
+
 
 {-
 ************************************************************************

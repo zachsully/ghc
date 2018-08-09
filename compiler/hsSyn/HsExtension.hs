@@ -722,6 +722,27 @@ type ForallXGRHS (c :: * -> Constraint) (x :: *) (b :: *) =
 
 -- -------------------------------------
 
+type family XCMG            x
+type family XXComatchGroup  x
+
+type ForallXComatchGroup (c :: * -> Constraint) (x :: *) =
+       ( c (XCMG           x)
+       , c (XXComatchGroup x)
+       )
+
+-- -------------------------------------
+
+
+type family XCM       x
+type family XXComatch x
+
+type ForallXComatch (c :: * -> Constraint) (x :: *) =
+       ( c (XCM       x)
+       , c (XXComatch x)
+       )
+
+-- -------------------------------------
+
 type family XLastStmt        x x' b
 type family XBindStmt        x x' b
 type family XApplicativeStmt x x' b
@@ -887,6 +908,21 @@ type ForallXPat (c :: * -> Constraint) (x :: *) =
        , c (XSigPat    x)
        , c (XCoPat     x)
        , c (XXPat      x)
+       )
+
+-- =====================================================================
+-- Type families for Copatterns
+
+type family XHeadCopattern x
+type family XDestCopattern x
+type family XPatCopattern  x
+type family XXCopattern    x
+
+type ForallXCopattern (c :: * -> Constraint) (x :: *) =
+       ( c (XHeadCopattern x)
+       , c (XDestCopattern x)
+       , c (XPatCopattern  x)
+       , c (XXCopattern    x)
        )
 
 -- =====================================================================

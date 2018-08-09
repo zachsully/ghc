@@ -38,8 +38,8 @@ module HsPat (
 
         pprParendLPat, pprConArgs,
 
-        -- Copatterns
-        Cop(..)
+        -- Copatterns for codata
+        Copattern(..), LCopattern
     ) where
 
 import GhcPrelude
@@ -801,14 +801,30 @@ collectEvVarsPat pat =
     ConPatIn _  _    -> panic "foldMapPatBag: ConPatIn"
     _other_pat       -> emptyBag
 
--- | Copatterns
---
+-- | Copatterns for the codata extension
+type LCopattern p = Located (Copattern p)
 
-data Cop p
-  = HeadCop
-    -- ^ the trivil copattern
+data Copattern p
+  = HeadCopattern (XHeadCopattern p)
+    -- ^ the trivial copattern `#`
 
-  | DestCop (Located ConLike)
+  | DestCopattern (XDestCopattern p) (Located (IdP p)) (LCopattern p)
+    -- ^ copattern made from declared destructors
+    -- e.g. `Fst #`
+  | PatCopattern (XPatCopattern p) (LCopattern p) (LPat p)
+  | XCopattern (XXCopattern p)
 
+type instance XHeadCopattern (GhcPass _) = NoExt
+type instance XDestCopattern (GhcPass _) = NoExt
+type instance XPatCopattern  (GhcPass _) = NoExt
+type instance XXCopattern    (GhcPass _) = NoExt
 
-  | PatCop (LPat p)
+instance (p ~ GhcPass pass, OutputableBndrId p)
+  => Outputable (Copattern p) where
+    ppr = pprCopattern
+
+pprCopattern :: (OutputableBndrId (GhcPass p)) => Copattern (GhcPass p) -> SDoc
+pprCopattern (HeadCopattern _) = text "#"
+pprCopattern (DestCopattern _ h q) = ppr h <+> brackets (ppr q)
+pprCopattern (PatCopattern _ q p) = brackets (ppr q) <+> ppr p
+pprCopattern (XCopattern x) = ppr x

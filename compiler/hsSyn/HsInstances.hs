@@ -292,6 +292,16 @@ deriving instance (Data body) => Data (GRHS     GhcPs body)
 deriving instance (Data body) => Data (GRHS     GhcRn body)
 deriving instance (Data body) => Data (GRHS     GhcTc body)
 
+-- deriving instance (DataIdLR p p) => Data (ComatchGroup p)
+deriving instance Data (ComatchGroup GhcPs)
+deriving instance Data (ComatchGroup GhcRn)
+deriving instance Data (ComatchGroup GhcTc)
+
+-- deriving instance (DataIdLR p p) => Data (Comatch p)
+deriving instance Data (Comatch GhcPs)
+deriving instance Data (Comatch GhcRn)
+deriving instance Data (Comatch GhcTc)
+
 -- deriving instance (DataIdLR p p,Data body) => Data (StmtLR   p p body)
 deriving instance (Data body) => Data (StmtLR   GhcPs GhcPs body)
 deriving instance (Data body) => Data (StmtLR   GhcPs GhcRn body)
@@ -363,6 +373,13 @@ deriving instance Data ListPatTc
 deriving instance (Data body) => Data (HsRecFields GhcPs body)
 deriving instance (Data body) => Data (HsRecFields GhcRn body)
 deriving instance (Data body) => Data (HsRecFields GhcTc body)
+
+-- ---------------------------------------------------------------------
+-- Data derivations from Copatterns ------------------------------------
+
+deriving instance Data (Copattern GhcPs)
+deriving instance Data (Copattern GhcRn)
+deriving instance Data (Copattern GhcTc)
 
 -- ---------------------------------------------------------------------
 -- Data derivations from HsTypes ---------------------------------------

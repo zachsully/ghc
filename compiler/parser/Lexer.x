@@ -868,8 +868,7 @@ reservedWordsFM = listToUFM $
          ( "proc",           ITproc,          xbit ArrowsBit),
 
          ( "codata",         ITcodata,        xbit CodataBit),
-	 ( "#",              IThash,          xbit CodataBit),
-	 ( "□",              IThash,          xbit CodataBit)
+	 ( "#",              IThash,          xbit CodataBit)
      ]
 
 {-----------------------------------
@@ -937,8 +936,7 @@ reservedSymsFM = listToUFM $
         -- ToDo: ideally, → and ∷ should be "specials", so that they cannot
         -- form part of a large operator.  This would let us have a better
         -- syntax for kinds: ɑ∷*→* would be a legal kind signature. (maybe).
-       ,( "#", IThash, copatternsEnabled)
-       ,( "□", IThash, copatternsEnabled)
+       ,( "#", IThash, codataEnabled)
        ]
 
 -- -----------------------------------------------------------------------------
@@ -1935,10 +1933,7 @@ data PState = PState {
         -- See note [Api annotations] in ApiAnnotation.hs
         annotations :: [(ApiAnnKey,[SrcSpan])],
         comment_q :: [Located AnnotationComment],
-        annotations_comments :: [(SrcSpan,[Located AnnotationComment])],
-
-	-- Used to generate unique names in the flattening stage for copatterns
-	u_num :: Int
+        annotations_comments :: [(SrcSpan,[Located AnnotationComment])]
      }
         -- last_loc and last_len are used when generating error messages,
         -- and in pushCurrentContext only.  Sigh, if only Happy passed the
@@ -2292,8 +2287,8 @@ always :: ExtsBitmap -> Bool
 always           _     = True
 arrowsEnabled :: ExtsBitmap -> Bool
 arrowsEnabled = xtest ArrowsBit
-copatternsEnabled :: ExtsBitmap -> Bool
-copatternsEnabled = xtest CodataBit
+codataEnabled :: ExtsBitmap -> Bool
+codataEnabled = xtest CodataBit
 thEnabled :: ExtsBitmap -> Bool
 thEnabled = xtest ThBit
 thQuotesEnabled :: ExtsBitmap -> Bool
@@ -2455,8 +2450,7 @@ mkPStatePure options buf loc =
       use_pos_prags = True,
       annotations = [],
       comment_q = [],
-      annotations_comments = [],
-      u_num = 0
+      annotations_comments = []
     }
 
 addWarning :: WarningFlag -> SrcSpan -> SDoc -> P ()

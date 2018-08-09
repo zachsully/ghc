@@ -526,7 +526,7 @@ data TyClDecl pass
              , tcdDataDefn :: HsDataDefn pass }
 
   | -- | @codata@ declaration
-    CodataDecl { tcdCdExt       :: XCodataDecl pass    -- ^ Post renamer, CUSK flag, FVs
+    CodataDecl { tccdCdExt      :: XCodataDecl pass    -- ^ Post renamer, CUSK flag, FVs
                , tccdLName      :: Located (IdP pass)  -- ^ Type constructor
                , tccdTyVars     :: LHsQTyVars pass     -- ^ Type variables
                , tccdFixity     :: LexicalFixity       -- ^ Fixity used in the declaration
@@ -610,9 +610,9 @@ isDataDecl :: TyClDecl pass -> Bool
 isDataDecl (DataDecl {}) = True
 isDataDecl _other        = False
 
--- isCodataDecl :: TyClDecl pass -> Bool
--- isCodataDecl (CodataDecl {}) = True
--- isCodataDecl _other          = False
+isCodataDecl :: TyClDecl pass -> Bool
+isCodataDecl (CodataDecl {}) = True
+isCodataDecl _other          = False
 
 -- | type or type instance declaration
 isSynDecl :: TyClDecl pass -> Bool
@@ -724,6 +724,10 @@ instance (p ~ GhcPass pass, OutputableBndrId p) => Outputable (TyClDecl p) where
                   , tcdDataDefn = defn })
       = pp_data_defn (pp_vanilla_decl_head ltycon tyvars fixity) defn
 
+    ppr (CodataDecl { tccdLName = ltycon, tccdTyVars = tyvars
+                    , tccdFixity = fixity, tccdCodataDefn = defn })
+      = pp_codata_defn (pp_vanilla_decl_head ltycon tyvars fixity) defn
+
     ppr (ClassDecl {tcdCtxt = context, tcdLName = lclas, tcdTyVars = tyvars,
                     tcdFixity = fixity,
                     tcdFDs  = fds,
@@ -787,6 +791,10 @@ pprTyClDeclFlavour (FamDecl { tcdFam = XFamilyDecl x})
 pprTyClDeclFlavour (DataDecl { tcdDataDefn = HsDataDefn { dd_ND = nd } })
   = ppr nd
 pprTyClDeclFlavour (DataDecl { tcdDataDefn = XHsDataDefn x })
+  = ppr x
+pprTyClDeclFlavour (CodataDecl { tccdCodataDefn = HsCodataDefn {} })
+  = text "codata"
+pprTyClDeclFlavour (CodataDecl { tccdCodataDefn = XHsCodataDefn x })
   = ppr x
 pprTyClDeclFlavour (XTyClDecl x) = ppr x
 
@@ -1492,6 +1500,7 @@ pprConDecl (XConDecl x) = ppr x
 ppr_con_names :: (OutputableBndr a) => [Located a] -> SDoc
 ppr_con_names = pprWithCommas (pprPrefixOcc . unLoc)
 
+
 {- *********************************************************************
 *                                                                      *
                Codata types and Codata destructors
@@ -1529,30 +1538,73 @@ type LDestDecl pass = Located (DestDecl pass)
 -- | data Destructor Declaration
 data DestDecl pass
   = DestDeclGADT
-      { dest_g_ext   :: XDestDeclGADT pass
-      , dest_names   :: [Located (IdP pass)]
-
-      -- The next four fields describe the type after the '::'
-      -- See Note [GADT abstract syntax]
-      -- The following field is Located to anchor API Annotations,
-      -- AnnForall and AnnDot.
-      , dest_forall  :: Located Bool      -- ^ True <=> explicit forall
-                                          --   False => hsq_explicit is empty
-      , dest_qvars   :: LHsQTyVars pass
+      { dest_g_ext     :: XDestDeclGADT pass
+      , dest_names     :: [Located (IdP pass)]
+      , dest_forall    :: Located Bool      -- ^ True <=> explicit forall
+                                            --   False => hsq_explicit is empty
+      , dest_qvars     :: LHsQTyVars pass
                        -- Whether or not there is an /explicit/ forall, we still
                        -- need to capture the implicitly-bound type/kind variables
 
-      , dest_mb_cxt  :: Maybe (LHsContext pass) -- ^ User-written context (if any)
-      -- , dest_args    :: HsDestDeclDetails pass   -- ^ Arguments; never InfixCon
-      , dest_res_ty  :: LHsType pass            -- ^ Result type
-
-      , dest_doc     :: Maybe LHsDocString
+      , dest_mb_cxt    :: Maybe (LHsContext pass) -- ^ User-written context (if any)
+      , dest_dom_ty    :: LHsType pass            -- ^ Domain type
+      , dest_mb_cod_ty :: Maybe (LHsType pass)
+            -- ^ The single projection from a codata type
+            -- For this to typecheck, this should be a Just
+      , dest_doc       :: Maybe LHsDocString
           -- ^ A possible Haddock comment.
       }
   | XDestDecl (XXDestDecl pass)
 
 type instance XDestDeclGADT (GhcPass _) = NoExt
 type instance XXDestDecl    (GhcPass _) = NoExt
+
+pp_codata_defn :: (OutputableBndrId (GhcPass p))
+               => (HsContext (GhcPass p) -> SDoc)
+               -> HsCodataDefn (GhcPass p)
+               -> SDoc
+pp_codata_defn pp_hdr (HsCodataDefn { cdd_ctxt = L _ context
+                                    , cdd_cType = mb_ct
+                                    , cdd_kindSig = mb_sig
+                                    , cdd_dests = dest_decls })
+  | null dest_decls = text "codata" <+> pp_ct <+> pp_hdr context <+> pp_sig
+  | otherwise = hang (text "codata" <+> pp_ct <+> pp_hdr context <+> pp_sig)
+                  2 (pp_dest_decls dest_decls)
+  where
+    pp_ct = case mb_ct of
+               Nothing   -> empty
+               Just ct -> ppr ct
+    pp_sig = case mb_sig of
+               Nothing   -> empty
+               Just kind -> dcolon <+> ppr kind
+pp_codata_defn _ (XHsCodataDefn x) = ppr x
+
+pp_dest_decls :: (OutputableBndrId (GhcPass p))
+              => [LDestDecl (GhcPass p)]
+              -> SDoc
+pp_dest_decls cs = hang (text "where") 2 (vcat (map ppr cs))
+
+
+instance (p ~ GhcPass pass, OutputableBndrId p) => Outputable (DestDecl p) where
+    ppr = pprDestDecl
+
+pprDestDecl :: (OutputableBndrId (GhcPass p)) => DestDecl (GhcPass p) -> SDoc
+pprDestDecl (DestDeclGADT { dest_names = dests, dest_qvars = qvars
+                          , dest_mb_cxt = mcxt
+                          , dest_dom_ty = dom_ty, dest_mb_cod_ty = mcod_ty
+                          , dest_doc = doc })
+  = ppr_mbDoc doc <+> ppr_dest_names dests <+> dcolon
+    <+> (sep [pprHsForAll (hsq_explicit qvars) cxt,
+              sep [ppr dom_ty,arrow,pp_mct] ])
+  where
+    cxt = fromMaybe (noLoc []) mcxt
+    pp_mct = case mcod_ty of
+               Nothing -> text "?"
+               Just ty -> ppr ty
+pprDestDecl (XDestDecl x) = ppr x
+
+ppr_dest_names :: (OutputableBndr a) => [Located a] -> SDoc
+ppr_dest_names = pprWithCommas (pprPrefixOcc . unLoc)
 
 {-
 ************************************************************************

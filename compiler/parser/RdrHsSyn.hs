@@ -15,7 +15,9 @@ module   RdrHsSyn (
         mkHsDo, mkSpliceDecl,
         mkRoleAnnotDecl,
         mkClassDecl,
-        mkTyData, mkDataFamInst,
+        mkTyData,
+        mkTyCodata,
+        mkDataFamInst,
         mkTySynonym, mkTyFamInstEqn,
         mkTyFamInst,
         mkFamDecl, mkLHsSigType,
@@ -38,6 +40,7 @@ module   RdrHsSyn (
         mkExtName,           -- RdrName -> CLabelString
         mkGadtDecl,          -- [Located RdrName] -> LHsType RdrName -> ConDecl RdrName
         mkConDeclH98,
+        mkDestDecl,
         mkATDefault,
 
         -- Bunch of functions in the parser monad for
@@ -67,17 +70,6 @@ module   RdrHsSyn (
         mkTypeImpExp,
         mkImpExpSubSpec,
         checkImportSpec,
-
-        -- Copattern parsing helpers
-        mkTyCodata,
-        Cocase(Cocase),
-        FCocase(FCocase),
-        Copattern(..),
-        FCopattern(..),
-        flattenCocase,
-        transCodata,
-        transExtendedExpr,
-        mkDestDecl,
 
         -- Warnings and errors
         warnStarIsType,
@@ -240,6 +232,38 @@ mkTySynonym loc lhs rhs
                                 , tcdLName = tc, tcdTyVars = tyvars
                                 , tcdFixity = fixity
                                 , tcdRhs = rhs })) }
+
+mkTyCodata :: SrcSpan
+           -> Maybe (Located CType)
+           -> Located (Maybe (LHsContext GhcPs), LHsType GhcPs)
+           -> Maybe (LHsKind GhcPs)
+           -> [LDestDecl GhcPs]
+           -> P (LTyClDecl GhcPs)
+mkTyCodata loc cType (L _ (mcxt, tycl_hdr)) ksig codata_dests
+  = do { (tc, tparams, fixity, ann) <- checkTyClHdr False tycl_hdr
+       ; mapM_ (\a -> a loc) ann -- Add any API Annotations to the top SrcSpan
+       ; tyvars <- checkTyVarsP (text "codata") equalsDots tc tparams
+       ; defn <- mkCodataDefn cType mcxt ksig codata_dests
+       ; return (L loc (CodataDecl { tccdCdExt = noExt,
+                                     tccdLName = tc,
+                                     tccdTyVars = tyvars,
+                                     tccdFixity = fixity,
+                                     tccdCodataDefn = defn })) }
+
+mkCodataDefn :: Maybe (Located CType)
+             -> Maybe (LHsContext GhcPs)
+             -> Maybe (LHsKind GhcPs)
+             -> [LDestDecl GhcPs]
+             -> P (HsCodataDefn GhcPs)
+mkCodataDefn cType mcxt ksig codata_dests
+  = do { checkDatatypeContext mcxt
+       ; let cxt = fromMaybe (noLoc []) mcxt
+       ; return (HsCodataDefn { cdd_ext = noExt
+                              , cdd_cType = cType
+                              , cdd_ctxt = cxt
+                              , cdd_dests = codata_dests
+                              , cdd_kindSig = ksig }) }
+
 
 mkTyFamInstEqn :: LHsType GhcPs
                -> LHsType GhcPs
@@ -702,6 +726,37 @@ nudgeHsSrcBangs details
     go (L l (HsDocTy _ (L _ (HsBangTy _ s lty)) lds)) =
       L l (HsBangTy noExt s (addCLoc lty lds (HsDocTy noExt lty lds)))
     go lty = lty
+
+mkDestDecl :: [Located RdrName]
+           -> LHsType GhcPs     -- Always a HsForAllTy
+           -> DestDecl GhcPs
+mkDestDecl names ty
+  = DestDeclGADT { dest_g_ext  = noExt
+                 , dest_names  = names
+                 , dest_forall = L l $ isLHsForAllTy ty'
+                 , dest_qvars  = mkHsQTvs tvs
+                 , dest_mb_cxt = mcxt
+                 , dest_dom_ty = dom_ty
+                 , dest_mb_cod_ty = mcod_ty
+                 , dest_doc    = Nothing }
+  where
+    (ty'@(L l _),_) = peel_parens ty []
+    (tvs, rho) = splitLHsForAllTy ty'
+    (mcxt, tau, _) = split_rho rho []
+
+    split_rho (L _ (HsQualTy { hst_ctxt = cxt, hst_body = tau })) ann
+                                       = (Just cxt, tau, ann)
+    split_rho (L l (HsParTy _ ty)) ann = split_rho ty (ann++mkParensApiAnn l)
+    split_rho tau                  ann = (Nothing, tau, ann)
+
+    (dom_ty, mcod_ty) = split_tau tau
+
+    split_tau (L _ (HsFunTy _ dom_ty cod_ty)) = (dom_ty, Just cod_ty)
+    split_tau tau = (tau,Nothing)
+
+    peel_parens (L l (HsParTy _ ty)) ann = peel_parens ty
+                                                       (ann++mkParensApiAnn l)
+    peel_parens ty                   ann = (ty, ann)
 
 
 setRdrNameSpace :: RdrName -> NameSpace -> RdrName
@@ -1820,6 +1875,7 @@ mkLHsOpTy x op y =
   let loc = getLoc x `combineSrcSpans` getLoc op `combineSrcSpans` getLoc y
   in L loc (mkHsOpTy x op y)
 
+{-
 --------------------------------------------------------------------------------
 --                   Untyped Copattern transformation                         --
 --------------------------------------------------------------------------------
@@ -2104,3 +2160,4 @@ mkHsLet (L l v) a b =
 transDefault :: Default -> P (LHsExpr GhcPs)
 transDefault (DefExtExpr e) = transExtendedExpr e
 transDefault DefEmpty = return hsUnmatchedPattern
+-}
