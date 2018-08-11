@@ -363,10 +363,12 @@ data HsDocContext
   | DerivDeclCtx
   | RuleCtx FastString
   | TyDataCtx (Located RdrName)
+  | TyCodataCtx (Located RdrName)
   | TySynCtx (Located RdrName)
   | TyFamilyCtx (Located RdrName)
   | FamPatCtx (Located RdrName)    -- The patterns of a type/data family instance
   | ConDeclCtx [Located Name]
+  | DestDeclCtx [Located Name]
   | ClassDeclCtx (Located RdrName)
   | ExprWithTySigCtx
   | TypBrCtx
@@ -391,6 +393,7 @@ pprHsDocContext DefaultDeclCtx        = text "a `default' declaration"
 pprHsDocContext DerivDeclCtx          = text "a deriving declaration"
 pprHsDocContext (RuleCtx name)        = text "the transformation rule" <+> ftext name
 pprHsDocContext (TyDataCtx tycon)     = text "the data type declaration for" <+> quotes (ppr tycon)
+pprHsDocContext (TyCodataCtx tycon)   = text "the codata type declaration for" <+> quotes (ppr tycon)
 pprHsDocContext (FamPatCtx tycon)     = text "a type pattern of family instance for" <+> quotes (ppr tycon)
 pprHsDocContext (TySynCtx name)       = text "the declaration for type synonym" <+> quotes (ppr name)
 pprHsDocContext (TyFamilyCtx name)    = text "the declaration for type family" <+> quotes (ppr name)
@@ -408,3 +411,7 @@ pprHsDocContext (ConDeclCtx [name])
    = text "the definition of data constructor" <+> quotes (ppr name)
 pprHsDocContext (ConDeclCtx names)
    = text "the definition of data constructors" <+> interpp'SP names
+pprHsDocContext (DestDeclCtx [name])
+   = text "the definition of codata destructor" <+> quotes (ppr name)
+pprHsDocContext (DestDeclCtx names)
+   = text "the definition of codata destructors" <+> interpp'SP names

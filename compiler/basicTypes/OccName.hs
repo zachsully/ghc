@@ -73,8 +73,8 @@ module OccName (
         -- ** Deconstruction
         occNameFS, occNameString, occNameSpace,
 
-        isVarOcc, isTvOcc, isTcOcc, isDataOcc, isDataSymOcc, isSymOcc, isValOcc,
-        parenSymOcc, startsWithUnderscore,
+        isVarOcc, isTvOcc, isTcOcc, isDataOcc, isCodataOcc, isDataSymOcc,
+        isSymOcc, isValOcc, parenSymOcc, startsWithUnderscore,
 
         isTcClsNameSpace, isTvNameSpace, isDataConNameSpace, isVarNameSpace, isValNameSpace,
 
@@ -484,7 +484,7 @@ occNameString (OccName _ s) = unpackFS s
 setOccNameSpace :: NameSpace -> OccName -> OccName
 setOccNameSpace sp (OccName _ occ) = OccName sp occ
 
-isVarOcc, isTvOcc, isTcOcc, isDataOcc :: OccName -> Bool
+isVarOcc, isTvOcc, isTcOcc, isDataOcc, isCodataOcc :: OccName -> Bool
 
 isVarOcc (OccName VarName _) = True
 isVarOcc _                   = False
@@ -504,6 +504,10 @@ isValOcc _                    = False
 
 isDataOcc (OccName DataName _) = True
 isDataOcc _                    = False
+
+-- Just use the DataName information at this point
+isCodataOcc (OccName DataName _) = True
+isCodataOcc _                    = False
 
 -- | Test if the 'OccName' is a data constructor that starts with
 -- a symbol (e.g. @:@, or @[]@)

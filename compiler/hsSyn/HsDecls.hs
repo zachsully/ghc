@@ -22,10 +22,10 @@ module HsDecls (
   HsDerivingClause(..), LHsDerivingClause, NewOrData(..), newOrDataToFlavour,
 
   -- ** Class or type declarations
-  TyClDecl(..), LTyClDecl, DataDeclRn(..),
+  TyClDecl(..), LTyClDecl, DataDeclRn(..), CodataDeclRn(..),
   TyClGroup(..), mkTyClGroup, emptyTyClGroup,
   tyClGroupTyClDecls, tyClGroupInstDecls, tyClGroupRoleDecls,
-  isClassDecl, isDataDecl, isSynDecl, tcdName,
+  isClassDecl, isDataDecl, isCodataDecl, isSynDecl, tcdName,
   isFamilyDecl, isTypeFamilyDecl, isDataFamilyDecl,
   isOpenTypeFamilyInfo, isClosedTypeFamilyInfo,
   tyFamInstDeclName, tyFamInstDeclLName,
@@ -66,7 +66,7 @@ module HsDecls (
   getConNames, getConArgs,
 
   -- ** Codata-destructor declarations
-  HsCodataDefn(..), LDestDecl, DestDecl(..),
+  HsCodataDefn(..), LDestDecl, DestDecl(..), hsDestDeclTheta,
 
   -- ** Document comments
   DocDecl(..), LDocDecl, docDeclDoc,
@@ -526,11 +526,11 @@ data TyClDecl pass
              , tcdDataDefn :: HsDataDefn pass }
 
   | -- | @codata@ declaration
-    CodataDecl { tccdCdExt      :: XCodataDecl pass    -- ^ Post renamer, CUSK flag, FVs
-               , tccdLName      :: Located (IdP pass)  -- ^ Type constructor
-               , tccdTyVars     :: LHsQTyVars pass     -- ^ Type variables
-               , tccdFixity     :: LexicalFixity       -- ^ Fixity used in the declaration
-               , tccdCodataDefn :: HsCodataDefn pass }
+    CodataDecl { tcdCdExt      :: XCodataDecl pass    -- ^ Post renamer, CUSK flag, FVs
+               , tcdLName      :: Located (IdP pass)  -- ^ Type constructor
+               , tcdTyVars     :: LHsQTyVars pass     -- ^ Type variables
+               , tcdFixity     :: LexicalFixity       -- ^ Fixity used in the declaration
+               , tcdCodataDefn :: HsCodataDefn pass }
 
   | ClassDecl { tcdCExt    :: XClassDecl pass,         -- ^ Post renamer, FVs
                 tcdCtxt    :: LHsContext pass,         -- ^ Context...
@@ -562,8 +562,8 @@ data DataDeclRn = DataDeclRn
 
 -- This is the same as the Data version
 data CodataDeclRn = CodataDeclRn
-  { tccdCodataCusk :: Bool
-  , tccdFVs        :: NameSet }
+  { tcdCodataCusk :: Bool
+  , tcdCodataFVs  :: NameSet }
   deriving Data
 
 {- Note [TyVar binders for associated decls]
@@ -711,6 +711,7 @@ hsDeclHasCusk (SynDecl { tcdTyVars = tyvars, tcdRhs = rhs })
       HsKindSig {}   -> True
       _              -> False
 hsDeclHasCusk (DataDecl { tcdDExt = DataDeclRn { tcdDataCusk = cusk }}) = cusk
+hsDeclHasCusk (CodataDecl { tcdCdExt = CodataDeclRn { tcdCodataCusk = cusk} } ) = cusk
 hsDeclHasCusk (ClassDecl { tcdTyVars = tyvars }) = hsTvbAllKinded tyvars
 hsDeclHasCusk (XTyClDecl _) = panic "hsDeclHasCusk"
 
@@ -730,8 +731,8 @@ instance (p ~ GhcPass pass, OutputableBndrId p) => Outputable (TyClDecl p) where
                   , tcdDataDefn = defn })
       = pp_data_defn (pp_vanilla_decl_head ltycon tyvars fixity) defn
 
-    ppr (CodataDecl { tccdLName = ltycon, tccdTyVars = tyvars, tccdFixity = fixity
-                    , tccdCodataDefn = defn })
+    ppr (CodataDecl { tcdLName = ltycon, tcdTyVars = tyvars, tcdFixity = fixity
+                    , tcdCodataDefn = defn })
       = pp_codata_defn (pp_vanilla_decl_head ltycon tyvars fixity) defn
 
     ppr (ClassDecl {tcdCtxt = context, tcdLName = lclas, tcdTyVars = tyvars,
@@ -798,9 +799,9 @@ pprTyClDeclFlavour (DataDecl { tcdDataDefn = HsDataDefn { dd_ND = nd } })
   = ppr nd
 pprTyClDeclFlavour (DataDecl { tcdDataDefn = XHsDataDefn x })
   = ppr x
-pprTyClDeclFlavour (CodataDecl { tccdCodataDefn = HsCodataDefn {} })
+pprTyClDeclFlavour (CodataDecl { tcdCodataDefn = HsCodataDefn {} })
   = text "codata"
-pprTyClDeclFlavour (CodataDecl { tccdCodataDefn = XHsCodataDefn x })
+pprTyClDeclFlavour (CodataDecl { tcdCodataDefn = XHsCodataDefn x })
   = ppr x
 pprTyClDeclFlavour (XTyClDecl x) = ppr x
 
@@ -1531,7 +1532,7 @@ data HsCodataDefn pass
                      -- ^ Codata destructors
                      --
                      -- For @codata T a where { T1 :: T a -> b }@
-                     --   the 'LDestDecls' all have 'DestDeclGADT'.
+                     --   the 'LDestDecls' all have 'DestDeclGCCT'.
     }
   | XHsCodataDefn (XXHsCodataDefn pass)
 
@@ -1543,8 +1544,9 @@ type LDestDecl pass = Located (DestDecl pass)
 
 -- | data Destructor Declaration
 data DestDecl pass
-  = DestDeclGADT
-      { dest_g_ext     :: XDestDeclGADT pass
+  -- Generalized Coalgebraic Codata Type, similar to the GADT syntax
+  = DestDeclGCCT
+      { dest_g_ext     :: XDestDeclGCCT pass
       , dest_names     :: [Located (IdP pass)]
       , dest_forall    :: Located Bool      -- ^ True <=> explicit forall
                                             --   False => hsq_explicit is empty
@@ -1560,9 +1562,10 @@ data DestDecl pass
       , dest_doc       :: Maybe LHsDocString
           -- ^ A possible Haddock comment.
       }
-
-  | DestDeclSimple
-      { dest_ext    :: XDestDeclSimple pass
+    -- A version of Tatsuya Hagino's codata sytnax for Haskell
+    -- similar to the Haskell 98 syntax for data constructors
+  | DestDeclTH
+      { dest_ext    :: XDestDeclTH pass
       , dest_name   :: Located (IdP pass)
       , dest_forall :: Located Bool
                               -- ^ True <=> explicit user-written forall
@@ -1578,9 +1581,17 @@ data DestDecl pass
       }
   | XDestDecl (XXDestDecl pass)
 
-type instance XDestDeclGADT   (GhcPass _) = NoExt
-type instance XDestDeclSimple (GhcPass _) = NoExt
-type instance XXDestDecl      (GhcPass _) = NoExt
+type instance XDestDeclGCCT (GhcPass _) = NoExt
+type instance XDestDeclTH   (GhcPass _) = NoExt
+type instance XXDestDecl    (GhcPass _) = NoExt
+
+{-
+This is the same function as the one use for constructors. I'm unsure of why it
+has the name that it does.
+-}
+hsDestDeclTheta :: Maybe (LHsContext pass) -> [LHsType pass]
+hsDestDeclTheta Nothing            = []
+hsDestDeclTheta (Just (L _ theta)) = theta
 
 pp_codata_defn :: (OutputableBndrId (GhcPass p))
                => (HsContext (GhcPass p) -> SDoc)
@@ -1605,9 +1616,9 @@ pp_codata_defn _ (XHsCodataDefn x) = ppr x
 pp_dest_decls :: (OutputableBndrId (GhcPass p))
               => [LDestDecl (GhcPass p)]
               -> SDoc
-pp_dest_decls cs@(L _ DestDeclGADT{} : _) -- In GADT syntax
+pp_dest_decls cs@(L _ DestDeclGCCT{} : _) -- In GCCT syntax
   = hang (text "where") 2 (vcat (map ppr cs))
-pp_dest_decls cs                          -- In Simple syntax
+pp_dest_decls cs                          -- In Hagino's syntax
   = equals <+> sep (punctuate (text " &") (map ppr cs))
 
 
@@ -1615,7 +1626,7 @@ instance (p ~ GhcPass pass, OutputableBndrId p) => Outputable (DestDecl p) where
     ppr = pprDestDecl
 
 pprDestDecl :: (OutputableBndrId (GhcPass p)) => DestDecl (GhcPass p) -> SDoc
-pprDestDecl (DestDeclGADT { dest_names = dests, dest_qvars = qvars
+pprDestDecl (DestDeclGCCT { dest_names = dests, dest_qvars = qvars
                           , dest_mb_cxt = mcxt
                           , dest_dom_ty = dom_ty, dest_mb_cod_ty = mcod_ty
                           , dest_doc = doc })
@@ -1627,11 +1638,11 @@ pprDestDecl (DestDeclGADT { dest_names = dests, dest_qvars = qvars
     pp_mct = case mcod_ty of
                Nothing -> empty
                Just ty -> ppr ty
-pprDestDecl (DestDeclSimple { dest_name = name
-                            , dest_ex_tvs = ex_tvs
-                            , dest_mb_cxt = mcxt
-                            , dest_cod_ty = cod_ty
-                            , dest_doc = doc })
+pprDestDecl (DestDeclTH { dest_name = name
+                        , dest_ex_tvs = ex_tvs
+                        , dest_mb_cxt = mcxt
+                        , dest_cod_ty = cod_ty
+                        , dest_doc = doc })
   = sep [ ppr_mbDoc doc
         , ppr name
         , dcolon

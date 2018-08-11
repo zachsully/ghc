@@ -24,7 +24,7 @@ module RnExpr (
 import GhcPrelude
 
 import RnBinds   ( rnLocalBindsAndThen, rnLocalValBindsLHS, rnLocalValBindsRHS,
-                   rnMatchGroup, rnGRHS, makeMiniFixityEnv)
+                   rnMatchGroup, rnComatchGroup, rnGRHS, makeMiniFixityEnv)
 import HsSyn
 import TcEnv            ( isBrackStage )
 import TcRnMonad
@@ -249,6 +249,10 @@ rnExpr (HsCase x expr matches)
   = do { (new_expr, e_fvs) <- rnLExpr expr
        ; (new_matches, ms_fvs) <- rnMatchGroup CaseAlt rnLExpr matches
        ; return (HsCase x new_expr new_matches, e_fvs `plusFV` ms_fvs) }
+
+rnExpr (HsCoalts x (L loc comatches))
+  = do { (new_comatches, cms_fvs) <- rnComatchGroup comatches
+       ; return (HsCoalts x (L loc new_comatches), cms_fvs) }
 
 rnExpr (HsLet x (L l binds) expr)
   = rnLocalBindsAndThen binds $ \binds' _ -> do

@@ -1046,9 +1046,6 @@ ppr_expr (HsCase _ expr matches)
   = sep [ sep [text "case", nest 4 (ppr expr), ptext (sLit "of")],
           nest 2 (pprMatches matches) ]
 
-ppr_expr (HsCoalts _ comatches)
-  = text "{" $$ nest 2 (pprComatches (unLoc comatches)) $$ text "}"
-
 ppr_expr (HsIf _ _ e1 e2 e3)
   = sep [hsep [text "if", nest 2 (ppr e1), ptext (sLit "then")],
          nest 4 (ppr e2),
@@ -1065,6 +1062,9 @@ ppr_expr (HsMultiIf _ alts)
             one_alt = [ interpp'SP guards
                       , text "->" <+> pprDeeper (ppr expr) ]
         ppr_alt (L _ (XGRHS x)) = ppr x
+
+ppr_expr (HsCoalts _ comatches)
+  = text "{" $$ nest 2 (pprComatches (unLoc comatches)) $$ text "}"
 
 -- special case: let ... in let ...
 ppr_expr (HsLet _ (L _ binds) expr@(L _ (HsLet _ _ _)))
@@ -1239,6 +1239,7 @@ hsExprNeedsParens p = go
     go (HsCase{})                     = p > topPrec
     go (HsIf{})                       = p > topPrec
     go (HsMultiIf{})                  = p > topPrec
+    go (HsCoalts{})                   = False
     go (HsLet{})                      = p > topPrec
     go (HsDo _ sc _)
       | isListCompExpr sc             = False
@@ -1807,7 +1808,7 @@ pp_rhs ctxt rhs = matchSeparator ctxt <+> pprDeeper (ppr rhs)
 {-
 ************************************************************************
 *                                                                      *
-\subsection{ComatchGroup and  Comatch}
+\subsection{ComatchGroup and Comatch}
 *                                                                      *
 ************************************************************************
 -}

@@ -31,6 +31,9 @@ module RnPat (-- main entry points
               -- Literals
               rnLit, rnOverLit,
 
+              -- Copatterns
+              rnCopattern,
+
              -- Pattern Error messages that are also used elsewhere
              checkTupSize, patSigErr
              ) where
@@ -841,6 +844,19 @@ rnOverLit origLit
                   ; return ((lit' { ol_val = negateOverLitVal val }, Just negate_name)
                                   , fvs1 `plusFV` fvs2) }
           else return ((lit', Nothing), fvs1) }
+
+{-
+*********************************************************
+*                                                      *
+            Copatterns
+*                                                      *
+*********************************************************
+-}
+
+rnCopattern :: LCopattern GhcPs
+            -> (LCopattern GhcRn -> RnM (a, FreeVars))
+            -> RnM (r, FreeVars)
+rnCopattern = panic "rnCopattern"
 
 {-
 ************************************************************************

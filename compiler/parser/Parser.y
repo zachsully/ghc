@@ -2974,7 +2974,7 @@ gadt_dests : gadt_dests ';' gadt_dest                 { $3 : $1 }
            | {- empty -}                              { [] }
 
 gadt_dest :: { LDestDecl GhcPs }
-gadt_dest : con '::' sigtypedoc              { sLL $1 $3 (mkDestDeclGadt [$1] $3) }
+gadt_dest : con '::' sigtypedoc              { sLL $1 $3 (mkDestDeclGcct [$1] $3) }
 
 
 simple_dest_list :: { Located [LDestDecl GhcPs] }
@@ -2986,8 +2986,8 @@ destrs : destrs '&' destr      { sLL $1 $3 ($3 : unLoc $1) }
 
 destr :: { LDestDecl GhcPs }
 -- destr : forall context_no_ops '=>' conid '::' atype
---                 { sLL $1 $6 (mkDestDeclSimple $4 (snd $ unLoc $1) (Just $2) $6) }
-destr : con '::' ctype { sLL $1 $3 (mkDestDeclSimple $1 Nothing Nothing $3) }
+--                 { sLL $1 $6 (mkDestDeclTH $4 (snd $ unLoc $1) (Just $2) $6) }
+destr : con '::' ctype { sLL $1 $3 (mkDestDeclTH $1 Nothing Nothing $3) }
 
 ------------------
 -- Coalternatives

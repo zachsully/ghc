@@ -21,7 +21,7 @@ module RnBinds (
 
    -- Other bindings
    rnMethodBinds, renameSigs,
-   rnMatchGroup, rnGRHSs, rnGRHS, rnSrcFixityDecl,
+   rnMatchGroup, rnComatchGroup, rnGRHSs, rnGRHS, rnSrcFixityDecl,
    makeMiniFixityEnv, MiniFixityEnv,
    HsSigCtxt(..)
    ) where
@@ -1272,6 +1272,36 @@ rnSrcFixityDecl sig_ctxt = rn_decl
         do names <- lookupLocalTcNames sig_ctxt what rdr_name
            return [ L name_loc name | (_, name) <- names ]
     what = text "fixity signature"
+
+{-
+************************************************************************
+*                                                                      *
+\subsection{Comatch}
+*                                                                      *
+************************************************************************
+-}
+
+rnComatchGroup :: ComatchGroup GhcPs -> RnM (ComatchGroup GhcRn, FreeVars)
+rnComatchGroup (ComatchGroup { cmg_ext    = x
+                             , cmg_coalts = L loc cms })
+  = do { (new_cms, cms_fvs) <- mapFvRn rnComatch cms
+       ; return (ComatchGroup x (L loc new_cms), cms_fvs) }
+rnComatchGroup (XComatchGroup {}) = panic "rnComatchGroup"
+
+rnComatch :: LComatch GhcPs -> RnM (LComatch GhcRn, FreeVars)
+rnComatch = wrapLocFstM rnComatch'
+
+rnComatch' :: Comatch GhcPs -> RnM (Comatch GhcRn, FreeVars)
+rnComatch' (Comatch { cm_ext       = x
+                    , cm_copattern = copattern
+                    , cm_rhs       = rhs })
+  = do  { rnCopattern copattern $ \ new_copattern -> do
+        { (new_rhs, rhs_fvs) <- rnLExpr rhs
+        ; return (Comatch { cm_ext       = x
+                          , cm_copattern = new_copattern
+                          , cm_rhs       = new_rhs}
+                 , rhs_fvs ) }}
+rnComatch' (XComatch _) = panic "rnComatch'"
 
 {-
 ************************************************************************

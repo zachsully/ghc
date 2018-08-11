@@ -1519,9 +1519,24 @@ rnTyClDecl (DataDecl { tcdLName = tycon, tcdTyVars = tyvars,
                           , tcdDExt     = rn_info }, fvs) } }
 
 -- "codata" devlarations
--- rnTyClDecl (CodataDecl { tccdLName = tycon, tccdTyVars = tyvars,
---                          tccdFixity = fixity, tccdCodataDefn = defn })
---   = do {}
+rnTyClDecl (CodataDecl { tcdLName = tycon, tcdTyVars = tyvars,
+                         tcdFixity = fixity, tcdCodataDefn = defn })
+  = do { tycon' <- lookupLocatedTopBndrRn tycon
+       ; kvs <- extractCodataDefnKindVars defn
+       ; let doc = TyCodataCtx tycon
+       ; traceRn "rntycl-codata" (ppr tycon <+> ppr kvs)
+       ; bindHsQTyVars doc Nothing Nothing kvs tyvars $ \ tyvars' no_rhs_kvs ->
+    do { (defn', fvs) <- rnCodataDefn doc defn
+          -- See Note [Complete user-supplied kind signatures] in HsDecls
+       ; let cusk = hsTvbAllKinded tyvars' && no_rhs_kvs
+             rn_info = CodataDeclRn { tcdCodataCusk = cusk
+                                    , tcdCodataFVs  = fvs }
+       ; traceRn "rncodata" (ppr tycon <+> ppr cusk <+> ppr no_rhs_kvs)
+       ; return (CodataDecl { tcdLName      = tycon'
+                            , tcdTyVars     = tyvars'
+                            , tcdFixity     = fixity
+                            , tcdCodataDefn = defn'
+                            , tcdCdExt      = rn_info }, fvs) } }
 
 rnTyClDecl (ClassDecl { tcdCtxt = context, tcdLName = lcls,
                         tcdTyVars = tyvars, tcdFixity = fixity,
@@ -1782,6 +1797,43 @@ multipleDerivClausesErr :: SDoc
 multipleDerivClausesErr
   = vcat [ text "Illegal use of multiple, consecutive deriving clauses"
          , text "Use DerivingStrategies to allow this" ]
+
+rnCodataDefn :: HsDocContext -> HsCodataDefn GhcPs
+           -> RnM (HsCodataDefn GhcRn, FreeVars)
+rnCodataDefn doc (HsCodataDefn { cdd_cType = cType
+                               , cdd_ctxt = context, cdd_dests = destdecls
+                               , cdd_kindSig = m_sig })
+  = do  { checkTc (hagino_style || null (unLoc context))
+                  (badGadtStupidTheta doc)
+
+        ; (m_sig', sig_fvs) <- case m_sig of
+             Just sig -> first Just <$> rnLHsKind doc sig
+             Nothing  -> return (Nothing, emptyFVs)
+        ; (context', fvs1) <- rnContext doc context
+
+        -- For the constructor declarations, drop the LocalRdrEnv
+        -- in the GADT case, where the type variables in the declaration
+        -- do not scope over the constructor signatures
+        -- data T a where { T1 :: forall b. b-> b }
+        ; let { zap_lcl_env | hagino_style = \ thing -> thing
+                            | otherwise = setLocalRdrEnv emptyLocalRdrEnv }
+        ; (destdecls', dest_fvs) <- zap_lcl_env $ rnDestDecls destdecls
+           -- No need to check for duplicate constructor decls
+           -- since that is done by RnNames.extendGlobalRdrEnvRn
+
+        ; let all_fvs = fvs1 `plusFV` dest_fvs `plusFV` sig_fvs
+        ; return ( HsCodataDefn { cdd_ext = noExt
+                                , cdd_cType = cType
+                                , cdd_ctxt = context', cdd_kindSig = m_sig'
+                                , cdd_dests = destdecls' }
+                 , all_fvs )
+        }
+  where
+    hagino_style = case destdecls of  -- Note [Stupid theta]
+                     L _ (DestDeclGCCT {}) : _  -> False
+                     _                          -> True
+rnCodataDefn _ (XHsCodataDefn _) = panic "rnCodataDefn"
+
 
 rnFamDecl :: Maybe Name -- Just cls => this FamilyDecl is nested
                         --             inside an *class decl* for cls
@@ -2095,6 +2147,85 @@ rnConDeclDetails con doc (RecCon (L l fields))
                 -- No need to check for duplicate fields
                 -- since that is done by RnNames.extendGlobalRdrEnvRn
         ; return (RecCon (L l new_fields), fvs) }
+
+rnDestDecls :: [LDestDecl GhcPs] -> RnM ([LDestDecl GhcRn], FreeVars)
+rnDestDecls = mapFvRn (wrapLocFstM rnDestDecl)
+
+rnDestDecl :: DestDecl GhcPs -> RnM (DestDecl GhcRn, FreeVars)
+rnDestDecl decl@(DestDeclTH { dest_name = name, dest_ex_tvs = ex_tvs
+                            , dest_mb_cxt = mcxt, dest_cod_ty = cod_ty
+                            , dest_doc = mb_doc })
+  = do  { _        <- addLocM checkDestName name
+        ; new_name <- lookupLocatedTopBndrRn name
+        ; mb_doc'  <- rnMbLHsDoc mb_doc
+        ; let ctxt = DestDeclCtx [new_name]
+        ; bindLHsTyVarBndrs ctxt (Just (inHsDocContext ctxt))
+                            Nothing ex_tvs $ \ new_ex_tvs ->
+    do  { (new_context, fvs1) <- rnMbContext ctxt mcxt
+        ; (new_cod_ty,  fvs2) <- rnLHsType ctxt cod_ty
+        ; let all_fvs  = fvs1 `plusFV` fvs2
+        ; traceRn "rnDestDecl" (ppr name <+> vcat
+             [ text "ex_tvs:" <+> ppr ex_tvs
+             , text "new_ex_dqtvs':" <+> ppr new_ex_tvs ])
+
+        ; return (decl { dest_ext = noExt
+                       , dest_name = new_name, dest_ex_tvs = new_ex_tvs
+                       , dest_mb_cxt = new_context, dest_cod_ty = new_cod_ty
+                       , dest_doc = mb_doc' },
+                  all_fvs) }}
+
+rnDestDecl decl@(DestDeclGCCT { dest_names     = names
+                              , dest_forall    = L _ explicit_forall
+                              , dest_qvars     = qtvs
+                              , dest_mb_cxt    = mcxt
+                              , dest_dom_ty    = dom_ty
+                              , dest_mb_cod_ty = mb_cod_ty
+                              , dest_doc       = mb_doc })
+  = do  { mapM_ (addLocM checkDestName) names
+        ; new_names <- mapM lookupLocatedTopBndrRn names
+        ; mb_doc'   <- rnMbLHsDoc mb_doc
+
+        ; let explicit_tkvs = hsQTvExplicit qtvs
+              theta         = hsDestDeclTheta mcxt
+              ls_cod_ty     = case mb_cod_ty of
+                                Just ty -> [ty]
+                                Nothing -> []
+
+          -- We must ensure that we extract the free tkvs in left-to-right
+          -- order of their appearance in the constructor type.
+          -- That order governs the order the implicitly-quantified type
+          -- variable, and hence the order needed for visible type application
+          -- See Trac #14808.
+        ; free_tkvs <- extractHsTysRdrTyVarsDups (theta ++ ls_cod_ty ++ [dom_ty])
+        ; free_tkvs <- extractHsTvBndrs explicit_tkvs free_tkvs
+
+        ; let ctxt    = DestDeclCtx new_names
+              mb_ctxt = Just (inHsDocContext ctxt)
+
+        ; traceRn "rnDestDecl" (ppr names $$ ppr free_tkvs $$ ppr explicit_forall )
+        ; rnImplicitBndrs (not explicit_forall) free_tkvs $ \ implicit_tkvs ->
+          bindLHsTyVarBndrs ctxt mb_ctxt Nothing explicit_tkvs $ \ explicit_tkvs ->
+    do  { (new_cxt, fvs1)       <- rnMbContext ctxt mcxt
+        ; (new_mb_cod_ty, fvs2) <- case mb_cod_ty of
+                                     Just ty -> rnLHsType ctxt ty >>= \(ty',fvs) ->
+                                                  return (Just ty',fvs)
+                                     Nothing -> return (Nothing, emptyFVs)
+        ; (new_dom, fvs3)       <- rnLHsType ctxt dom_ty
+
+        ; let all_fvs = fvs1 `plusFV` fvs2 `plusFV` fvs3
+              new_qtvs =  HsQTvs { hsq_ext = HsQTvsRn
+                                     { hsq_implicit  = implicit_tkvs
+                                     , hsq_dependent = emptyNameSet }
+                                 , hsq_explicit  = explicit_tkvs }
+
+        ; traceRn "rnDestDecl2" (ppr names $$ ppr implicit_tkvs $$ ppr explicit_tkvs)
+        ; return (decl { dest_g_ext = noExt, dest_names = new_names
+                       , dest_qvars = new_qtvs, dest_mb_cxt = new_cxt
+                       , dest_dom_ty = new_dom, dest_mb_cod_ty = new_mb_cod_ty
+                       , dest_doc = mb_doc' },
+                  all_fvs) } }
+rnDestDecl (XDestDecl _) = panic "rnDestDecl"
+
 
 -------------------------------------------------
 

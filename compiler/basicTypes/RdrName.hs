@@ -33,8 +33,9 @@ module RdrName (
 
         -- ** Destruction
         rdrNameOcc, rdrNameSpace, demoteRdrName,
-        isRdrDataCon, isRdrTyVar, isRdrTc, isQual, isQual_maybe, isUnqual,
-        isOrig, isOrig_maybe, isExact, isExact_maybe, isSrcRdrName,
+        isRdrDataCon, isRdrCodataDest, isRdrTyVar, isRdrTc, isQual,
+        isQual_maybe, isUnqual, isOrig, isOrig_maybe, isExact, isExact_maybe,
+        isSrcRdrName,
 
         -- * Local mapping of 'RdrName' to 'Name.Name'
         LocalRdrEnv, emptyLocalRdrEnv, extendLocalRdrEnv, extendLocalRdrEnvList,
@@ -223,13 +224,15 @@ nukeExact n
   | isExternalName n = Orig (nameModule n) (nameOccName n)
   | otherwise        = Unqual (nameOccName n)
 
-isRdrDataCon :: RdrName -> Bool
-isRdrTyVar   :: RdrName -> Bool
-isRdrTc      :: RdrName -> Bool
+isRdrDataCon   :: RdrName -> Bool
+isRdrCodataDest :: RdrName -> Bool
+isRdrTyVar     :: RdrName -> Bool
+isRdrTc        :: RdrName -> Bool
 
-isRdrDataCon rn = isDataOcc (rdrNameOcc rn)
-isRdrTyVar   rn = isTvOcc   (rdrNameOcc rn)
-isRdrTc      rn = isTcOcc   (rdrNameOcc rn)
+isRdrDataCon    rn = isDataOcc   (rdrNameOcc rn)
+isRdrCodataDest rn = isCodataOcc (rdrNameOcc rn)
+isRdrTyVar      rn = isTvOcc     (rdrNameOcc rn)
+isRdrTc         rn = isTcOcc     (rdrNameOcc rn)
 
 isSrcRdrName :: RdrName -> Bool
 isSrcRdrName (Unqual _) = True

@@ -40,8 +40,8 @@ module   RdrHsSyn (
         mkExtName,           -- RdrName -> CLabelString
         mkGadtDecl,          -- [Located RdrName] -> LHsType RdrName -> ConDecl RdrName
         mkConDeclH98,
-        mkDestDeclGadt,
-        mkDestDeclSimple,
+        mkDestDeclGcct,
+        mkDestDeclTH,
         mkATDefault,
 
         -- Bunch of functions in the parser monad for
@@ -245,11 +245,11 @@ mkTyCodata loc cType (L _ (mcxt, tycl_hdr)) ksig codata_dests
        ; mapM_ (\a -> a loc) ann -- Add any API Annotations to the top SrcSpan
        ; tyvars <- checkTyVarsP (text "codata") equalsDots tc tparams
        ; defn <- mkCodataDefn cType mcxt ksig codata_dests
-       ; return (L loc (CodataDecl { tccdCdExt = noExt,
-                                     tccdLName = tc,
-                                     tccdTyVars = tyvars,
-                                     tccdFixity = fixity,
-                                     tccdCodataDefn = defn })) }
+       ; return (L loc (CodataDecl { tcdCdExt = noExt,
+                                     tcdLName = tc,
+                                     tcdTyVars = tyvars,
+                                     tcdFixity = fixity,
+                                     tcdCodataDefn = defn })) }
 
 mkCodataDefn :: Maybe (Located CType)
              -> Maybe (LHsContext GhcPs)
@@ -728,11 +728,11 @@ nudgeHsSrcBangs details
       L l (HsBangTy noExt s (addCLoc lty lds (HsDocTy noExt lty lds)))
     go lty = lty
 
-mkDestDeclGadt :: [Located RdrName]
+mkDestDeclGcct :: [Located RdrName]
                -> LHsType GhcPs     -- Always a HsForAllTy
                -> DestDecl GhcPs
-mkDestDeclGadt names ty
-  = DestDeclGADT { dest_g_ext  = noExt
+mkDestDeclGcct names ty
+  = DestDeclGCCT { dest_g_ext  = noExt
                  , dest_names  = names
                  , dest_forall = L l $ isLHsForAllTy ty'
                  , dest_qvars  = mkHsQTvs tvs
@@ -759,17 +759,17 @@ mkDestDeclGadt names ty
                                                        (ann++mkParensApiAnn l)
     peel_parens ty                   ann = (ty, ann)
 
-mkDestDeclSimple :: Located RdrName -> Maybe [LHsTyVarBndr GhcPs]
+mkDestDeclTH :: Located RdrName -> Maybe [LHsTyVarBndr GhcPs]
                  -> Maybe (LHsContext GhcPs) -> LHsType GhcPs
                  -> DestDecl GhcPs
-mkDestDeclSimple name mb_forall mb_cxt cod_ty =
-  DestDeclSimple { dest_ext  = noExt
-                 , dest_name  = name
-                 , dest_forall =  noLoc $ isJust mb_forall
-                 , dest_ex_tvs = mb_forall `orElse` []
-                 , dest_mb_cxt = mb_cxt
-                 , dest_cod_ty = cod_ty
-                 , dest_doc    = Nothing }
+mkDestDeclTH name mb_forall mb_cxt cod_ty =
+  DestDeclTH { dest_ext  = noExt
+             , dest_name  = name
+             , dest_forall =  noLoc $ isJust mb_forall
+             , dest_ex_tvs = mb_forall `orElse` []
+             , dest_mb_cxt = mb_cxt
+             , dest_cod_ty = cod_ty
+             , dest_doc    = Nothing }
 
 setRdrNameSpace :: RdrName -> NameSpace -> RdrName
 -- ^ This rather gruesome function is used mainly by the parser.

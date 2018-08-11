@@ -30,7 +30,7 @@ module RnTypes (
         extractHsTyRdrTyVarsDups, extractHsTysRdrTyVars,
         extractHsTysRdrTyVarsDups, rmDupsInRdrTyVars,
         extractRdrKindSigVars, extractDataDefnKindVars,
-        extractHsTvBndrs,
+        extractCodataDefnKindVars, extractHsTvBndrs,
         freeKiTyVarsAllVars, freeKiTyVarsKindVars, freeKiTyVarsTypeVars,
         elemRdr
   ) where
@@ -1692,6 +1692,27 @@ extractDataDefnKindVars (HsDataDefn { dd_ctxt = ctxt, dd_kindSig = ksig
         extract_ltys TypeLevel (hsConDeclArgTys args) emptyFKTV
     extract_con (XConDecl { }) _ = panic "extractDataDefnKindVars"
 extractDataDefnKindVars (XHsDataDefn _) = panic "extractDataDefnKindVars"
+
+{- Same as the data rules -}
+extractCodataDefnKindVars :: HsCodataDefn GhcPs -> RnM [Located RdrName]
+extractCodataDefnKindVars (HsCodataDefn { cdd_ctxt = ctxt, cdd_kindSig = ksig
+                                        , cdd_dests = dests })
+  = (nubL . freeKiTyVarsKindVars) <$>
+    (extract_lctxt TypeLevel ctxt =<<
+     extract_mb extract_lkind ksig =<<
+     foldrM (extract_dest . unLoc) emptyFKTV dests)
+  where
+    extract_dest (DestDeclGCCT { }) acc = return acc
+    extract_dest (DestDeclTH { dest_ex_tvs = ex_tvs
+                             , dest_mb_cxt = ctxt
+                             , dest_cod_ty = cod_ty }) acc
+      = extract_hs_tv_bndrs ex_tvs acc =<<
+        extract_mlctxt ctxt =<<
+        extract_ltys TypeLevel [cod_ty] emptyFKTV
+    extract_dest (XDestDecl { }) _ = panic "extractCodataDefnKindVars"
+extractCodataDefnKindVars (XHsCodataDefn _) = panic "extractCodataDefnKindVars"
+
+
 
 extract_mlctxt :: Maybe (LHsContext GhcPs)
                -> FreeKiTyVarsWithDups -> RnM FreeKiTyVarsWithDups

@@ -17,6 +17,7 @@ module RnNames (
         calculateAvails,
         reportUnusedNames,
         checkConName,
+        checkDestName,
         mkChildEnv,
         findChildren,
         dodgyMsg,
@@ -1734,3 +1735,7 @@ checkConName name = checkErr (isRdrDataCon name) (badDataCon name)
 badDataCon :: RdrName -> SDoc
 badDataCon name
    = hsep [text "Illegal data constructor name", quotes (ppr name)]
+
+checkDestName :: RdrName -> TcRn ()
+checkDestName name = checkErr (isRdrCodataDest name) msg
+  where msg = hsep [text "Illegal codata destructor name", quotes (ppr name)]

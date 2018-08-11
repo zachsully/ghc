@@ -1158,10 +1158,10 @@ hsLTyClDeclBinders (L loc (ClassDecl   { tcdLName = L _ cls_name
     , [])
 hsLTyClDeclBinders (L loc (DataDecl    { tcdLName = L _ name, tcdDataDefn = defn }))
   = (\ (xs, ys) -> (L loc name : xs, ys)) $ hsDataDefnBinders defn
-hsLTyClDeclBinders (L loc (CodataDecl  { tccdLName = L _ name, tccdCodataDefn = defn}))
+hsLTyClDeclBinders (L loc (CodataDecl  { tcdLName = L _ name, tcdCodataDefn = defn}))
   = (L loc name : concatMap (\x -> case unLoc x of
-                                DestDeclGADT { dest_names = ns } -> ns
-                                DestDeclSimple { dest_name = n } -> [n]
+                                DestDeclGCCT { dest_names = ns } -> ns
+                                DestDeclTH { dest_name = n } -> [n]
                                 _ -> []
                             )
                             (cdd_dests defn)

@@ -354,14 +354,14 @@ type ForallXConDecl (c :: * -> Constraint) (x :: *) =
 
 -- -------------------------------------
 -- DestDecl type families
-type family XDestDeclGADT   x
-type family XDestDeclSimple x
-type family XXDestDecl      x
+type family XDestDeclGCCT x
+type family XDestDeclTH   x
+type family XXDestDecl    x
 
 type ForallXDestDecl (c :: * -> Constraint) (x :: *) =
-       ( c (XDestDeclGADT    x)
-       , c (XDestDeclSimple  x)
-       , c (XXDestDecl       x)
+       ( c (XDestDeclGCCT x)
+       , c (XDestDeclTH   x)
+       , c (XXDestDecl    x)
        )
 
 -- -------------------------------------
