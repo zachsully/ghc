@@ -1519,9 +1519,13 @@ rnTyClDecl (DataDecl { tcdLName = tycon, tcdTyVars = tyvars,
                           , tcdDExt     = rn_info }, fvs) } }
 
 -- "codata" devlarations
-rnTyClDecl (CodataDecl { tcdLName = tycon, tcdTyVars = tyvars,
-                         tcdFixity = fixity, tcdCodataDefn = defn })
-  = do { tycon' <- lookupLocatedTopBndrRn tycon
+rnTyClDecl decl@(CodataDecl { tcdLName = tycon, tcdTyVars = tyvars,
+                              tcdFixity = fixity, tcdCodataDefn = defn })
+  = do { unlessXOptM LangExt.Codata $
+           addErr $ hang (hang (text "Illegal codata type declaration:")
+                             2 (ppr decl))
+                       2 (text "(Use Codata to enable this extension)")
+       ; tycon' <- lookupLocatedTopBndrRn tycon
        ; kvs <- extractCodataDefnKindVars defn
        ; let doc = TyCodataCtx tycon
        ; traceRn "rntycl-codata" (ppr tycon <+> ppr kvs)

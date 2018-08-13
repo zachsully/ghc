@@ -450,6 +450,8 @@ ds_expr _ (HsMultiIf res_ty alts)
     mkErrorExpr = mkErrorAppDs nON_EXHAUSTIVE_GUARDS_ERROR_ID res_ty
                                (text "multi-way if")
 
+ds_expr _ (HsCoalts _ _) = panic "ds_expr HsCoalts"
+
 {-
 \noindent
 \underline{\bf Various data construction things}

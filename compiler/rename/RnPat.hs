@@ -854,9 +854,26 @@ rnOverLit origLit
 -}
 
 rnCopattern :: LCopattern GhcPs
-            -> (LCopattern GhcRn -> RnM (a, FreeVars))
+            -> (LCopattern GhcRn -> RnM (r, FreeVars))
             -> RnM (r, FreeVars)
-rnCopattern = panic "rnCopattern"
+rnCopattern copattern k = unCpsRn (rnCopattern' copattern) k
+
+
+rnCopattern' :: LCopattern GhcPs -> CpsRn (LCopattern GhcRn)
+rnCopattern' (L loc copattern) =
+  case copattern of
+    HeadCopattern x -> return (L loc (HeadCopattern x))
+    DestCopattern x dest q ->
+      do { q' <- rnCopattern' q
+         ; dest' <- lookupConCps dest
+         ; return (L loc (DestCopattern x dest' q')) }
+    PatCopattern x q (L ploc p) ->
+      do { q' <- rnCopattern' q
+           -- For now, we do not report unused patterns in copatterns
+         ; p' <- rnPatAndThen (LamMk False) p
+         ; return (L loc (PatCopattern x q' (L ploc p'))) }
+    XCopattern _ -> panic "rnCopattern"
+
 
 {-
 ************************************************************************

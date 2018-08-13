@@ -250,8 +250,11 @@ rnExpr (HsCase x expr matches)
        ; (new_matches, ms_fvs) <- rnMatchGroup CaseAlt rnLExpr matches
        ; return (HsCase x new_expr new_matches, e_fvs `plusFV` ms_fvs) }
 
-rnExpr (HsCoalts x (L loc comatches))
-  = do { (new_comatches, cms_fvs) <- rnComatchGroup comatches
+rnExpr e@(HsCoalts x (L loc comatches))
+  = do { unlessXOptM LangExt.Codata $
+           addErr $ hang (text "Illegal coalternative expression:" <+> ppr e)
+                       2 (text "Use Codata to enable this extension")
+       ; (new_comatches, cms_fvs) <- rnComatchGroup comatches
        ; return (HsCoalts x (L loc new_comatches), cms_fvs) }
 
 rnExpr (HsLet x (L l binds) expr)

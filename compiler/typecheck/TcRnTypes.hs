@@ -3588,6 +3588,7 @@ exprCtOrigin (HsCase _ _ matches) = matchesCtOrigin matches
 exprCtOrigin (HsIf _ (Just syn) _ _ _) = exprCtOrigin (syn_expr syn)
 exprCtOrigin (HsIf {})           = Shouldn'tHappenOrigin "if expression"
 exprCtOrigin (HsMultiIf _ rhs)   = lGRHSCtOrigin rhs
+exprCtOrigin (HsCoalts _ _)      = panic "exprCtOrigin HsCoalts"
 exprCtOrigin (HsLet _ _ e)       = lexprCtOrigin e
 exprCtOrigin (HsDo {})           = DoOrigin
 exprCtOrigin (ExplicitList {})   = Shouldn'tHappenOrigin "list"

@@ -101,8 +101,8 @@ import ForeignCall
 import PrelNames        ( forall_tv_RDR, allNameStrings )
 import SrcLoc
 import Unique           ( hasKey )
-import OrdList          ( OrdList, fromOL, unitOL, mapOL, toOL)
-import Bag              ( emptyBag, consBag, unitBag )
+import OrdList          ( OrdList, fromOL )
+import Bag              ( emptyBag, consBag )
 import Outputable
 import FastString
 import Maybes

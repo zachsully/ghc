@@ -1624,8 +1624,8 @@ instance (idR ~ GhcPass pr, OutputableBndrId idR, Outputable body)
 Note [m_ctxt in Match]
 ~~~~~~~~~~~~~~~~~~~~~~
 
-A Match can occur in a number of contexts, such as a FunBind, HsCase, HsLam and
-so on.
+A Match can occur in a number of contexts, such as a FunBind, HsCase, HsLam,
+HsCoalts and so on.
 
 In order to simplify tooling processing and pretty print output, the provenance
 is captured in an HsMatchContext.
@@ -2740,6 +2740,7 @@ data HsMatchContext id -- Not an extensible tag
                                 -- ^A pattern matching on an argument of a
                                 -- function binding
   | LambdaExpr                  -- ^Patterns of a lambda
+  | Coalt                       -- ^Patterns inside of copatterns
   | CaseAlt                     -- ^Patterns and guards on a case alternative
   | IfAlt                       -- ^Guards of a multi-way if alternative
   | ProcExpr                    -- ^Patterns of a proc
@@ -2764,6 +2765,7 @@ deriving instance (Data id) => Data (HsMatchContext id)
 instance OutputableBndr id => Outputable (HsMatchContext id) where
   ppr m@(FunRhs{})          = text "FunRhs" <+> ppr (mc_fun m) <+> ppr (mc_fixity m)
   ppr LambdaExpr            = text "LambdaExpr"
+  ppr Coalt                 = text "Coalt"
   ppr CaseAlt               = text "CaseAlt"
   ppr IfAlt                 = text "IfAlt"
   ppr ProcExpr              = text "ProcExpr"
@@ -2819,6 +2821,7 @@ isMonadFailStmtContext _ = False -- ListComp, PatGuard, ArrowExpr
 
 matchSeparator :: HsMatchContext id -> SDoc
 matchSeparator (FunRhs {})   = text "="
+matchSeparator Coalt         = text "->"
 matchSeparator CaseAlt       = text "->"
 matchSeparator IfAlt         = text "->"
 matchSeparator LambdaExpr    = text "->"
@@ -2847,6 +2850,7 @@ pprMatchContextNoun :: (Outputable (NameOrRdrName id),Outputable id)
 pprMatchContextNoun (FunRhs {mc_fun=L _ fun})
                                     = text "equation for"
                                       <+> quotes (ppr fun)
+pprMatchContextNoun Coalt           = text "coalternative"
 pprMatchContextNoun CaseAlt         = text "case alternative"
 pprMatchContextNoun IfAlt           = text "multi-way if alternative"
 pprMatchContextNoun RecUpd          = text "record-update construct"
@@ -2903,6 +2907,7 @@ instance (Outputable p, Outputable (NameOrRdrName p))
 matchContextErrString :: Outputable id
                       => HsMatchContext id -> SDoc
 matchContextErrString (FunRhs{mc_fun=L _ fun})   = text "function" <+> ppr fun
+matchContextErrString Coalt                      = text "coalternative"
 matchContextErrString CaseAlt                    = text "case"
 matchContextErrString IfAlt                      = text "multi-way if"
 matchContextErrString PatBindRhs                 = text "pattern binding"

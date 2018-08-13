@@ -648,6 +648,8 @@ getInitialKind decl@(DataDecl { tcdLName = L _ name
              Nothing   -> return liftedTypeKind
         ; return [tycon] }
 
+getInitialKind (CodataDecl {}) = panic "getInitialKind CodataDecl"
+
 getInitialKind (FamDecl { tcdFam = decl })
   = do { tc <- getFamDeclInitialKind Nothing decl
        ; return [tc] }
@@ -739,6 +741,8 @@ kcTyClDecl (DataDecl { tcdLName = L _ name, tcdDataDefn = defn })
   = kcTyClTyVars name $
     do  { _ <- tcHsContext ctxt
         ; mapM_ (wrapLocM kcConDecl) cons }
+
+kcTyClDecl (CodataDecl {}) = panic "kcTyClDecl CodataDecl"
 
 kcTyClDecl (SynDecl { tcdLName = L _ name, tcdRhs = lrhs })
   = kcTyClTyVars name $
@@ -984,6 +988,8 @@ tcTyClDecl1 _parent roles_info
   = ASSERT( isNothing _parent )
     tcTyClTyVars tc_name $ \ tycon_binders res_kind ->
     tcDataDefn roles_info tc_name tycon_binders res_kind defn
+
+tcTyClDecl1 _ _ (CodataDecl {}) = panic "tcTyClDecl1 CodataDecl"
 
 tcTyClDecl1 _parent roles_info
             (ClassDecl { tcdLName = L _ class_name

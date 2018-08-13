@@ -314,6 +314,8 @@ repTyClD (L loc (DataDecl { tcdLName = tc, tcdTyVars = tvs, tcdDataDefn = defn }
                 repDataDefn tc1 bndrs Nothing defn
        ; return (Just (loc, dec)) }
 
+repTyClD (L _ (CodataDecl {})) = panic "repTyClD CodataDecl"
+
 repTyClD (L loc (ClassDecl { tcdCtxt = cxt, tcdLName = cls,
                              tcdTyVars = tvs, tcdFDs = fds,
                              tcdSigs = sigs, tcdMeths = meth_binds,

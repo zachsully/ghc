@@ -597,6 +597,8 @@ tcExpr (HsMultiIf _ alts) res_ty
        ; return (HsMultiIf res_ty alts') }
   where match_ctxt = MC { mc_what = IfAlt, mc_body = tcBody }
 
+tcExpr (HsCoalts _ _) _ = panic "tcExpr HsCoalts"
+
 tcExpr (HsDo _ do_or_lc stmts) res_ty
   = do { expr' <- tcDoStmts do_or_lc stmts res_ty
        ; return expr' }

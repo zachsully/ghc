@@ -551,8 +551,8 @@ $tab          { warnTab }
 
 -- Special Symbols for the Codata Extension
 <0> {
-  \# / { ifExtension codataEnabled } { special IThash }
-  \& / { ifExtension codataEnabled } { special ITampersand }
+  \# { special IThash }
+  \& { special ITampersand }
 }
 
 -- Note [Lexing type applications]
@@ -870,9 +870,9 @@ reservedWordsFM = listToUFM $
                                               xbit RecursiveDoBit),
          ( "proc",           ITproc,          xbit ArrowsBit),
 
-         ( "codata",         ITcodata,        xbit CodataBit),
-	 ( "#",              IThash,          xbit CodataBit),
-	 ( "&",              ITampersand,     xbit CodataBit)
+         ( "codata",         ITcodata,        0),
+	 ( "#",              IThash,          0),
+	 ( "&",              ITampersand,     0)
      ]
 
 {-----------------------------------
@@ -940,7 +940,8 @@ reservedSymsFM = listToUFM $
         -- ToDo: ideally, → and ∷ should be "specials", so that they cannot
         -- form part of a large operator.  This would let us have a better
         -- syntax for kinds: ɑ∷*→* would be a legal kind signature. (maybe).
-       ,( "#", IThash, codataEnabled)
+
+       ,( "#", IThash, always)
        ,( "&", ITampersand, codataEnabled)
        ]
 

@@ -2235,6 +2235,7 @@ exhaustive  dflags = maybe False (`wopt` dflags) . exhaustiveWarningFlag
 -- Returns 'Nothing' if check is not supported.
 exhaustiveWarningFlag :: HsMatchContext id -> Maybe WarningFlag
 exhaustiveWarningFlag (FunRhs {})   = Just Opt_WarnIncompletePatterns
+exhaustiveWarningFlag Coalt         = Nothing
 exhaustiveWarningFlag CaseAlt       = Just Opt_WarnIncompletePatterns
 exhaustiveWarningFlag IfAlt         = Just Opt_WarnIncompletePatterns
 exhaustiveWarningFlag LambdaExpr    = Just Opt_WarnIncompleteUniPatterns
