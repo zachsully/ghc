@@ -130,7 +130,7 @@ possible to do this directly in the source file using the
 ``OPTIONS_GHC`` is a *file-header pragma* (see :ref:`options-pragma`).
 
 Only *dynamic* flags can be used in an ``OPTIONS_GHC`` pragma (see
-:ref:`static-dynamic-flags`).
+:ref:`mode-dynamic-flags`).
 
 Note that your command shell does not get to the source file options,
 they are just included literally in the array of command-line arguments
@@ -153,36 +153,28 @@ Setting options in GHCi
 Options may also be modified from within GHCi, using the :ghci-cmd:`:set`
 command.
 
-.. _static-dynamic-flags:
+.. _mode-dynamic-flags:
 
-Static, Dynamic, and Mode options
----------------------------------
+Dynamic and Mode options
+------------------------
 
 .. index::
-   single: static; options
    single: dynamic; options
    single: mode; options
 
-Each of GHC's command line options is classified as static, dynamic or
-mode:
+Each of GHC's command line options is classified as dynamic or mode:
 
-    For example, :ghc-flag:`--make` or :ghc-flag:`-E`. There may only be a single mode
-    flag on the command line. The available modes are listed in
-    :ref:`modes`.
+    Mode: A mode may be used on the command line only.
+    You can pass only one mode flag.
+    For example, :ghc-flag:`--make` or :ghc-flag:`-E`.
+    The available modes are listed in :ref:`modes`.
 
-    Most non-mode flags fall into this category. A dynamic flag may be
-    used on the command line, in a ``OPTIONS_GHC`` pragma in a source
+    Dynamic: A dynamic flag may be used on the command line,
+    in a ``OPTIONS_GHC`` pragma in a source
     file, or set using :ghci-cmd:`:set` in GHCi.
-
-    A few flags are "static", which means they can only be used on the
-    command-line, and remain in force over the entire GHC/GHCi run.
 
 The flag reference tables (:ref:`flag-reference`) lists the status of
 each flag.
-
-There are a few flags that are static except that they can also be used
-with GHCi's :ghci-cmd:`:set` command; these are listed as “static/\ ``:set``\ ”
-in the table.
 
 .. _file-suffixes:
 
@@ -806,7 +798,7 @@ messages and in GHCi:
 
     When :ghc-flag:`-fprint-explicit-runtime-reps` is enabled, GHC prints
     ``RuntimeRep`` type variables for levity-polymorphic types.
-    Otherwise GHC will default these to ``PtrRepLifted``. For example,
+    Otherwise GHC will default these to ``LiftedRep``. For example,
 
     .. code-block:: none
 
@@ -1064,3 +1056,26 @@ Some flags only make sense for particular target platforms.
     and later). The :ref:`LLVM backend <llvm-code-gen>` will also use
     SSE4.2 if your processor supports it but detects this automatically
     so no flag is required.
+
+Miscellaneous flags
+-------------------
+
+.. index::
+   single: miscellaneous flags
+
+Some flags only make sense for a particular use case.
+
+.. ghc-flag:: -ghcversion-file ⟨path to ghcversion.h⟩
+    :shortdesc: (GHC as a C compiler only) Use this ``ghcversion.h`` file
+    :type: dynamic
+    :category: misc
+
+    When GHC is used to compile C files, GHC adds package include paths and
+    includes ``ghcversion.h`` directly. The compiler will lookup the path for
+    the ``ghcversion.h`` file from the ``rts`` package in the package database.
+    In some cases, the compiler's package database does not contain the ``rts``
+    package, or one wants to specify a specific ``ghcversions.h`` to be
+    included. This option can be used to specify the path to the
+    ``ghcversions.h`` file to be included. This is primarily intended to be
+    used by GHC's build system.
+

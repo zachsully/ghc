@@ -39,6 +39,7 @@ module StgSyn (
         isDllConApp,
         stgArgType,
         stripStgTicksTop,
+        stgCaseBndrInScope,
 
         pprStgBinding, pprStgTopBindings
     ) where
@@ -69,6 +70,8 @@ import Type        ( Type )
 import RepType     ( typePrimRep1 )
 import Unique      ( Unique )
 import Util
+
+import Data.List.NonEmpty ( NonEmpty, toList )
 
 {-
 ************************************************************************
@@ -153,6 +156,18 @@ stripStgTicksTop p = go []
    where go ts (StgTick t e) | p t = go (t:ts) e
          go ts other               = (reverse ts, other)
 
+-- | Given an alt type and whether the program is unarised, return whether the
+-- case binder is in scope.
+--
+-- Case binders of unboxed tuple or unboxed sum type always dead after the
+-- unariser has run. See Note [Post-unarisation invariants].
+stgCaseBndrInScope :: AltType -> Bool {- ^ unarised? -} -> Bool
+stgCaseBndrInScope alt_ty unarised =
+    case alt_ty of
+      AlgAlt _      -> True
+      PrimAlt _     -> True
+      MultiValAlt _ -> not unarised
+      PolyAlt       -> True
 
 {-
 ************************************************************************
@@ -221,7 +236,7 @@ finished it encodes (\x -> e) as (let f = \x -> e in f)
 -}
 
   | StgLam
-        [bndr]
+        (NonEmpty bndr)
         StgExpr    -- Body of lambda
 
 {-
@@ -549,6 +564,7 @@ data AltType
   = PolyAlt             -- Polymorphic (a lifted type variable)
   | MultiValAlt Int     -- Multi value of this arity (unboxed tuple or sum)
                         -- the arity could indeed be 1 for unary unboxed tuple
+                        -- or enum-like unboxed sums
   | AlgAlt      TyCon   -- Algebraic data type; the AltCons will be DataAlts
   | PrimAlt     PrimRep -- Primitive data type; the AltCons (if any) will be LitAlts
 
@@ -720,7 +736,7 @@ pprStgExpr (StgOpApp op args _)
   = hsep [ pprStgOp op, brackets (interppSP args)]
 
 pprStgExpr (StgLam bndrs body)
-  = sep [ char '\\' <+> ppr_list (map (pprBndr LambdaBind) bndrs)
+  = sep [ char '\\' <+> ppr_list (map (pprBndr LambdaBind) (toList bndrs))
             <+> text "->",
          pprStgExpr body ]
   where ppr_list = brackets . fsep . punctuate comma
@@ -803,9 +819,11 @@ pprStgRhs :: (OutputableBndr bndr, Outputable bdee, Ord bdee)
 
 -- special case
 pprStgRhs (StgRhsClosure cc bi [free_var] upd_flag [{-no args-}] (StgApp func []))
-  = hsep [ ppr cc,
+  = sdocWithDynFlags $ \dflags ->
+    hsep [ ppr cc,
            pp_binder_info bi,
-           brackets (whenPprDebug (ppr free_var)),
+           if not $ gopt Opt_SuppressStgFreeVars dflags
+             then brackets (ppr free_var) else empty,
            text " \\", ppr upd_flag, ptext (sLit " [] "), ppr func ]
 
 -- general case
@@ -813,7 +831,8 @@ pprStgRhs (StgRhsClosure cc bi free_vars upd_flag args body)
   = sdocWithDynFlags $ \dflags ->
     hang (hsep [if gopt Opt_SccProfilingOn dflags then ppr cc else empty,
                 pp_binder_info bi,
-                whenPprDebug (brackets (interppSP free_vars)),
+                if not $ gopt Opt_SuppressStgFreeVars dflags
+                  then brackets (interppSP free_vars) else empty,
                 char '\\' <> ppr upd_flag, brackets (interppSP args)])
          4 (ppr body)
 

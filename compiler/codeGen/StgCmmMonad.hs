@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, GADTs, UnboxedTuples #-}
+{-# LANGUAGE GADTs, UnboxedTuples #-}
 
 -----------------------------------------------------------------------------
 --
@@ -29,7 +29,7 @@ module StgCmmMonad (
 
         mkCall, mkCmmCall,
 
-        forkClosureBody, forkLneBody, forkAlts, codeOnly,
+        forkClosureBody, forkLneBody, forkAlts, forkAltPair, codeOnly,
 
         ConTagZ,
 
@@ -58,8 +58,6 @@ module StgCmmMonad (
         CgInfoDownwards(..), CgState(..)        -- non-abstract
     ) where
 
-#include "HsVersions.h"
-
 import GhcPrelude hiding( sequence, succ )
 
 import Cmm
@@ -79,6 +77,7 @@ import Unique
 import UniqSupply
 import FastString
 import Outputable
+import Util
 
 import Control.Monad
 import Data.List
@@ -637,6 +636,15 @@ forkAlts branch_fcodes
                 -- NB foldl.  state is the *left* argument to stateIncUsage
         ; return branch_results }
 
+forkAltPair :: FCode a -> FCode a -> FCode (a,a)
+-- Most common use of 'forkAlts'; having this helper function avoids
+-- accidental use of failible pattern-matches in @do@-notation
+forkAltPair x y = do
+  xy' <- forkAlts [x,y]
+  case xy' of
+    [x',y'] -> return (x',y')
+    _ -> panic "forkAltPair"
+
 -- collect the code emitted by an FCode computation
 getCodeR :: FCode a -> FCode (a, CmmAGraph)
 getCodeR fcode
@@ -696,11 +704,9 @@ emitLabel id = do tscope <- getTickScope
                   emitCgStmt (CgLabel id tscope)
 
 emitComment :: FastString -> FCode ()
-#if 0 /* def DEBUG */
-emitComment s = emitCgStmt (CgStmt (CmmComment s))
-#else
-emitComment _ = return ()
-#endif
+emitComment s
+  | debugIsOn = emitCgStmt (CgStmt (CmmComment s))
+  | otherwise = return ()
 
 emitTick :: CmmTickish -> FCode ()
 emitTick = emitCgStmt . CgStmt . CmmTick

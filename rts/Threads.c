@@ -165,19 +165,8 @@ rts_getThreadId(StgPtr tso)
 }
 
 /* ---------------------------------------------------------------------------
- * Getting & setting the thread allocation limit
+ * Enabling and disabling the thread allocation limit
  * ------------------------------------------------------------------------ */
-HsInt64 rts_getThreadAllocationCounter(StgPtr tso)
-{
-    // NB. doesn't take into account allocation in the current nursery
-    // block, so it might be off by up to 4k.
-    return PK_Int64((W_*)&(((StgTSO *)tso)->alloc_limit));
-}
-
-void rts_setThreadAllocationCounter(StgPtr tso, HsInt64 i)
-{
-    ASSIGN_Int64((W_*)&(((StgTSO *)tso)->alloc_limit), i);
-}
 
 void rts_enableThreadAllocationLimit(StgPtr tso)
 {
@@ -308,8 +297,11 @@ tryWakeupThread (Capability *cap, StgTSO *tso)
         goto unblock;
     }
 
-    case BlockedOnBlackHole:
     case BlockedOnSTM:
+        tso->block_info.closure = &stg_STM_AWOKEN_closure;
+        goto unblock;
+
+    case BlockedOnBlackHole:
     case ThreadMigrating:
         goto unblock;
 
@@ -446,7 +438,7 @@ updateThunk (Capability *cap, StgTSO *tso, StgClosure *thunk, StgClosure *val)
         return;
     }
 
-    v = ((StgInd*)thunk)->indirectee;
+    v = UNTAG_CLOSURE(((StgInd*)thunk)->indirectee);
 
     updateWithIndirection(cap, thunk, val);
 
@@ -640,8 +632,8 @@ threadStackOverflow (Capability *cap, StgTSO *tso)
             // if including this frame would exceed the size of the
             // new stack (taking into account the underflow frame),
             // then stop at the previous frame.
-            if (sp + size > old_stack->stack + (new_stack->stack_size -
-                                                sizeofW(StgUnderflowFrame))) {
+            if (sp + size > old_stack->sp + (new_stack->stack_size -
+                                             sizeofW(StgUnderflowFrame))) {
                 break;
             }
             sp += size;
@@ -876,7 +868,7 @@ printThreadBlockage(StgTSO *tso)
     debugBelch("is blocked on an STM operation");
     break;
   default:
-    barf("printThreadBlockage: strange tso->why_blocked: %d for TSO %d (%d)",
+    barf("printThreadBlockage: strange tso->why_blocked: %d for TSO %d (%p)",
          tso->why_blocked, tso->id, tso);
   }
 }

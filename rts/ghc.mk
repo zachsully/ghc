@@ -46,6 +46,7 @@ ALL_DIRS += posix
 endif
 
 rts_C_SRCS := $(wildcard rts/*.c $(foreach dir,$(ALL_DIRS),rts/$(dir)/*.c))
+rts_C_HOOK_SRCS := $(wildcard rts/hooks/*.c)
 rts_CMM_SRCS := $(wildcard rts/*.cmm)
 
 # Don't compile .S files when bootstrapping a new arch
@@ -134,6 +135,13 @@ endif
 endif
 endif
 
+
+ifeq "$(USE_DTRACE)" "YES"
+ifneq "$(findstring $(TargetOS_CPP), linux solaris2 freebsd)" ""
+NEED_DTRACE_PROBES_OBJ = YES
+endif
+endif
+
 #-----------------------------------------------------------------------------
 # Building one way
 define build-rts-way # args: $1 = way
@@ -146,7 +154,10 @@ rts_dist_$1_CC_OPTS := $$(GhcRtsCcOpts)
 # The per-way CC_OPTS
 ifneq "$$(findstring debug, $1)" ""
 rts_dist_$1_HC_OPTS += -O0
-rts_dist_$1_CC_OPTS += -fno-omit-frame-pointer -g -O0
+rts_dist_$1_CC_OPTS += -fno-omit-frame-pointer -O0 -g3
+# Useful to ensure that inline functions can be called within GDB but not
+# supported by clang
+#rts_dist_$1_CC_OPTS += -fkeep-inline-functions
 endif
 
 ifneq "$$(findstring dyn, $1)" ""
@@ -164,15 +175,12 @@ $(call cmm-suffix-rules,rts,dist,$1)
 rts_$1_LIB_FILE = libHSrts$$($1_libsuf)
 rts_$1_LIB = rts/dist/build/$$(rts_$1_LIB_FILE)
 
-rts_$1_C_OBJS   = $$(patsubst rts/%.c,rts/dist/build/%.$$($1_osuf),$$(rts_C_SRCS)) $$(patsubst %.c,%.$$($1_osuf),$$(rts_$1_EXTRA_C_SRCS))
-rts_$1_S_OBJS   = $$(patsubst rts/%.S,rts/dist/build/%.$$($1_osuf),$$(rts_S_SRCS))
-rts_$1_CMM_OBJS = $$(patsubst rts/%.cmm,rts/dist/build/%.$$($1_osuf),$$(rts_CMM_SRCS)) $$(patsubst %.cmm,%.$$($1_osuf),$$(rts_AUTO_APPLY_CMM))
+rts_$1_C_OBJS      = $$(patsubst rts/%.c,rts/dist/build/%.$$($1_osuf),$$(rts_C_SRCS)) $$(patsubst %.c,%.$$($1_osuf),$$(rts_$1_EXTRA_C_SRCS))
+rts_$1_C_HOOK_OBJS = $$(patsubst rts/hooks/%.c,rts/dist/build/hooks/%.$$($1_osuf),$$(rts_C_HOOK_SRCS))
+rts_$1_S_OBJS      = $$(patsubst rts/%.S,rts/dist/build/%.$$($1_osuf),$$(rts_S_SRCS))
+rts_$1_CMM_OBJS    = $$(patsubst rts/%.cmm,rts/dist/build/%.$$($1_osuf),$$(rts_CMM_SRCS)) $$(patsubst %.cmm,%.$$($1_osuf),$$(rts_AUTO_APPLY_CMM))
 
 rts_$1_OBJS = $$(rts_$1_C_OBJS) $$(rts_$1_S_OBJS) $$(rts_$1_CMM_OBJS)
-
-ifneq "$$(findstring linux solaris2, $(TargetOS_CPP))" ""
-NEED_DTRACE_PROBES_OBJ = YES
-endif
 
 ifeq "$(USE_DTRACE)" "YES"
 ifeq "$(NEED_DTRACE_PROBES_OBJ)" "YES"
@@ -181,7 +189,7 @@ ifeq "$(NEED_DTRACE_PROBES_OBJ)" "YES"
 # from the DTrace probes definitions
 rts_$1_DTRACE_OBJS = rts/dist/build/RtsProbes.$$($1_osuf)
 
-rts/dist/build/RtsProbes.$$($1_osuf) : $$(rts_$1_OBJS)
+$$(rts_$1_DTRACE_OBJS) : $$(rts_$1_OBJS)
 	$(DTRACE) -G -C $$(addprefix -I,$$(GHC_INCLUDE_DIRS)) -DDTRACE -s rts/RtsProbes.d -o \
 		$$@ $$(rts_$1_OBJS)
 endif
@@ -248,9 +256,50 @@ $$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS) rts/dist/libs.depend $$(
 	  $$(rts_$1_DTRACE_OBJS) -o $$@
 endif
 else
-$$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS)
+
+ifeq "$(USE_DTRACE)" "YES"
+ifeq "$(NEED_DTRACE_PROBES_OBJ)" "YES"
+# A list of objects that do not get included in the RTS object that is created
+# during the linking step. To prevent future linking errors, especially when
+# using the compiler as a bootstrap compiler, we need to exclude the hook
+# objects from being re-linked into the single LINKED_OBJS object file. When the
+# hooks are being linked into the RTS object this will result in duplicated
+# symbols causing the linker to fail (e.g. `StackOverflowHook` in RTS.o and
+# hschooks.o). The excluded objects do not get relinked into the RTS object but
+# get included separately so prevent linker errors.
+# (see issue #15040)
+rts_$1_EXCLUDED_OBJS = $$(rts_$1_C_HOOK_OBJS)
+# The RTS object that gets generated to package up all of the runtime system
+# with the dtrace probe code.
+rts_$1_LINKED_OBJS = rts/dist/build/RTS.$$($1_osuf)
+
+$$(rts_$1_LINKED_OBJS) : $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS) $$(rts_$1_C_HOOK_OBJS)
 	"$$(RM)" $$(RM_OPTS) $$@
-	echo $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS) | "$$(XARGS)" $$(XARGS_OPTS) "$$(AR_STAGE1)" \
+
+	# When linking an archive the linker will only include the object files that
+	# are actually needed during linking. It therefore does not include the dtrace
+	# specific code for initializing the probes. By creating a single object that
+	# also includes the probe object code we force the linker to include the
+	# probes when linking the static runtime.
+	#
+	# The reason why we are re-linking all the objects into a single object file
+	# is stated in this thread:
+	# https://thr3ads.net/dtrace-discuss/2005/08/384778-Problem-with-probes-defined-in-static-libraries
+	$(LD) -r -o $$(rts_$1_LINKED_OBJS) $$(rts_$1_DTRACE_OBJS) $$(filter-out $$(rts_$1_EXCLUDED_OBJS), $$(rts_$1_OBJS))
+else
+rts_$1_EXCLUDED_OBJS =
+rts_$1_LINKED_OBJS = $$(rts_$1_OBJS)
+endif
+else
+rts_$1_EXCLUDED_OBJS =
+rts_$1_LINKED_OBJS = $$(rts_$1_OBJS)
+endif
+
+
+$$(rts_$1_LIB) : $$(rts_$1_LINKED_OBJS)
+	"$$(RM)" $$(RM_OPTS) $$@
+
+	echo $$(rts_$1_LINKED_OBJS) $$(rts_$1_EXCLUDED_OBJS) | "$$(XARGS)" $$(XARGS_OPTS) "$$(AR_STAGE1)" \
 		$$(AR_OPTS_STAGE1) $$(EXTRA_AR_ARGS_STAGE1) $$@
 
 ifneq "$$(UseSystemLibFFI)" "YES"
@@ -275,11 +324,7 @@ $(eval $(call distdir-opts,rts,dist,1))
 
 # We like plenty of warnings.
 WARNING_OPTS += -Wall
-ifeq "$(GccLT34)" "YES"
-WARNING_OPTS += -W
-else
 WARNING_OPTS += -Wextra
-endif
 WARNING_OPTS += -Wstrict-prototypes 
 WARNING_OPTS += -Wmissing-prototypes 
 WARNING_OPTS += -Wmissing-declarations
@@ -310,7 +355,7 @@ endif
 
 STANDARD_OPTS += $(addprefix -I,$(GHC_INCLUDE_DIRS)) -Irts -Irts/dist/build
 # COMPILING_RTS is only used when building Win32 DLL support.
-STANDARD_OPTS += -DCOMPILING_RTS
+STANDARD_OPTS += -DCOMPILING_RTS -DFS_NAMESPACE=rts
 
 # HC_OPTS is included in both .c and .cmm compilations, whereas CC_OPTS is
 # only included in .c compilations.  HC_OPTS included the WAY_* opts, which
@@ -437,15 +482,22 @@ endif
 endif
 
 # add CFLAGS for libffi
-# ffi.h triggers prototype warnings, so disable them here:
 ifeq "$(UseSystemLibFFI)" "YES"
 LIBFFI_CFLAGS = $(addprefix -I,$(FFIIncludeDir))
 else
 LIBFFI_CFLAGS =
 endif
+# ffi.h triggers prototype warnings, so disable them here:
 rts/Interpreter_CC_OPTS += -Wno-strict-prototypes $(LIBFFI_CFLAGS)
 rts/Adjustor_CC_OPTS    += -Wno-strict-prototypes $(LIBFFI_CFLAGS)
 rts/sm/Storage_CC_OPTS  += -Wno-strict-prototypes $(LIBFFI_CFLAGS)
+# ffi.h triggers undefined macro warnings on PowerPC, disable those:
+# this matches substrings of powerpc64le, including "powerpc" and "powerpc64"
+ifneq "$(findstring $(TargetArch_CPP), powerpc64le)" ""
+rts/Interpreter_CC_OPTS += -Wno-undef
+rts/Adjustor_CC_OPTS    += -Wno-undef
+rts/sm/Storage_CC_OPTS  += -Wno-undef
+endif
 
 # inlining warnings happen in Compact
 rts/sm/Compact_CC_OPTS += -Wno-inline
@@ -454,7 +506,6 @@ rts/sm/Compact_CC_OPTS += -Wno-inline
 rts/StgCRun_CC_OPTS += -w
 
 rts/RetainerProfile_CC_OPTS += -w
-rts/RetainerSet_CC_OPTS += -Wno-format
 # On Windows:
 rts/win32/ConsoleHandler_CC_OPTS += -w
 rts/win32/ThrIOManager_CC_OPTS += -w

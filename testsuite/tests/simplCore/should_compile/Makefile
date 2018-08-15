@@ -2,11 +2,20 @@ TOP=../../..
 include $(TOP)/mk/boilerplate.mk
 include $(TOP)/mk/test.mk
 
+T14978:
+	$(RM) -f T14978.o T14978.hi
+	-'$(TEST_HC)' $(TEST_HC_OPTS) -O -c -ddump-simpl T14978.hs -dsuppress-coercions | grep 'foo'
+        # Expecting the defn of 'foo' to apply Goof to an unboxed coercion
+
 T13468:
 	$(RM) -f T13468.o T13468.hi
 	-'$(TEST_HC)' $(TEST_HC_OPTS) -O -c -ddump-simpl T13468.hs | grep 'Error'
         # Expecting no output from the grep, hence "-"
         # If the case branch is not eliminated, we get a patError
+
+T3234:
+	$(RM) -f T3234.o T3234.hi
+	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c -ddump-simpl-stats T3234.hs | grep 'fold/build'
 
 T3990:
 	$(RM) -f T3990.o T3990.hi
@@ -17,6 +26,19 @@ T8848:
 	$(RM) -f T8848.o T8848.hi
 	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c -ddump-rule-firings T8848.hs | grep 'SPEC map2'
         # Should fire twice
+
+T9441a:
+	$(RM) -f T9941a.o T9941a.hi
+	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c -ddump-simpl -dsuppress-all T9441a.hs | grep 'f1 = f2'
+	    # Grep output should show 'f1 = f2'
+T9441b:
+	$(RM) -f T9941b.o T9941b.hi
+	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c -ddump-simpl -dsuppress-all T9441b.hs | grep 'Rec {'
+	    # Grep output should show only one recursive Bind 'Rec {'
+T9441c:
+	$(RM) -f T9941c.o T9941c.hi
+	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c -ddump-simpl -dsuppress-all T9441c.hs | grep 'Rec {'
+	    # Grep output should show only one recursive Bind 'Rec {'
 
 T9509:
 	$(RM) -f T9509*.o T9509*.hi
@@ -183,7 +205,7 @@ T5996:
 	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c T5996.hs -ddump-simpl -dsuppress-uniques -dsuppress-all | grep y2
 
 T10083:
-	$(RM) -f T10083.o T10083.hi T10083.hi-boot T10083a.o T10083a.hi 
+	$(RM) -f T10083.o T10083.hi T10083.hi-boot T10083a.o T10083a.hi
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T10083.hs-boot
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T10083a.hs
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T10083.hs
@@ -205,8 +227,8 @@ T12877:
 T13025:
 	$(RM) -f T13025.o T13025.hi T13025a.o T13025a.hi
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T13025a.hs
-	-'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T13025.hs -ddump-simpl | grep -c HEq_sc
-	# No lines should match 'HEq_sc' so wc should output zeros
+	-'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T13025.hs -ddump-simpl | grep -c heq_sel
+	# No lines should match 'heq_sel' so wc should output zeros
 
 .PHONY: str-rules
 str-rules:

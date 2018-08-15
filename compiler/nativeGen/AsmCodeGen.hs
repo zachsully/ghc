@@ -929,16 +929,18 @@ generateJumpTables ncgImpl xs = concatMap f xs
 
 shortcutBranches
         :: DynFlags
-    -> NcgImpl statics instr jumpDest
+        -> NcgImpl statics instr jumpDest
         -> [NatCmmDecl statics instr]
         -> [NatCmmDecl statics instr]
 
 shortcutBranches dflags ncgImpl tops
-  | optLevel dflags < 1 = tops    -- only with -O or higher
-  | otherwise           = map (apply_mapping ncgImpl mapping) tops'
+  | gopt Opt_AsmShortcutting dflags
+  = map (apply_mapping ncgImpl mapping) tops'
+  | otherwise
+  = tops
   where
     (tops', mappings) = mapAndUnzip (build_mapping ncgImpl) tops
-    mapping = foldr plusUFM emptyUFM mappings
+    mapping = plusUFMList mappings
 
 build_mapping :: NcgImpl statics instr jumpDest
               -> GenCmmDecl d (LabelMap t) (ListGraph instr)
@@ -972,7 +974,7 @@ build_mapping ncgImpl (CmmProc info lbl live (ListGraph (head:blocks)))
     has_info l = mapMember l info
 
     -- build a mapping from BlockId to JumpDest for shorting branches
-    mapping = foldl add emptyUFM shortcut_blocks
+    mapping = foldl' add emptyUFM shortcut_blocks
     add ufm (id,dest) = addToUFM ufm id dest
 
 apply_mapping :: NcgImpl statics instr jumpDest

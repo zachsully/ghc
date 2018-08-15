@@ -52,7 +52,6 @@ So, for example, ``ghc -c Foo.hs``
 .. ghc-flag:: -O0
     :shortdesc: Disable optimisations (default)
     :type: dynamic
-    :reverse: -O
     :category: optimization-levels
 
     Means "turn off all optimisation", reverting to the same settings as
@@ -88,20 +87,6 @@ So, for example, ``ghc -c Foo.hs``
     The avoided "dangerous" optimisations are those that can make
     runtime or space *worse* if you're unlucky. They are normally turned
     on or off individually.
-
-.. ghc-flag:: -Odph
-    :shortdesc: Enable level 2 optimisations, set
-        ``-fmax-simplifier-iterations=20``
-        and ``-fsimplifier-phases=3``.
-    :type: dynamic
-    :category: optimization-levels
-
-    .. index::
-       single: optimise; DPH
-
-    Enables all ``-O2`` optimisation, sets
-    ``-fmax-simplifier-iterations=20`` and ``-fsimplifier-phases=3``.
-    Designed for use with :ref:`Data Parallel Haskell (DPH) <dph>`.
 
 We don't use a ``-O*`` flag for day-to-day work. We use ``-O`` to get
 respectable speed; e.g., when we want to measure something. When we want
@@ -182,6 +167,16 @@ by saying ``-fno-wombat``.
 
     Enable call-arity analysis.
 
+.. ghc-flag:: -fexitification
+    :shortdesc: Enables exitification optimisation. Implied by :ghc-flag:`-O`.
+    :type: dynamic
+    :reverse: -fno-exitification
+    :category:
+
+    :default: on
+
+    Enables the floating of exit paths out of recursive functions.
+
 .. ghc-flag:: -fcmm-elim-common-blocks
     :shortdesc: Enable Cmm common block elimination. Implied by :ghc-flag:`-O`.
     :type: dynamic
@@ -207,6 +202,23 @@ by saying ``-fno-wombat``.
     eliminate the duplicates attempts to move variable bindings closer
     to their usage sites. It also inlines simple expressions like
     literals or registers.
+
+.. ghc-flag:: -fasm-shortcutting
+    :shortdesc: Enable shortcutting on assembly. Implied by :ghc-flag:`-O2`.
+    :type: dynamic
+    :reverse: -fno-asm-shortcutting
+    :category:
+
+    :default: off
+
+    This enables shortcutting at the assembly stage of the code generator.
+    In simpler terms shortcutting means if a block of instructions A only consists
+    of a unconditionally jump, we replace all jumps to A by jumps to the successor
+    of A.
+
+    This is mostly done during Cmm passes. However this can miss corner cases. So at -O2
+    we run the pass again at the asm stage to catch these.
+
 
 .. ghc-flag:: -fcpr-anal
     :shortdesc: Turn on CPR analysis in the demand analyser. Implied by :ghc-flag:`-O`.
@@ -484,6 +496,18 @@ by saying ``-fno-wombat``.
     self-recursive saturated tail calls into local jumps rather than
     function calls.
 
+.. ghc-flag:: -fllvm-pass-vectors-in-regs
+    :shortdesc: Pass vector value in vector registers for function calls
+    :type: dynamic
+    :reverse: -fno-llvm-pass-vectors-in-regs
+    :category:
+
+    :default: on
+
+    Instructs GHC to use the platform's native vector registers to pass vector
+    arguments during function calls. As with all vector support, this requires
+    :ghc-flag:`-fllvm`.
+
 .. ghc-flag:: -fmax-inline-alloc-size=⟨n⟩
     :shortdesc: *default: 128.* Set the maximum size of inline array allocations
         to ⟨n⟩ bytes (default: 128).
@@ -523,7 +547,7 @@ by saying ``-fno-wombat``.
         type error messages.
     :type: dynamic
     :reverse: -fno-max-relevant-bindings
-    :category:
+    :category: verbosity
 
     :default: 6
 
@@ -534,20 +558,6 @@ by saying ``-fno-wombat``.
     Syntactically top-level bindings are also usually excluded (since
     they may be numerous), but ``-fno-max-relevant-bindings`` includes
     them too.
-
-.. ghc-flag:: -fmax-valid-substitutions=⟨n⟩
-    :shortdesc: *default: 6.* Set the maximum number of valid substitutions for
-        typed holes to display in type error messages.
-    :type: dynamic
-    :reverse: -fno-max-valid-substitutions
-    :category:
-
-    :default: 6
-
-    The type checker sometimes displays a list of valid substitutions
-    for typed holes in error messages, but only up to some maximum number,
-    set by this flag. Turning it off with
-    ``-fno-max-valid-substitutions`` gives an unlimited number.
 
 .. ghc-flag:: -fmax-uncovered-patterns=⟨n⟩
     :shortdesc: *default: 4.* Set the maximum number of patterns to display in
@@ -584,7 +594,7 @@ by saying ``-fno-wombat``.
     :type: dynamic
     :category:
 
-    :default: off
+    :default: coercion optimisation enabled.
 
     Turn off the coercion optimiser.
 
@@ -593,7 +603,7 @@ by saying ``-fno-wombat``.
     :type: dynamic
     :category:
 
-    :default: off
+    :default: pre-inlining enabled
 
     Turn off pre-inlining.
 
@@ -604,7 +614,7 @@ by saying ``-fno-wombat``.
     :type: dynamic
     :category:
 
-    :default: off
+    :default: state hack is enabled
 
     Turn off the "state hack" whereby any lambda with a ``State#`` token
     as argument is considered to be single-entry, hence it is considered
@@ -617,7 +627,7 @@ by saying ``-fno-wombat``.
     :reverse: -fno-omit-interface-pragmas
     :category:
 
-    :default: off
+    :default: Implied by :ghc-flag:`-O0`, otherwise off.
 
     Tells GHC to omit all inessential information from the interface
     file generated for the module being compiled (say M). This means
@@ -634,7 +644,7 @@ by saying ``-fno-wombat``.
     :reverse: -fno-omit-yields
     :category:
 
-    :default: on
+    :default: yield points enabled
 
     Tells GHC to omit heap checks when no allocation is
     being performed. While this improves binary sizes by about 5%, it
@@ -651,6 +661,8 @@ by saying ``-fno-wombat``.
     :type: dynamic
     :reverse: -fno-pedantic-bottoms
     :category:
+
+    :default: off
 
     Make GHC be more precise about its treatment of bottom (but see also
     :ghc-flag:`-fno-state-hack`). In particular, stop GHC eta-expanding through
@@ -874,6 +886,22 @@ by saying ``-fno-wombat``.
     type-class-overloaded functions imported from other modules for the types at
     which they are called in this module. Note that specialisation must be
     enabled (by ``-fspecialise``) for this to have any effect.
+
+.. ghc-flag:: -flate-specialise
+    :shortdesc: Run a late specialisation pass
+    :type: dynamic
+    :reverse: -fno-late-specialise
+    :category:
+
+    :default: off
+
+    Runs another specialisation pass towards the end of the optimisation
+    pipeline. This can catch specialisation opportunities which arose from
+    the previous specialisation pass or other inlining.
+
+    You might want to use this if you are you have a type class method
+    which returns a constrained type. For example, a type class where one
+    of the methods implements a traversal.
 
 .. ghc-flag:: -fsolve-constant-dicts
     :shortdesc: When solving constraints, try to eagerly solve
@@ -1105,41 +1133,3 @@ by saying ``-fno-wombat``.
     if a function definition will be inlined *at a call site*. The other option
     determines if a function definition will be kept around at all for
     potential inlining.
-
-.. ghc-flag:: -fvectorisation-avoidance
-    :shortdesc: Enable vectorisation avoidance. Always enabled by default.
-    :type: dynamic
-    :reverse: -fno-vectorisation-avoidance
-    :category:
-
-    :default: on
-
-    .. index::
-       single: -fvectorisation-avoidance
-
-    Part of :ref:`Data Parallel Haskell (DPH) <dph>`.
-
-    Enable the *vectorisation* avoidance optimisation.
-    This optimisation only works when used in combination with the
-    ``-fvectorise`` transformation.
-
-    While vectorisation of code using DPH is often a big win, it can
-    also produce worse results for some kinds of code. This optimisation
-    modifies the vectorisation transformation to try to determine if a
-    function would be better of unvectorised and if so, do just that.
-
-.. ghc-flag:: -fvectorise
-    :shortdesc: Enable vectorisation of nested data parallelism
-    :type: dynamic
-    :reverse: -fno-vectorise
-    :category:
-
-    :default: off
-
-    Part of :ref:`Data Parallel Haskell (DPH) <dph>`.
-
-    Enable the *vectorisation* optimisation
-    transformation. This optimisation transforms the nested data
-    parallelism code of programs using DPH into flat data parallelism.
-    Flat data parallel programs should have better load balancing,
-    enable SIMD parallelism and friendlier cache behaviour.
