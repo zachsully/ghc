@@ -38,7 +38,7 @@ module TyCoRep (
 
         -- * Functions over types
         mkTyConTy, mkTyVarTy, mkTyVarTys,
-        mkFunTy, mkFunTys, mkForAllTy, mkForAllTys,
+        mkFunTy, mkFunTys, mkFunTildeTy, mkFunTildeTys, mkForAllTy, mkForAllTys,
         mkPiTy, mkPiTys,
         isTYPE, tcIsTYPE,
         isLiftedTypeKind, isUnliftedTypeKind,
@@ -296,6 +296,9 @@ data Type
         Type            -- ^ A Π type.
 
   | FunTy Type Type     -- ^ t1 -> t2   Very common, so an important special case
+
+  | FunTildeTy Type Type
+                        -- ^ t1 ~> t2  Call-by-name function types
 
   | LitTy TyLit     -- ^ Type literals are similar to type constructors.
 
@@ -731,6 +734,15 @@ mkFunTy arg res = FunTy arg res
 mkFunTys :: [Type] -> Type -> Type
 mkFunTys tys ty = foldr mkFunTy ty tys
 
+infixr 3 `mkFunTildeTy`      -- Associates to the right
+-- | Make a tilde arrow type
+mkFunTildeTy :: Type -> Type -> Type
+mkFunTildeTy arg res = FunTildeTy arg res
+
+-- | Make nested tilde arrow types
+mkFunTildeTys :: [Type] -> Type -> Type
+mkFunTildeTys tys ty = foldr mkFunTildeTy ty tys
+
 mkForAllTy :: TyVar -> ArgFlag -> Type -> Type
 mkForAllTy tv vis ty = ForAllTy (TvBndr tv vis) ty
 
@@ -882,6 +894,9 @@ data Coercion
          -- ForAllCo :: _ -> N -> e -> e
 
   | FunCo Role Coercion Coercion         -- lift FunTy
+         -- FunCo :: "e" -> e -> e -> e
+
+  | FunTildeCo Role Coercion Coercion         -- lift FunTy
          -- FunCo :: "e" -> e -> e -> e
 
   -- These are special
@@ -1523,14 +1538,15 @@ tyCoVarsOfTypeList ty = fvVarList $ tyCoFVsOfType ty
 -- See Note [FV eta expansion] in FV for explanation.
 tyCoFVsOfType :: Type -> FV
 -- See Note [Free variables of types]
-tyCoFVsOfType (TyVarTy v)        a b c = (unitFV v `unionFV` tyCoFVsOfType (tyVarKind v)) a b c
-tyCoFVsOfType (TyConApp _ tys)   a b c = tyCoFVsOfTypes tys a b c
-tyCoFVsOfType (LitTy {})         a b c = emptyFV a b c
-tyCoFVsOfType (AppTy fun arg)    a b c = (tyCoFVsOfType fun `unionFV` tyCoFVsOfType arg) a b c
-tyCoFVsOfType (FunTy arg res)    a b c = (tyCoFVsOfType arg `unionFV` tyCoFVsOfType res) a b c
-tyCoFVsOfType (ForAllTy bndr ty) a b c = tyCoFVsBndr bndr (tyCoFVsOfType ty)  a b c
-tyCoFVsOfType (CastTy ty co)     a b c = (tyCoFVsOfType ty `unionFV` tyCoFVsOfCo co) a b c
-tyCoFVsOfType (CoercionTy co)    a b c = tyCoFVsOfCo co a b c
+tyCoFVsOfType (TyVarTy v)          a b c = (unitFV v `unionFV` tyCoFVsOfType (tyVarKind v)) a b c
+tyCoFVsOfType (TyConApp _ tys)     a b c = tyCoFVsOfTypes tys a b c
+tyCoFVsOfType (LitTy {})           a b c = emptyFV a b c
+tyCoFVsOfType (AppTy fun arg)      a b c = (tyCoFVsOfType fun `unionFV` tyCoFVsOfType arg) a b c
+tyCoFVsOfType (FunTy arg res)      a b c = (tyCoFVsOfType arg `unionFV` tyCoFVsOfType res) a b c
+tyCoFVsOfType (FunTildeTy arg res) a b c = (tyCoFVsOfType arg `unionFV` tyCoFVsOfType res) a b c
+tyCoFVsOfType (ForAllTy bndr ty)   a b c = tyCoFVsBndr bndr (tyCoFVsOfType ty)  a b c
+tyCoFVsOfType (CastTy ty co)       a b c = (tyCoFVsOfType ty `unionFV` tyCoFVsOfCo co) a b c
+tyCoFVsOfType (CoercionTy co)      a b c = tyCoFVsOfCo co a b c
 
 tyCoFVsBndr :: TyVarBinder -> FV -> FV
 -- Free vars of (forall b. <thing with fvs>)
@@ -1594,7 +1610,9 @@ tyCoFVsOfCo (AppCo co arg) fv_cand in_scope acc
   = (tyCoFVsOfCo co `unionFV` tyCoFVsOfCo arg) fv_cand in_scope acc
 tyCoFVsOfCo (ForAllCo tv kind_co co) fv_cand in_scope acc
   = (delFV tv (tyCoFVsOfCo co) `unionFV` tyCoFVsOfCo kind_co) fv_cand in_scope acc
-tyCoFVsOfCo (FunCo _ co1 co2)    fv_cand in_scope acc
+tyCoFVsOfCo (FunCo _ co1 co2) fv_cand in_scope acc
+  = (tyCoFVsOfCo co1 `unionFV` tyCoFVsOfCo co2) fv_cand in_scope acc
+tyCoFVsOfCo (FunTildeCo _ co1 co2) fv_cand in_scope acc
   = (tyCoFVsOfCo co1 `unionFV` tyCoFVsOfCo co2) fv_cand in_scope acc
 tyCoFVsOfCo (CoVarCo v) fv_cand in_scope acc
   = tyCoFVsOfCoVar v fv_cand in_scope acc
@@ -1641,11 +1659,12 @@ tyCoFVsOfCos []       fv_cand in_scope acc = emptyFV fv_cand in_scope acc
 tyCoFVsOfCos (co:cos) fv_cand in_scope acc = (tyCoFVsOfCo co `unionFV` tyCoFVsOfCos cos) fv_cand in_scope acc
 
 coVarsOfType :: Type -> CoVarSet
-coVarsOfType (TyVarTy v)         = coVarsOfType (tyVarKind v)
-coVarsOfType (TyConApp _ tys)    = coVarsOfTypes tys
-coVarsOfType (LitTy {})          = emptyVarSet
-coVarsOfType (AppTy fun arg)     = coVarsOfType fun `unionVarSet` coVarsOfType arg
-coVarsOfType (FunTy arg res)     = coVarsOfType arg `unionVarSet` coVarsOfType res
+coVarsOfType (TyVarTy v)          = coVarsOfType (tyVarKind v)
+coVarsOfType (TyConApp _ tys)     = coVarsOfTypes tys
+coVarsOfType (LitTy {})           = emptyVarSet
+coVarsOfType (AppTy fun arg)      = coVarsOfType fun `unionVarSet` coVarsOfType arg
+coVarsOfType (FunTy arg res)      = coVarsOfType arg `unionVarSet` coVarsOfType res
+coVarsOfType (FunTildeTy arg res) = coVarsOfType arg `unionVarSet` coVarsOfType res
 coVarsOfType (ForAllTy (TvBndr tv _) ty)
   = (coVarsOfType ty `delVarSet` tv)
     `unionVarSet` coVarsOfType (tyVarKind tv)
@@ -1657,26 +1676,27 @@ coVarsOfTypes tys = mapUnionVarSet coVarsOfType tys
 
 coVarsOfCo :: Coercion -> CoVarSet
 -- Extract *coercion* variables only.  Tiresome to repeat the code, but easy.
-coVarsOfCo (Refl _ ty)         = coVarsOfType ty
-coVarsOfCo (TyConAppCo _ _ args) = coVarsOfCos args
-coVarsOfCo (AppCo co arg)      = coVarsOfCo co `unionVarSet` coVarsOfCo arg
+coVarsOfCo (Refl _ ty)            = coVarsOfType ty
+coVarsOfCo (TyConAppCo _ _ args)  = coVarsOfCos args
+coVarsOfCo (AppCo co arg)         = coVarsOfCo co `unionVarSet` coVarsOfCo arg
 coVarsOfCo (ForAllCo tv kind_co co)
   = coVarsOfCo co `delVarSet` tv `unionVarSet` coVarsOfCo kind_co
-coVarsOfCo (FunCo _ co1 co2)    = coVarsOfCo co1 `unionVarSet` coVarsOfCo co2
-coVarsOfCo (CoVarCo v)          = coVarsOfCoVar v
-coVarsOfCo (HoleCo h)           = coVarsOfCoVar (coHoleCoVar h)
-                                  -- See Note [CoercionHoles and coercion free variables]
-coVarsOfCo (AxiomInstCo _ _ as) = coVarsOfCos as
-coVarsOfCo (UnivCo p _ t1 t2)   = coVarsOfProv p `unionVarSet` coVarsOfTypes [t1, t2]
-coVarsOfCo (SymCo co)           = coVarsOfCo co
-coVarsOfCo (TransCo co1 co2)    = coVarsOfCo co1 `unionVarSet` coVarsOfCo co2
-coVarsOfCo (NthCo _ _ co)       = coVarsOfCo co
-coVarsOfCo (LRCo _ co)          = coVarsOfCo co
-coVarsOfCo (InstCo co arg)      = coVarsOfCo co `unionVarSet` coVarsOfCo arg
-coVarsOfCo (CoherenceCo c1 c2)  = coVarsOfCos [c1, c2]
-coVarsOfCo (KindCo co)          = coVarsOfCo co
-coVarsOfCo (SubCo co)           = coVarsOfCo co
-coVarsOfCo (AxiomRuleCo _ cs)   = coVarsOfCos cs
+coVarsOfCo (FunCo _ co1 co2)      = coVarsOfCo co1 `unionVarSet` coVarsOfCo co2
+coVarsOfCo (FunTildeCo _ co1 co2) = coVarsOfCo co1 `unionVarSet` coVarsOfCo co2
+coVarsOfCo (CoVarCo v)            = coVarsOfCoVar v
+coVarsOfCo (HoleCo h)             = coVarsOfCoVar (coHoleCoVar h)
+                                     -- See Note [CoercionHoles and coercion free variables]
+coVarsOfCo (AxiomInstCo _ _ as)   = coVarsOfCos as
+coVarsOfCo (UnivCo p _ t1 t2)     = coVarsOfProv p `unionVarSet` coVarsOfTypes [t1, t2]
+coVarsOfCo (SymCo co)             = coVarsOfCo co
+coVarsOfCo (TransCo co1 co2)      = coVarsOfCo co1 `unionVarSet` coVarsOfCo co2
+coVarsOfCo (NthCo _ _ co)         = coVarsOfCo co
+coVarsOfCo (LRCo _ co)            = coVarsOfCo co
+coVarsOfCo (InstCo co arg)        = coVarsOfCo co `unionVarSet` coVarsOfCo arg
+coVarsOfCo (CoherenceCo c1 c2)    = coVarsOfCos [c1, c2]
+coVarsOfCo (KindCo co)            = coVarsOfCo co
+coVarsOfCo (SubCo co)             = coVarsOfCo co
+coVarsOfCo (AxiomRuleCo _ cs)     = coVarsOfCos cs
 
 coVarsOfCoVar :: CoVar -> CoVarSet
 coVarsOfCoVar v = unitVarSet v `unionVarSet` coVarsOfType (varType v)
@@ -1731,35 +1751,37 @@ injectiveVarsOfBinder (TvBndr tv vis) =
 injectiveVarsOfType :: Type -> FV
 injectiveVarsOfType = go
   where
-    go ty                | Just ty' <- coreView ty
-                         = go ty'
-    go (TyVarTy v)       = unitFV v `unionFV` go (tyVarKind v)
-    go (AppTy f a)       = go f `unionFV` go a
-    go (FunTy ty1 ty2)   = go ty1 `unionFV` go ty2
-    go (TyConApp tc tys) =
+    go ty                   | Just ty' <- coreView ty
+                            = go ty'
+    go (TyVarTy v)          = unitFV v `unionFV` go (tyVarKind v)
+    go (AppTy f a)          = go f `unionFV` go a
+    go (FunTy ty1 ty2)      = go ty1 `unionFV` go ty2
+    go (FunTildeTy ty1 ty2) = go ty1 `unionFV` go ty2
+    go (TyConApp tc tys)    =
       case tyConInjectivityInfo tc of
         NotInjective  -> emptyFV
         Injective inj -> mapUnionFV go $
                          filterByList (inj ++ repeat True) tys
                          -- Oversaturated arguments to a tycon are
                          -- always injective, hence the repeat True
-    go (ForAllTy tvb ty) = tyCoFVsBndr tvb $ go (tyVarKind (binderVar tvb))
-                                             `unionFV` go ty
-    go LitTy{}           = emptyFV
-    go (CastTy ty _)     = go ty
-    go CoercionTy{}      = emptyFV
+    go (ForAllTy tvb ty)    = tyCoFVsBndr tvb $ go (tyVarKind (binderVar tvb))
+                                                `unionFV` go ty
+    go LitTy{}              = emptyFV
+    go (CastTy ty _)        = go ty
+    go CoercionTy{}         = emptyFV
 
 -- | Returns True if this type has no free variables. Should be the same as
 -- isEmptyVarSet . tyCoVarsOfType, but faster in the non-forall case.
 noFreeVarsOfType :: Type -> Bool
-noFreeVarsOfType (TyVarTy _)      = False
-noFreeVarsOfType (AppTy t1 t2)    = noFreeVarsOfType t1 && noFreeVarsOfType t2
-noFreeVarsOfType (TyConApp _ tys) = all noFreeVarsOfType tys
-noFreeVarsOfType ty@(ForAllTy {}) = isEmptyVarSet (tyCoVarsOfType ty)
-noFreeVarsOfType (FunTy t1 t2)    = noFreeVarsOfType t1 && noFreeVarsOfType t2
-noFreeVarsOfType (LitTy _)        = True
-noFreeVarsOfType (CastTy ty co)   = noFreeVarsOfType ty && noFreeVarsOfCo co
-noFreeVarsOfType (CoercionTy co)  = noFreeVarsOfCo co
+noFreeVarsOfType (TyVarTy _)        = False
+noFreeVarsOfType (AppTy t1 t2)      = noFreeVarsOfType t1 && noFreeVarsOfType t2
+noFreeVarsOfType (TyConApp _ tys)   = all noFreeVarsOfType tys
+noFreeVarsOfType ty@(ForAllTy {})   = isEmptyVarSet (tyCoVarsOfType ty)
+noFreeVarsOfType (FunTy t1 t2)      = noFreeVarsOfType t1 && noFreeVarsOfType t2
+noFreeVarsOfType (FunTildeTy t1 t2) = noFreeVarsOfType t1 && noFreeVarsOfType t2
+noFreeVarsOfType (LitTy _)          = True
+noFreeVarsOfType (CastTy ty co)     = noFreeVarsOfType ty && noFreeVarsOfCo co
+noFreeVarsOfType (CoercionTy co)    = noFreeVarsOfCo co
 
 -- | Returns True if this coercion has no free variables. Should be the same as
 -- isEmptyVarSet . tyCoVarsOfCo, but faster in the non-forall case.
@@ -1769,6 +1791,7 @@ noFreeVarsOfCo (TyConAppCo _ _ args)  = all noFreeVarsOfCo args
 noFreeVarsOfCo (AppCo c1 c2)          = noFreeVarsOfCo c1 && noFreeVarsOfCo c2
 noFreeVarsOfCo co@(ForAllCo {})       = isEmptyVarSet (tyCoVarsOfCo co)
 noFreeVarsOfCo (FunCo _ c1 c2)        = noFreeVarsOfCo c1 && noFreeVarsOfCo c2
+noFreeVarsOfCo (FunTildeCo _ c1 c2)   = noFreeVarsOfCo c1 && noFreeVarsOfCo c2
 noFreeVarsOfCo (CoVarCo _)            = False
 noFreeVarsOfCo (HoleCo {})            = True    -- I'm unsure; probably never happens
 noFreeVarsOfCo (AxiomInstCo _ _ args) = all noFreeVarsOfCo args
@@ -2375,22 +2398,23 @@ subst_ty :: TCvSubst -> Type -> Type
 subst_ty subst ty
    = go ty
   where
-    go (TyVarTy tv)      = substTyVar subst tv
-    go (AppTy fun arg)   = mkAppTy (go fun) $! (go arg)
+    go (TyVarTy tv)         = substTyVar subst tv
+    go (AppTy fun arg)      = mkAppTy (go fun) $! (go arg)
                 -- The mkAppTy smart constructor is important
                 -- we might be replacing (a Int), represented with App
                 -- by [Int], represented with TyConApp
-    go (TyConApp tc tys) = let args = map go tys
-                           in  args `seqList` TyConApp tc args
-    go (FunTy arg res)   = (FunTy $! go arg) $! go res
+    go (TyConApp tc tys)    = let args = map go tys
+                              in  args `seqList` TyConApp tc args
+    go (FunTy arg res)      = (FunTy $! go arg) $! go res
+    go (FunTildeTy arg res) = (FunTildeTy $! go arg) $! go res
     go (ForAllTy (TvBndr tv vis) ty)
-                         = case substTyVarBndrUnchecked subst tv of
-                             (subst', tv') ->
-                               (ForAllTy $! ((TvBndr $! tv') vis)) $!
-                                            (subst_ty subst' ty)
-    go (LitTy n)         = LitTy $! n
-    go (CastTy ty co)    = (mkCastTy $! (go ty)) $! (subst_co subst co)
-    go (CoercionTy co)   = CoercionTy $! (subst_co subst co)
+                            = case substTyVarBndrUnchecked subst tv of
+                                (subst', tv') ->
+                                  (ForAllTy $! ((TvBndr $! tv') vis)) $!
+                                               (subst_ty subst' ty)
+    go (LitTy n)            = LitTy $! n
+    go (CastTy ty co)       = (mkCastTy $! (go ty)) $! (subst_co subst co)
+    go (CoercionTy co)      = CoercionTy $! (subst_co subst co)
 
 substTyVar :: TCvSubst -> TyVar -> Type
 substTyVar (TCvSubst _ tenv _) tv
@@ -2442,29 +2466,30 @@ subst_co subst co
     go_ty = subst_ty subst
 
     go :: Coercion -> Coercion
-    go (Refl r ty)           = mkReflCo r $! go_ty ty
-    go (TyConAppCo r tc args)= let args' = map go args
-                               in  args' `seqList` mkTyConAppCo r tc args'
-    go (AppCo co arg)        = (mkAppCo $! go co) $! go arg
+    go (Refl r ty)               = mkReflCo r $! go_ty ty
+    go (TyConAppCo r tc args)    = let args' = map go args
+                                   in  args' `seqList` mkTyConAppCo r tc args'
+    go (AppCo co arg)            = (mkAppCo $! go co) $! go arg
     go (ForAllCo tv kind_co co)
       = case substForAllCoBndrUnchecked subst tv kind_co of { (subst', tv', kind_co') ->
           ((mkForAllCo $! tv') $! kind_co') $! subst_co subst' co }
-    go (FunCo r co1 co2)     = (mkFunCo r $! go co1) $! go co2
-    go (CoVarCo cv)          = substCoVar subst cv
+    go (FunCo r co1 co2)         = (mkFunCo r $! go co1) $! go co2
+    go (FunTildeCo r co1 co2)    = (mkFunTildeCo r $! go co1) $! go co2
+    go (CoVarCo cv)              = substCoVar subst cv
     go (AxiomInstCo con ind cos) = mkAxiomInstCo con ind $! map go cos
-    go (UnivCo p r t1 t2)    = (((mkUnivCo $! go_prov p) $! r) $!
-                                (go_ty t1)) $! (go_ty t2)
-    go (SymCo co)            = mkSymCo $! (go co)
-    go (TransCo co1 co2)     = (mkTransCo $! (go co1)) $! (go co2)
-    go (NthCo r d co)        = mkNthCo r d $! (go co)
-    go (LRCo lr co)          = mkLRCo lr $! (go co)
-    go (InstCo co arg)       = (mkInstCo $! (go co)) $! go arg
-    go (CoherenceCo co1 co2) = (mkCoherenceCo $! (go co1)) $! (go co2)
-    go (KindCo co)           = mkKindCo $! (go co)
-    go (SubCo co)            = mkSubCo $! (go co)
-    go (AxiomRuleCo c cs)    = let cs1 = map go cs
-                                in cs1 `seqList` AxiomRuleCo c cs1
-    go (HoleCo h)            = HoleCo h
+    go (UnivCo p r t1 t2)        = (((mkUnivCo $! go_prov p) $! r) $!
+                                    (go_ty t1)) $! (go_ty t2)
+    go (SymCo co)                = mkSymCo $! (go co)
+    go (TransCo co1 co2)         = (mkTransCo $! (go co1)) $! (go co2)
+    go (NthCo r d co)            = mkNthCo r d $! (go co)
+    go (LRCo lr co)              = mkLRCo lr $! (go co)
+    go (InstCo co arg)           = (mkInstCo $! (go co)) $! go arg
+    go (CoherenceCo co1 co2)     = (mkCoherenceCo $! (go co1)) $! (go co2)
+    go (KindCo co)               = mkKindCo $! (go co)
+    go (SubCo co)                = mkSubCo $! (go co)
+    go (AxiomRuleCo c cs)        = let cs1 = map go cs
+                                    in cs1 `seqList` AxiomRuleCo c cs1
+    go (HoleCo h)                = HoleCo h
       -- NB: this last case is a little suspicious, but we need it. Originally,
       -- there was a panic here, but it triggered from deeplySkolemise. Because
       -- we only skolemise tyvars that are manually bound, this operation makes
@@ -2780,6 +2805,10 @@ debug_ppr_ty prec (FunTy arg res)
   = maybeParen prec funPrec $
     sep [debug_ppr_ty funPrec arg, arrow <+> debug_ppr_ty prec res]
 
+debug_ppr_ty prec (FunTildeTy arg res)
+  = maybeParen prec funPrec $
+    sep [debug_ppr_ty funPrec arg, text "~>" <+> debug_ppr_ty prec res]
+
 debug_ppr_ty prec (TyConApp tc tys)
   | null tys  = ppr tc
   | otherwise = maybeParen prec appPrec $
@@ -2983,6 +3012,7 @@ tidyType env (TyConApp tycon tys) = let args = tidyTypes env tys
                                     in args `seqList` TyConApp tycon args
 tidyType env (AppTy fun arg)      = (AppTy $! (tidyType env fun)) $! (tidyType env arg)
 tidyType env (FunTy fun arg)      = (FunTy $! (tidyType env fun)) $! (tidyType env arg)
+tidyType env (FunTildeTy fun arg) = (FunTildeTy $! (tidyType env fun)) $! (tidyType env arg)
 tidyType env (ty@(ForAllTy{}))    = mkForAllTys' (zip tvs' vis) $! tidyType env' body_ty
   where
     (tvs, vis, body_ty) = splitForAllTys' ty
@@ -3042,33 +3072,34 @@ tidyCo :: TidyEnv -> Coercion -> Coercion
 tidyCo env@(_, subst) co
   = go co
   where
-    go (Refl r ty)           = Refl r (tidyType env ty)
-    go (TyConAppCo r tc cos) = let args = map go cos
-                               in args `seqList` TyConAppCo r tc args
-    go (AppCo co1 co2)       = (AppCo $! go co1) $! go co2
-    go (ForAllCo tv h co)    = ((ForAllCo $! tvp) $! (go h)) $! (tidyCo envp co)
-                               where (envp, tvp) = tidyTyCoVarBndr env tv
+    go (Refl r ty)            = Refl r (tidyType env ty)
+    go (TyConAppCo r tc cos)  = let args = map go cos
+                                in args `seqList` TyConAppCo r tc args
+    go (AppCo co1 co2)        = (AppCo $! go co1) $! go co2
+    go (ForAllCo tv h co)     = ((ForAllCo $! tvp) $! (go h)) $! (tidyCo envp co)
+                                where (envp, tvp) = tidyTyCoVarBndr env tv
             -- the case above duplicates a bit of work in tidying h and the kind
             -- of tv. But the alternative is to use coercionKind, which seems worse.
-    go (FunCo r co1 co2)     = (FunCo r $! go co1) $! go co2
-    go (CoVarCo cv)          = case lookupVarEnv subst cv of
-                                 Nothing  -> CoVarCo cv
-                                 Just cv' -> CoVarCo cv'
-    go (HoleCo h)            = HoleCo h
+    go (FunCo r co1 co2)      = (FunCo r $! go co1) $! go co2
+    go (FunTildeCo r co1 co2) = (FunTildeCo r $! go co1) $! go co2
+    go (CoVarCo cv)           = case lookupVarEnv subst cv of
+                                  Nothing  -> CoVarCo cv
+                                  Just cv' -> CoVarCo cv'
+    go (HoleCo h)             = HoleCo h
     go (AxiomInstCo con ind cos) = let args = map go cos
-                               in  args `seqList` AxiomInstCo con ind args
-    go (UnivCo p r t1 t2)    = (((UnivCo $! (go_prov p)) $! r) $!
-                                tidyType env t1) $! tidyType env t2
-    go (SymCo co)            = SymCo $! go co
-    go (TransCo co1 co2)     = (TransCo $! go co1) $! go co2
-    go (NthCo r d co)        = NthCo r d $! go co
-    go (LRCo lr co)          = LRCo lr $! go co
-    go (InstCo co ty)        = (InstCo $! go co) $! go ty
-    go (CoherenceCo co1 co2) = (CoherenceCo $! go co1) $! go co2
-    go (KindCo co)           = KindCo $! go co
-    go (SubCo co)            = SubCo $! go co
-    go (AxiomRuleCo ax cos)  = let cos1 = tidyCos env cos
-                               in cos1 `seqList` AxiomRuleCo ax cos1
+                                   in  args `seqList` AxiomInstCo con ind args
+    go (UnivCo p r t1 t2)     = (((UnivCo $! (go_prov p)) $! r) $!
+                                 tidyType env t1) $! tidyType env t2
+    go (SymCo co)             = SymCo $! go co
+    go (TransCo co1 co2)      = (TransCo $! go co1) $! go co2
+    go (NthCo r d co)         = NthCo r d $! go co
+    go (LRCo lr co)           = LRCo lr $! go co
+    go (InstCo co ty)         = (InstCo $! go co) $! go ty
+    go (CoherenceCo co1 co2)  = (CoherenceCo $! go co1) $! go co2
+    go (KindCo co)            = KindCo $! go co
+    go (SubCo co)             = SubCo $! go co
+    go (AxiomRuleCo ax cos)   = let cos1 = tidyCos env cos
+                                in cos1 `seqList` AxiomRuleCo ax cos1
 
     go_prov UnsafeCoerceProv    = UnsafeCoerceProv
     go_prov (PhantomProv co)    = PhantomProv (go co)
@@ -3103,6 +3134,7 @@ typeSize (LitTy {})                 = 1
 typeSize (TyVarTy {})               = 1
 typeSize (AppTy t1 t2)              = typeSize t1 + typeSize t2
 typeSize (FunTy t1 t2)              = typeSize t1 + typeSize t2
+typeSize (FunTildeTy t1 t2)         = typeSize t1 + typeSize t2
 typeSize (ForAllTy (TvBndr tv _) t) = typeSize (tyVarKind tv) + typeSize t
 typeSize (TyConApp _ ts)            = 1 + sum (map typeSize ts)
 typeSize (CastTy ty co)             = typeSize ty + coercionSize co
@@ -3114,6 +3146,7 @@ coercionSize (TyConAppCo _ _ args) = 1 + sum (map coercionSize args)
 coercionSize (AppCo co arg)      = coercionSize co + coercionSize arg
 coercionSize (ForAllCo _ h co)   = 1 + coercionSize co + coercionSize h
 coercionSize (FunCo _ co1 co2)   = 1 + coercionSize co1 + coercionSize co2
+coercionSize (FunTildeCo _ co1 co2) = 1 + coercionSize co1 + coercionSize co2
 coercionSize (CoVarCo _)         = 1
 coercionSize (HoleCo _)          = 1
 coercionSize (AxiomInstCo _ _ args) = 1 + sum (map coercionSize args)

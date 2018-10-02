@@ -102,14 +102,15 @@ isKindLevPoly k = ASSERT2( isLiftedTypeKind k || _is_type, ppr k )
                   go k
   where
     go ty | Just ty' <- coreView ty = go ty'
-    go TyVarTy{}         = True
-    go AppTy{}           = True  -- it can't be a TyConApp
-    go (TyConApp tc tys) = isFamilyTyCon tc || any go tys
-    go ForAllTy{}        = True
-    go (FunTy t1 t2)     = go t1 || go t2
-    go LitTy{}           = False
-    go CastTy{}          = True
-    go CoercionTy{}      = True
+    go TyVarTy{}          = True
+    go AppTy{}            = True  -- it can't be a TyConApp
+    go (TyConApp tc tys)  = isFamilyTyCon tc || any go tys
+    go ForAllTy{}         = True
+    go (FunTy t1 t2)      = go t1 || go t2
+    go (FunTildeTy t1 t2) = go t1 || go t2
+    go LitTy{}            = False
+    go CastTy{}           = True
+    go CoercionTy{}       = True
 
     _is_type
       | TyConApp typ [_] <- k

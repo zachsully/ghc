@@ -29,7 +29,7 @@ module TysPrim(
         -- Kinds
         tYPE, primRepToRuntimeRep,
 
-        funTyCon, funTyConName,
+        funTyCon, funTyConName, funTildeTyCon, funTildeTyConName,
         unexposedPrimTyCons, exposedPrimTyCons, primTyCons,
 
         charPrimTyCon,          charPrimTy, charPrimTyConName,
@@ -334,7 +334,7 @@ openBetaTy  = mkTyVarTy openBetaTyVar
 {-
 ************************************************************************
 *                                                                      *
-                FunTyCon
+                FunTyCon and FunTildeTyCon
 *                                                                      *
 ************************************************************************
 -}
@@ -358,6 +358,27 @@ funTyCon = mkFunTyCon funTyConName tc_bndrs tc_rep_nm
                                              , tYPE runtimeRep2Ty
                                              ]
     tc_rep_nm = mkPrelTyConRepName funTyConName
+
+funTildeTyConName :: Name
+funTildeTyConName = mkPrimTyConName (fsLit "~>") funTildeTyConKey funTildeTyCon
+
+-- | The @(~>)@ type constructor.
+--
+-- @
+-- (~>) :: forall (rep1 :: RuntimeRep) (rep2 :: RuntimeRep).
+--         TYPE rep1 -> TYPE rep2 -> ~
+-- @
+funTildeTyCon :: TyCon
+funTildeTyCon = mkFunTildeTyCon funTildeTyConName tc_bndrs tc_rep_nm
+  where
+    tc_bndrs = [ TvBndr runtimeRep1TyVar (NamedTCB Inferred)
+               , TvBndr runtimeRep2TyVar (NamedTCB Inferred)
+               ]
+               ++ mkTemplateAnonTyConBinders [ tYPE runtimeRep1Ty
+                                             , tYPE runtimeRep2Ty
+                                             ]
+    tc_rep_nm = mkPrelTyConRepName funTildeTyConName
+
 
 {-
 ************************************************************************

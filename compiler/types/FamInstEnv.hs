@@ -1366,6 +1366,11 @@ normalise_type ty
            ; (co2, nty2) <- go ty2
            ; r <- getRole
            ; return (mkFunCo r co1 co2, mkFunTy nty1 nty2) }
+    go (FunTildeTy ty1 ty2)
+      = do { (co1, nty1) <- go ty1
+           ; (co2, nty2) <- go ty2
+           ; r <- getRole
+           ; return (mkFunTildeCo r co1 co2, mkFunTildeTy nty1 nty2) }
     go (ForAllTy (TvBndr tyvar vis) ty)
       = do { (lc', tv', h, ki') <- normalise_tyvar_bndr tyvar
            ; (co, nty)          <- withLC lc' $ normalise_type ty
@@ -1535,6 +1540,10 @@ coreFlattenTy = go
                                  (env2, ty2') = go env1 ty2 in
                              (env2, mkFunTy ty1' ty2')
 
+    go env (FunTildeTy ty1 ty2) = let (env1, ty1') = go env  ty1
+                                      (env2, ty2') = go env1 ty2 in
+                                  (env2, mkFunTildeTy ty1' ty2')
+
     go env (ForAllTy (TvBndr tv vis) ty)
       = let (env1, tv') = coreFlattenVarBndr env tv
             (env2, ty') = go env1 ty in
@@ -1615,6 +1624,7 @@ allTyVarsInTy = go
     go (TyConApp _ tys)  = allTyVarsInTys tys
     go (AppTy ty1 ty2)   = (go ty1) `unionVarSet` (go ty2)
     go (FunTy ty1 ty2)   = (go ty1) `unionVarSet` (go ty2)
+    go (FunTildeTy ty1 ty2)        = (go ty1) `unionVarSet` (go ty2)
     go (ForAllTy (TvBndr tv _) ty) = unitVarSet tv     `unionVarSet`
                                      go (tyVarKind tv) `unionVarSet`
                                      go ty
@@ -1629,6 +1639,7 @@ allTyVarsInTy = go
     go_co (ForAllCo tv h co)
       = unionVarSets [unitVarSet tv, go_co co, go_co h]
     go_co (FunCo _ c1 c2)       = go_co c1 `unionVarSet` go_co c2
+    go_co (FunTildeCo _ c1 c2)  = go_co c1 `unionVarSet` go_co c2
     go_co (CoVarCo cv)          = unitVarSet cv
     go_co (HoleCo h)            = unitVarSet (coHoleCoVar h)
     go_co (AxiomInstCo _ _ cos) = go_cos cos

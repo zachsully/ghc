@@ -13,7 +13,9 @@ module CoreArity (
         manifestArity, joinRhsArity, exprArity, typeArity,
         exprEtaExpandArity, findRhsArity, CheapFun, etaExpand,
         etaExpandToJoinPoint, etaExpandToJoinPointRule,
-        exprBotStrictness_maybe
+        exprBotStrictness_maybe,
+
+        mkArityWorker, mkArityWrapper
     ) where
 
 #include "HsVersions.h"
@@ -30,9 +32,11 @@ import VarEnv
 import Id
 import Type
 import TyCon    ( initRecTc, checkRecTc )
+import TyCoRep
 import Coercion
 import BasicTypes
 import Unique
+import UniqSupply
 import DynFlags ( DynFlags, GeneralFlag(..), gopt )
 import Outputable
 import FastString
@@ -122,6 +126,9 @@ typeArity ty
       = go rec_nts ty'
 
       | Just (arg,res) <- splitFunTy_maybe ty
+      = typeOneShot arg : go rec_nts res
+
+      | Just (arg,res) <- splitFunTildeTy_maybe ty
       = typeOneShot arg : go rec_nts res
 
       | Just (tc,tys) <- splitTyConApp_maybe ty
@@ -1150,3 +1157,48 @@ freshEtaId n subst ty
         eta_id' = uniqAway (getTCvInScope subst) $
                   mkSysLocalOrCoVar (fsLit "eta") (mkBuiltinUnique n) ty'
         subst'  = extendTCvInScope subst eta_id'
+
+{-
+************************************************************************
+*                                                                      *
+                   Call Arity in the Types
+*                                                                      *
+************************************************************************
+-}
+
+newtype ArityM a = AM { unAM :: UniqSupply -> (a,UniqSupply) }
+
+instance Functor ArityM where
+  fmap f m = AM $ \us -> let (x,us') = unAM m us in (f x,us')
+
+instance Applicative ArityM where
+  pure  = return
+  mf <*> ma = mf >>= \f -> ma >>= \a -> return (f a)
+
+freshId :: ArityM Var
+freshId = undefined
+
+instance Monad ArityM where
+  return x = AM $ \us -> (x,us)
+  m >>= f  = AM $ \us -> let (x,us') = unAM m us in unAM (f x) us'
+
+mkArityWrapper :: CoreBndr -> Type -> ArityM (Maybe CoreExpr)
+mkArityWrapper bndr (FunTildeTy t1 t2) =
+  mkArityWrapper bndr t2 >>= \me ->
+    freshId >>= \id ->
+      case me of
+        Nothing -> return (Just (Lam id (App (Var bndr) (Var id))))
+        Just e  -> return (Just (Lam id (App e (Var id))))
+mkArityWrapper _ _ = return Nothing
+
+mkArityWorker :: CoreExpr -> CoreExpr
+mkArityWorker (Var id) = undefined
+mkArityWorker (Lit literal) = undefined
+mkArityWorker (App expr arg) = undefined
+mkArityWorker (Lam bndr expr) = undefined
+mkArityWorker (Let bind expr) = undefined
+mkArityWorker (Case expr bind ty alts) = undefined
+mkArityWorker (Cast expr c) = Cast (mkArityWorker expr) c
+mkArityWorker (Tick tickid expr) = Tick tickid (mkArityWorker expr)
+mkArityWorker (Type ty) = Type ty
+mkArityWorker (Coercion c) = Coercion c

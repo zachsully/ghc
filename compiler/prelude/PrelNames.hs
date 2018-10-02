@@ -1856,8 +1856,6 @@ typeNatLogTyFamNameKey  = mkPreludeTyConUnique 175
 errorMessageTypeErrorFamKey :: Unique
 errorMessageTypeErrorFamKey =  mkPreludeTyConUnique 176
 
-
-
 ntTyConKey:: Unique
 ntTyConKey = mkPreludeTyConUnique 177
 coercibleTyConKey :: Unique
@@ -1893,6 +1891,9 @@ someTypeRepDataConKey = mkPreludeTyConUnique 189
 
 typeSymbolAppendFamNameKey :: Unique
 typeSymbolAppendFamNameKey = mkPreludeTyConUnique 190
+
+funTildeTyConKey :: Unique
+funTildeTyConKey = mkPreludeTyConUnique 191
 
 ---------------- Template Haskell -------------------
 --      THNames.hs: USES TyConUniques 200-299

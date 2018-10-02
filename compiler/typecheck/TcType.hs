@@ -866,19 +866,20 @@ promoteSkolemsX tclvl = mapAccumL (promoteSkolemX tclvl)
 -- the calls on the RHS are smaller than the LHS
 tcTyFamInsts :: Type -> [(TyCon, [Type])]
 tcTyFamInsts ty
-  | Just exp_ty <- tcView ty    = tcTyFamInsts exp_ty
-tcTyFamInsts (TyVarTy _)        = []
+  | Just exp_ty <- tcView ty      = tcTyFamInsts exp_ty
+tcTyFamInsts (TyVarTy _)          = []
 tcTyFamInsts (TyConApp tc tys)
-  | isTypeFamilyTyCon tc        = [(tc, take (tyConArity tc) tys)]
-  | otherwise                   = concat (map tcTyFamInsts tys)
-tcTyFamInsts (LitTy {})         = []
-tcTyFamInsts (ForAllTy bndr ty) = tcTyFamInsts (binderKind bndr)
-                                  ++ tcTyFamInsts ty
-tcTyFamInsts (FunTy ty1 ty2)    = tcTyFamInsts ty1 ++ tcTyFamInsts ty2
-tcTyFamInsts (AppTy ty1 ty2)    = tcTyFamInsts ty1 ++ tcTyFamInsts ty2
-tcTyFamInsts (CastTy ty _)      = tcTyFamInsts ty
-tcTyFamInsts (CoercionTy _)     = []  -- don't count tyfams in coercions,
-                                      -- as they never get normalized, anyway
+  | isTypeFamilyTyCon tc          = [(tc, take (tyConArity tc) tys)]
+  | otherwise                     = concat (map tcTyFamInsts tys)
+tcTyFamInsts (LitTy {})           = []
+tcTyFamInsts (ForAllTy bndr ty)   = tcTyFamInsts (binderKind bndr)
+                                    ++ tcTyFamInsts ty
+tcTyFamInsts (FunTy ty1 ty2)      = tcTyFamInsts ty1 ++ tcTyFamInsts ty2
+tcTyFamInsts (FunTildeTy ty1 ty2) = tcTyFamInsts ty1 ++ tcTyFamInsts ty2
+tcTyFamInsts (AppTy ty1 ty2)      = tcTyFamInsts ty1 ++ tcTyFamInsts ty2
+tcTyFamInsts (CastTy ty _)        = tcTyFamInsts ty
+tcTyFamInsts (CoercionTy _)       = []  -- don't count tyfams in coercions,
+                                        -- as they never get normalized, anyway
 
 isTyFamFree :: Type -> Bool
 -- ^ Check that a type does not contain any type family applications.
@@ -932,6 +933,7 @@ exactTyCoVarsOfType ty
     go (LitTy {})           = emptyVarSet
     go (AppTy fun arg)      = go fun `unionVarSet` go arg
     go (FunTy arg res)      = go arg `unionVarSet` go res
+    go (FunTildeTy arg res) = go arg `unionVarSet` go res
     go (ForAllTy bndr ty)   = delBinderVar (go ty) bndr `unionVarSet` go (binderKind bndr)
     go (CastTy ty co)       = go ty `unionVarSet` goCo co
     go (CoercionTy co)      = goCo co
@@ -942,6 +944,7 @@ exactTyCoVarsOfType ty
     goCo (ForAllCo tv k_co co)
       = goCo co `delVarSet` tv `unionVarSet` goCo k_co
     goCo (FunCo _ co1 co2)   = goCo co1 `unionVarSet` goCo co2
+    goCo (FunTildeCo _ co1 co2) = goCo co1 `unionVarSet` goCo co2
     goCo (CoVarCo v)         = goVar v
     goCo (HoleCo h)          = goVar (coHoleCoVar h)
     goCo (AxiomInstCo _ _ args) = goCos args
@@ -987,6 +990,7 @@ anyRewritableTyVar ignore_cos role pred ty
     go rl bvs (TyConApp tc tys) = go_tc rl bvs tc tys
     go rl bvs (AppTy fun arg)   = go rl bvs fun || go NomEq bvs arg
     go rl bvs (FunTy arg res)   = go rl bvs arg || go rl bvs res
+    go rl bvs (FunTildeTy arg res) = go rl bvs arg || go rl bvs res
     go rl bvs (ForAllTy tv ty)  = go rl (bvs `extendVarSet` binderVar tv) ty
     go rl bvs (CastTy ty co)    = go rl bvs ty || go_co rl bvs co
     go rl bvs (CoercionTy co)   = go_co rl bvs co  -- ToDo: check
@@ -1137,6 +1141,7 @@ split_dvs bound dvs ty
     go dv (AppTy t1 t2)    = go (go dv t1) t2
     go dv (TyConApp _ tys) = foldl go dv tys
     go dv (FunTy arg res)  = go (go dv arg) res
+    go dv (FunTildeTy arg res) = go (go dv arg) res
     go dv (LitTy {})       = dv
     go dv (CastTy ty co)   = go dv ty `mappend` go_co co
     go dv (CoercionTy co)  = dv `mappend` go_co co
@@ -1377,6 +1382,7 @@ getDFunTyKey (TyConApp tc _)         = getOccName tc
 getDFunTyKey (LitTy x)               = getDFunTyLitKey x
 getDFunTyKey (AppTy fun _)           = getDFunTyKey fun
 getDFunTyKey (FunTy _ _)             = getOccName funTyCon
+getDFunTyKey (FunTildeTy _ _)        = getOccName funTildeTyCon
 getDFunTyKey (ForAllTy _ t)          = getDFunTyKey t
 getDFunTyKey (CastTy ty _)           = getDFunTyKey ty
 getDFunTyKey t@(CoercionTy _)        = pprPanic "getDFunTyKey" (ppr t)
@@ -2270,6 +2276,7 @@ isTyVarHead _ (TyConApp {})    = False
 isTyVarHead _  (LitTy {})      = False
 isTyVarHead _  (ForAllTy {})   = False
 isTyVarHead _  (FunTy {})      = False
+isTyVarHead _  (FunTildeTy {}) = False
 isTyVarHead _  (CoercionTy {}) = False
 
 -- | Is the equality
@@ -2293,6 +2300,7 @@ isInsolubleOccursCheck eq_rel tv ty
                          NomEq  -> go t1 || go t2
                          ReprEq -> go t1
     go (FunTy t1 t2) = go t1 || go t2
+    go (FunTildeTy t1 t2) = go t1 || go t2
     go (ForAllTy (TvBndr tv' _) inner_ty)
       | tv' == tv = False
       | otherwise = go (tyVarKind tv') || go inner_ty
@@ -2663,6 +2671,7 @@ sizeType = go
                                    -- I came across this when investigating #14010.
     go (LitTy {})                = 1
     go (FunTy arg res)           = go arg + go res + 1
+    go (FunTildeTy arg res)      = go arg + go res + 1
     go (AppTy fun arg)           = go fun + go arg
     go (ForAllTy (TvBndr tv vis) ty)
         | isVisibleArgFlag vis   = go (tyVarKind tv) + go ty + 1

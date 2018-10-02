@@ -75,7 +75,7 @@ import TyCoRep
 import TyCon
 import CoAxiom
 import FamInstEnv
-import TysPrim( funTyConName )
+import TysPrim( funTyConName , funTildeTyConName )
 import Maybes( orElse )
 import Util
 import BasicTypes( Activation )
@@ -356,6 +356,9 @@ orphNamesOfType (ForAllTy bndr res)  = orphNamesOfType (binderKind bndr)
 orphNamesOfType (FunTy arg res)      = unitNameSet funTyConName    -- NB!  See Trac #8535
                                        `unionNameSet` orphNamesOfType arg
                                        `unionNameSet` orphNamesOfType res
+orphNamesOfType (FunTildeTy arg res) = unitNameSet funTildeTyConName
+                                       `unionNameSet` orphNamesOfType arg
+                                       `unionNameSet` orphNamesOfType res
 orphNamesOfType (AppTy fun arg)      = orphNamesOfType fun `unionNameSet` orphNamesOfType arg
 orphNamesOfType (CastTy ty co)       = orphNamesOfType ty `unionNameSet` orphNamesOfCo co
 orphNamesOfType (CoercionTy co)      = orphNamesOfCo co
@@ -373,6 +376,7 @@ orphNamesOfCo (AppCo co1 co2)       = orphNamesOfCo co1 `unionNameSet` orphNames
 orphNamesOfCo (ForAllCo _ kind_co co)
   = orphNamesOfCo kind_co `unionNameSet` orphNamesOfCo co
 orphNamesOfCo (FunCo _ co1 co2)     = orphNamesOfCo co1 `unionNameSet` orphNamesOfCo co2
+orphNamesOfCo (FunTildeCo _ co1 co2)= orphNamesOfCo co1 `unionNameSet` orphNamesOfCo co2
 orphNamesOfCo (CoVarCo _)           = emptyNameSet
 orphNamesOfCo (AxiomInstCo con _ cos) = orphNamesOfCoCon con `unionNameSet` orphNamesOfCos cos
 orphNamesOfCo (UnivCo p _ t1 t2)    = orphNamesOfProv p `unionNameSet` orphNamesOfType t1 `unionNameSet` orphNamesOfType t2

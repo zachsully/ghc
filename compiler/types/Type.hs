@@ -24,7 +24,7 @@ module Type (
         mkAppTy, mkAppTys, splitAppTy, splitAppTys, repSplitAppTys,
         splitAppTy_maybe, repSplitAppTy_maybe, tcRepSplitAppTy_maybe,
 
-        mkFunTy, mkFunTys, splitFunTy, splitFunTy_maybe,
+        mkFunTy, mkFunTys, splitFunTy, splitFunTy_maybe, splitFunTildeTy_maybe,
         splitFunTys, funResultTy, funArgTy,
 
         mkTyConApp, mkTyConTy,
@@ -98,7 +98,7 @@ module Type (
         tyConBindersTyBinders,
 
         -- ** Common type constructors
-        funTyCon,
+        funTyCon, funTildeTyCon,
 
         -- ** Predicates on types
         isTyVarTy, isFunTy, isDictTy, isPredTy, isCoercionTy,
@@ -289,6 +289,7 @@ import Control.Arrow    ( first, second )
 -- (\# a | b \#) Yes             No              No              Yes
 -- (  a, b  )    No              Yes             Yes             Yes
 -- [a]           No              Yes             Yes             Yes
+-- a ~> b        Yes             No              Yes             No
 -- @
 
 -- $representation_types
@@ -397,6 +398,8 @@ expandTypeSynonyms ty
     go subst (AppTy t1 t2) = mkAppTy (go subst t1) (go subst t2)
     go subst (FunTy arg res)
       = mkFunTy (go subst arg) (go subst res)
+    go subst (FunTildeTy arg res)
+      = mkFunTildeTy (go subst arg) (go subst res)
     go subst (ForAllTy (TvBndr tv vis) t)
       = let (subst', tv') = substTyVarBndrUsing go subst tv in
         ForAllTy (TvBndr tv' vis) (go subst' t)
@@ -415,6 +418,8 @@ expandTypeSynonyms ty
         mkForAllCo tv' kind_co' (go_co subst' co)
     go_co subst (FunCo r co1 co2)
       = mkFunCo r (go_co subst co1) (go_co subst co2)
+    go_co subst (FunTildeCo r co1 co2)
+      = mkFunTildeCo r (go_co subst co1) (go_co subst co2)
     go_co subst (CoVarCo cv)
       = substCoVar subst cv
     go_co subst (AxiomInstCo ax ind args)
@@ -517,10 +522,11 @@ mapType mapper@(TyCoMapper { tcm_smart = smart, tcm_tyvar = tyvar
   where
     go (TyVarTy tv) = tyvar env tv
     go (AppTy t1 t2) = mkappty <$> go t1 <*> go t2
-    go t@(TyConApp _ []) = return t  -- avoid allocation in this exceedingly
-                                     -- common case (mostly, for *)
-    go (TyConApp tc tys) = mktyconapp tc <$> mapM go tys
-    go (FunTy arg res)   = FunTy <$> go arg <*> go res
+    go t@(TyConApp _ [])    = return t  -- avoid allocation in this exceedingly
+                                        -- common case (mostly, for *)
+    go (TyConApp tc tys)    = mktyconapp tc <$> mapM go tys
+    go (FunTy arg res)      = FunTy <$> go arg <*> go res
+    go (FunTildeTy arg res) = FunTildeTy <$> go arg <*> go res
     go (ForAllTy (TvBndr tv vis) inner)
       = do { (env', tv') <- tybinder env tv vis
            ; inner' <- mapType mapper env' inner
@@ -552,6 +558,7 @@ mapCoercion mapper@(TyCoMapper { tcm_smart = smart, tcm_covar = covar
            ; return $ mkforallco tv' kind_co' co' }
         -- See Note [Efficiency for mapCoercion ForAllCo case]
     go (FunCo r c1 c2) = mkFunCo r <$> go c1 <*> go c2
+    go (FunTildeCo r c1 c2) = mkFunTildeCo r <$> go c1 <*> go c2
     go (CoVarCo cv) = covar env cv
     go (AxiomInstCo ax i args)
       = mkaxiominstco ax i <$> mapM go args
@@ -937,6 +944,12 @@ splitFunTy_maybe :: Type -> Maybe (Type, Type)
 splitFunTy_maybe ty | Just ty' <- coreView ty = splitFunTy_maybe ty'
 splitFunTy_maybe (FunTy arg res) = Just (arg, res)
 splitFunTy_maybe _               = Nothing
+
+splitFunTildeTy_maybe :: Type -> Maybe (Type, Type)
+splitFunTildeTy_maybe ty | Just ty' <- coreView ty = splitFunTildeTy_maybe ty'
+splitFunTildeTy_maybe (FunTildeTy arg res) = Just (arg, res)
+splitFunTildeTy_maybe _               = Nothing
+
 
 splitFunTys :: Type -> ([Type], Type)
 splitFunTys ty = split [] ty ty
@@ -1444,6 +1457,7 @@ isTauTy (LitTy {})            = True
 isTauTy (TyConApp tc tys)     = all isTauTy tys && isTauTyCon tc
 isTauTy (AppTy a b)           = isTauTy a && isTauTy b
 isTauTy (FunTy a b)           = isTauTy a && isTauTy b
+isTauTy (FunTildeTy a b)      = isTauTy a && isTauTy b
 isTauTy (ForAllTy {})         = False
 isTauTy (CastTy ty _)         = isTauTy ty
 isTauTy (CoercionTy _)        = False  -- Not sure about this
@@ -1896,6 +1910,7 @@ isFamFreeTy (LitTy {})        = True
 isFamFreeTy (TyConApp tc tys) = all isFamFreeTy tys && isFamFreeTyCon tc
 isFamFreeTy (AppTy a b)       = isFamFreeTy a && isFamFreeTy b
 isFamFreeTy (FunTy a b)       = isFamFreeTy a && isFamFreeTy b
+isFamFreeTy (FunTildeTy a b)  = isFamFreeTy a && isFamFreeTy b
 isFamFreeTy (ForAllTy _ ty)   = isFamFreeTy ty
 isFamFreeTy (CastTy ty _)     = isFamFreeTy ty
 isFamFreeTy (CoercionTy _)    = False  -- Not sure about this
@@ -2107,6 +2122,7 @@ seqType (LitTy n)                   = n `seq` ()
 seqType (TyVarTy tv)                = tv `seq` ()
 seqType (AppTy t1 t2)               = seqType t1 `seq` seqType t2
 seqType (FunTy t1 t2)               = seqType t1 `seq` seqType t2
+seqType (FunTildeTy t1 t2)          = seqType t1 `seq` seqType t2
 seqType (TyConApp tc tys)           = tc `seq` seqTypes tys
 seqType (ForAllTy (TvBndr tv _) ty) = seqType (tyVarKind tv) `seq` seqType ty
 seqType (CastTy ty co)              = seqType ty `seq` seqCo co
@@ -2282,6 +2298,7 @@ nonDetCmpTypeX env orig_t1 orig_t2 =
             get_rank (TyConApp {})   = 5
             get_rank (FunTy {})      = 6
             get_rank (ForAllTy {})   = 7
+            get_rank (FunTildeTy {}) = 8
 
     gos :: RnEnv2 -> [Type] -> [Type] -> TypeOrdering
     gos _   []         []         = TEQ
@@ -2324,6 +2341,7 @@ typeKind (TyConApp tc tys) = piResultTys (tyConKind tc) tys
 typeKind (AppTy fun arg)   = typeKind_apps fun [arg]
 typeKind (LitTy l)         = typeLiteralKind l
 typeKind (FunTy {})        = liftedTypeKind
+typeKind (FunTildeTy {})   = liftedTypeKind
 typeKind (TyVarTy tyvar)   = tyVarKind tyvar
 typeKind (CastTy _ty co)   = pSnd $ coercionKind co
 typeKind (CoercionTy co)   = coercionType co
@@ -2362,6 +2380,7 @@ isTypeLevPoly = go
                           | otherwise            = check_kind ty
     go (ForAllTy _ ty)                           = go ty
     go (FunTy {})                                = False
+    go (FunTildeTy {})                           = False
     go (LitTy {})                                = False
     go ty@(CastTy {})                            = check_kind ty
     go ty@(CoercionTy {})                        = pprPanic "isTypeLevPoly co" (ppr ty)
@@ -2431,6 +2450,9 @@ occCheckExpand vs_to_avoid ty
     go cxt (FunTy ty1 ty2) = do { ty1' <- go cxt ty1
                                 ; ty2' <- go cxt ty2
                                 ; return (mkFunTy ty1' ty2') }
+    go cxt (FunTildeTy ty1 ty2) = do { ty1' <- go cxt ty1
+                                     ; ty2' <- go cxt ty2
+                                     ; return (mkFunTildeTy ty1' ty2') }
     go cxt@(as, env) (ForAllTy (TvBndr tv vis) body_ty)
        = do { ki' <- go cxt (tyVarKind tv)
             ; let tv' = setTyVarKind tv ki'
@@ -2482,6 +2504,9 @@ occCheckExpand vs_to_avoid ty
     go_co cxt (FunCo r co1 co2)         = do { co1' <- go_co cxt co1
                                              ; co2' <- go_co cxt co2
                                              ; return (mkFunCo r co1' co2') }
+    go_co cxt (FunTildeCo r co1 co2)    = do { co1' <- go_co cxt co1
+                                             ; co2' <- go_co cxt co2
+                                             ; return (mkFunTildeCo r co1' co2') }
     go_co cxt (CoVarCo c)               = do { c' <- go_var cxt c
                                              ; return (mkCoVarCo c') }
     go_co cxt (HoleCo h)                = do { c' <- go_var cxt (ch_co_var h)
@@ -2543,6 +2568,7 @@ tyConsOfType ty
      go (TyConApp tc tys)           = go_tc tc `unionUniqSets` go_s tys
      go (AppTy a b)                 = go a `unionUniqSets` go b
      go (FunTy a b)                 = go a `unionUniqSets` go b `unionUniqSets` go_tc funTyCon
+     go (FunTildeTy a b)            = go a `unionUniqSets` go b `unionUniqSets` go_tc funTyCon
      go (ForAllTy (TvBndr tv _) ty) = go ty `unionUniqSets` go (tyVarKind tv)
      go (CastTy ty co)              = go ty `unionUniqSets` go_co co
      go (CoercionTy co)             = go_co co
@@ -2552,6 +2578,7 @@ tyConsOfType ty
      go_co (AppCo co arg)          = go_co co `unionUniqSets` go_co arg
      go_co (ForAllCo _ kind_co co) = go_co kind_co `unionUniqSets` go_co co
      go_co (FunCo _ co1 co2)       = go_co co1 `unionUniqSets` go_co co2
+     go_co (FunTildeCo _ co1 co2)  = go_co co1 `unionUniqSets` go_co co2
      go_co (AxiomInstCo ax _ args) = go_ax ax `unionUniqSets` go_cos args
      go_co (UnivCo p _ t1 t2)      = go_prov p `unionUniqSets` go t1 `unionUniqSets` go t2
      go_co (CoVarCo {})            = emptyUniqSet
@@ -2595,10 +2622,11 @@ splitVisVarsOfType orig_ty = Pair invis_vars vis_vars
     Pair invis_vars1 vis_vars = go orig_ty
     invis_vars = invis_vars1 `minusVarSet` vis_vars
 
-    go (TyVarTy tv)      = Pair (tyCoVarsOfType $ tyVarKind tv) (unitVarSet tv)
-    go (AppTy t1 t2)     = go t1 `mappend` go t2
-    go (TyConApp tc tys) = go_tc tc tys
-    go (FunTy t1 t2)     = go t1 `mappend` go t2
+    go (TyVarTy tv)       = Pair (tyCoVarsOfType $ tyVarKind tv) (unitVarSet tv)
+    go (AppTy t1 t2)      = go t1 `mappend` go t2
+    go (TyConApp tc tys)  = go_tc tc tys
+    go (FunTy t1 t2)      = go t1 `mappend` go t2
+    go (FunTildeTy t1 t2) = go t1 `mappend` go t2
     go (ForAllTy (TvBndr tv _) ty)
       = ((`delVarSet` tv) <$> go ty) `mappend`
         (invisible (tyCoVarsOfType $ tyVarKind tv))

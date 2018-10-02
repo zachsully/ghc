@@ -650,6 +650,7 @@ typeToLHsType ty
                         , hst_xqual = noExt
                         , hst_body = go tau })
     go (FunTy arg res) = nlHsFunTy (go arg) (go res)
+    go (FunTildeTy _ _) = panic "~> types are not available in HsSyn"
     go ty@(ForAllTy {})
       | (tvs, tau) <- tcSplitForAllTys ty
       = noLoc (HsForAllTy { hst_bndrs = map go_tv tvs

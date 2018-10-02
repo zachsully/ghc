@@ -29,6 +29,7 @@ module TyCon(
         mkAlgTyCon,
         mkClassTyCon,
         mkFunTyCon,
+        mkFunTildeTyCon,
         mkPrimTyCon,
         mkKindTyCon,
         mkLiftedPrimTyCon,
@@ -43,7 +44,7 @@ module TyCon(
         -- ** Predicates on TyCons
         isAlgTyCon, isVanillaAlgTyCon,
         isClassTyCon, isFamInstTyCon,
-        isFunTyCon,
+        isFunTyCon, isFunTildeTyCon,
         isPrimTyCon,
         isTupleTyCon, isUnboxedTupleTyCon, isBoxedTupleTyCon,
         isUnboxedSumTyCon, isPromotedTupleTyCon,
@@ -627,6 +628,22 @@ data TyCon
         tyConArity   :: Arity,            -- ^ Arity
 
         tcRepName :: TyConRepName
+    }
+
+  | FunTildeTyCon {
+      tyConUnique :: Unique,   -- ^ A Unique of this TyCon. Invariant:
+                               -- identical to Unique of Name stored in
+                               -- tyConName field.
+
+      tyConName   :: Name,     -- ^ Name of the constructor
+
+      -- See Note [The binders/kind/arity fields of a TyCon]
+      tyConBinders :: [TyConBinder], -- ^ Full binders
+      tyConResKind :: Kind,             -- ^ Result kind
+      tyConKind    :: Kind,             -- ^ Kind of this TyCon
+      tyConArity   :: Arity,            -- ^ Arity
+
+      tcRepName :: TyConRepName
     }
 
   -- | Algebraic data types, from
@@ -1434,6 +1451,18 @@ mkFunTyCon name binders rep_nm
         tcRepName    = rep_nm
     }
 
+mkFunTildeTyCon :: Name -> [TyConBinder] -> Name -> TyCon
+mkFunTildeTyCon name binders rep_nm
+  = FunTildeTyCon {
+        tyConUnique  = nameUnique name,
+        tyConName    = name,
+        tyConBinders = binders,
+        tyConResKind = liftedTypeKind,
+        tyConKind    = mkTyConKind binders liftedTypeKind,
+        tyConArity   = length binders,
+        tcRepName    = rep_nm
+    }
+
 -- | This is the making of an algebraic 'TyCon'. Notably, you have to
 -- pass in the generic (in the -XGenerics sense) information about the
 -- type constructor - you can get hold of it easily (see Generics
@@ -1662,6 +1691,10 @@ isFunTyCon :: TyCon -> Bool
 isFunTyCon (FunTyCon {}) = True
 isFunTyCon _             = False
 
+isFunTildeTyCon :: TyCon -> Bool
+isFunTildeTyCon (FunTildeTyCon {}) = True
+isFunTildeTyCon _                  = False
+
 -- | Test if the 'TyCon' is algebraic but abstract (invisible data constructors)
 isAbstractTyCon :: TyCon -> Bool
 isAbstractTyCon (AlgTyCon { algTcRhs = AbstractTyCon }) = True
@@ -1736,6 +1769,7 @@ isDataTyCon _ = False
 isInjectiveTyCon :: TyCon -> Role -> Bool
 isInjectiveTyCon _                             Phantom          = False
 isInjectiveTyCon (FunTyCon {})                 _                = True
+isInjectiveTyCon (FunTildeTyCon {})            _                = True
 isInjectiveTyCon (AlgTyCon {})                 Nominal          = True
 isInjectiveTyCon (AlgTyCon {algTcRhs = rhs})   Representational
   = isGenInjAlgRhs rhs
@@ -2058,6 +2092,7 @@ isLiftedTypeKindTyConName = (`hasKey` liftedTypeKindTyConKey)
 --            but constraint tuples are not)
 isImplicitTyCon :: TyCon -> Bool
 isImplicitTyCon (FunTyCon {})        = True
+isImplicitTyCon (FunTildeTyCon {})   = True
 isImplicitTyCon (PrimTyCon {})       = True
 isImplicitTyCon (PromotedDataCon {}) = True
 isImplicitTyCon (AlgTyCon { algTcRhs = rhs, tyConName = name })
@@ -2083,6 +2118,7 @@ isTcTyCon _            = False
 -- Precondition: The fully-applied TyCon has kind (TYPE blah)
 isTcLevPoly :: TyCon -> Bool
 isTcLevPoly FunTyCon{}           = False
+isTcLevPoly FunTildeTyCon{}      = False
 isTcLevPoly (AlgTyCon { algTcParent = UnboxedAlgTyCon _ }) = True
 isTcLevPoly AlgTyCon{}           = False
 isTcLevPoly SynonymTyCon{}       = True
@@ -2219,6 +2255,7 @@ tyConRoles :: TyCon -> [Role]
 tyConRoles tc
   = case tc of
     { FunTyCon {}                         -> const_role Representational
+    ; FunTildeTyCon {}                    -> const_role Representational
     ; AlgTyCon { tcRoles = roles }        -> roles
     ; SynonymTyCon { tcRoles = roles }    -> roles
     ; FamilyTyCon {}                      -> const_role Nominal
@@ -2440,6 +2477,7 @@ tyConFlavour (FamilyTyCon { famTcFlav = flav, famTcParent = parent })
       BuiltInSynFamTyCon{}         -> ClosedTypeFamilyFlavour
 tyConFlavour (SynonymTyCon {})    = TypeSynonymFlavour
 tyConFlavour (FunTyCon {})        = BuiltInTypeFlavour
+tyConFlavour (FunTildeTyCon {})   = BuiltInTypeFlavour
 tyConFlavour (PrimTyCon {})       = BuiltInTypeFlavour
 tyConFlavour (PromotedDataCon {}) = PromotedDataConFlavour
 tyConFlavour (TcTyCon { tcTyConFlavour = flav }) = flav
