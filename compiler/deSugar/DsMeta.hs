@@ -30,7 +30,6 @@ import DsMonad
 import qualified Language.Haskell.TH as TH
 
 import HsSyn
-import Class
 import PrelNames
 -- To avoid clashes with DsMeta.varName we must make a local alias for
 -- OccName.varName we do this by removing varName from the import of
@@ -122,7 +121,7 @@ repTopDs group@(HsGroup { hs_valds   = valds
                         , hs_annds   = annds
                         , hs_ruleds  = ruleds
                         , hs_docs    = docs })
- = do { let { bndrs  = hsSigTvBinders valds
+ = do { let { bndrs  = hsScopedTvBinders valds
                        ++ hsGroupBinders group
                        ++ hsPatSynSelectors valds
             ; instds = tyclds >>= group_instds } ;
@@ -180,9 +179,9 @@ repTopDs group@(HsGroup { hs_valds   = valds
       = notHandledL loc "Haddock documentation" empty
 repTopDs (XHsGroup _) = panic "repTopDs"
 
-hsSigTvBinders :: HsValBinds GhcRn -> [Name]
+hsScopedTvBinders :: HsValBinds GhcRn -> [Name]
 -- See Note [Scoped type variables in bindings]
-hsSigTvBinders binds
+hsScopedTvBinders binds
   = concatMap get_scoped_tvs sigs
   where
     sigs = case binds of
@@ -204,7 +203,7 @@ get_scoped_tvs (L _ signature)
       -- Both implicit and explicit quantified variables
       -- We need the implicit ones for   f :: forall (a::k). blah
       --    here 'k' scopes too
-      | HsIB { hsib_ext = HsIBRn { hsib_vars = implicit_vars }
+      | HsIB { hsib_ext = implicit_vars
              , hsib_body = hs_ty } <- sig
       , (explicit_vars, _) <- splitLHsForAllTy hs_ty
       = implicit_vars ++ map hsLTyVarName explicit_vars
@@ -222,7 +221,7 @@ Here the 'forall a' brings 'a' into scope over the binding group.
 To achieve this we
 
   a) Gensym a binding for 'a' at the same time as we do one for 'f'
-     collecting the relevant binders with hsSigTvBinders
+     collecting the relevant binders with hsScopedTvBinders
 
   b) When processing the 'forall', don't gensym
 
@@ -470,10 +469,10 @@ repAssocTyFamDefaults = mapM rep_deflt
 -------------------------
 -- represent fundeps
 --
-repLFunDeps :: [Located (FunDep (Located Name))] -> DsM (Core [TH.FunDep])
+repLFunDeps :: [LHsFunDep GhcRn] -> DsM (Core [TH.FunDep])
 repLFunDeps fds = repList funDepTyConName repLFunDep fds
 
-repLFunDep :: Located (FunDep (Located Name)) -> DsM (Core TH.FunDep)
+repLFunDep :: LHsFunDep GhcRn -> DsM (Core TH.FunDep)
 repLFunDep (L _ (xs, ys))
    = do xs' <- repList nameTyConName (lookupBinder . unLoc) xs
         ys' <- repList nameTyConName (lookupBinder . unLoc) ys
@@ -544,7 +543,7 @@ repTyFamInstD decl@(TyFamInstDecl { tfid_eqn = eqn })
        ; repTySynInst tc eqn1 }
 
 repTyFamEqn :: TyFamInstEqn GhcRn -> DsM (Core TH.TySynEqnQ)
-repTyFamEqn (HsIB { hsib_ext = HsIBRn { hsib_vars = var_names }
+repTyFamEqn (HsIB { hsib_ext = var_names
                   , hsib_body = FamEqn { feqn_pats = tys
                                        , feqn_rhs  = rhs }})
   = do { let hs_tvs = HsQTvs { hsq_ext = HsQTvsRn
@@ -561,7 +560,7 @@ repTyFamEqn (HsIB _ (XFamEqn _)) = panic "repTyFamEqn"
 
 repDataFamInstD :: DataFamInstDecl GhcRn -> DsM (Core TH.DecQ)
 repDataFamInstD (DataFamInstDecl { dfid_eqn =
-                  (HsIB { hsib_ext = HsIBRn { hsib_vars = var_names }
+                  (HsIB { hsib_ext = var_names
                         , hsib_body = FamEqn { feqn_tycon = tc_name
                                              , feqn_pats  = tys
                                              , feqn_rhs   = defn }})})
@@ -651,7 +650,7 @@ repRuleD (L _ (XRuleDecl _)) = panic "repRuleD"
 ruleBndrNames :: LRuleBndr GhcRn -> [Name]
 ruleBndrNames (L _ (RuleBndr _ n))      = [unLoc n]
 ruleBndrNames (L _ (RuleBndrSig _ n sig))
-  | HsWC { hswc_body = HsIB { hsib_ext = HsIBRn { hsib_vars = vars } }} <- sig
+  | HsWC { hswc_body = HsIB { hsib_ext = vars }} <- sig
   = unLoc n : vars
 ruleBndrNames (L _ (RuleBndrSig _ _ (HsWC _ (XHsImplicitBndrs _))))
   = panic "ruleBndrNames"
@@ -1042,7 +1041,7 @@ repContext ctxt = do preds <- repList typeQTyConName repLTy ctxt
                      repCtxt preds
 
 repHsSigType :: LHsSigType GhcRn -> DsM (Core TH.TypeQ)
-repHsSigType (HsIB { hsib_ext = HsIBRn { hsib_vars = implicit_tvs }
+repHsSigType (HsIB { hsib_ext = implicit_tvs
                    , hsib_body = body })
   | (explicit_tvs, ctxt, ty) <- splitLHsSigmaTy body
   = addSimpleTyVarBinds implicit_tvs $
@@ -1121,11 +1120,6 @@ repTy (HsSumTy _ tys)       = do tys1 <- repLTys tys
 repTy (HsOpTy _ ty1 n ty2)  = repLTy ((nlHsTyVar (unLoc n) `nlHsAppTy` ty1)
                                    `nlHsAppTy` ty2)
 repTy (HsParTy _ t)         = repLTy t
-repTy (HsEqTy _ t1 t2) = do
-                         t1' <- repLTy t1
-                         t2' <- repLTy t2
-                         eq  <- repTequality
-                         repTapps eq [t1', t2']
 repTy (HsStarTy _ _) =  repTStar
 repTy (HsKindSig _ t k)     = do
                                 t1 <- repLTy t
@@ -1143,6 +1137,10 @@ repTy (HsTyLit _ lit) = do
                           lit' <- repTyLit lit
                           repTLit lit'
 repTy (HsWildCardTy (AnonWildCard _)) = repTWildCard
+repTy (HsIParamTy _ n t) = do
+                             n' <- rep_implicit_param_name (unLoc n)
+                             t' <- repLTy t
+                             repTImplicitParam n' t'
 
 repTy ty                      = notHandled "Exotic form of type" (ppr ty)
 
@@ -1212,7 +1210,7 @@ repE (HsVar _ (L _ x))            =
         Just (DsBound y)   -> repVarOrCon x (coreVar y)
         Just (DsSplice e)  -> do { e' <- dsExpr e
                                  ; return (MkC e') } }
-repE e@(HsIPVar {}) = notHandled "Implicit parameters" (ppr e)
+repE (HsIPVar _ n) = rep_implicit_param_name n >>= repImplicitParamVar
 repE (HsOverLabel _ _ s) = repOverLabel s
 
 repE e@(HsRecFld _ f) = case f of
@@ -1277,8 +1275,13 @@ repE e@(HsDo _ ctxt (L _ sts))
         e'      <- repComp (nonEmptyCoreList zs);
         wrapGenSyms ss e' }
 
+ | MDoExpr <- ctxt
+ = do { (ss,zs) <- repLSts sts;
+        e'      <- repMDoE (nonEmptyCoreList zs);
+        wrapGenSyms ss e' }
+
   | otherwise
-  = notHandled "mdo, monad comprehension and [: :]" (ppr e)
+  = notHandled "monad comprehension and [: :]" (ppr e)
 
 repE (ExplicitList _ _ es) = do { xs <- repLEs es; repListExp xs }
 repE e@(ExplicitTuple _ es boxed)
@@ -1473,6 +1476,16 @@ repSts [LastStmt _ e _ _]
   = do { e2 <- repLE e
        ; z <- repNoBindSt e2
        ; return ([], [z]) }
+repSts (stmt@RecStmt{} : ss)
+  = do { let binders = collectLStmtsBinders (recS_stmts stmt)
+       ; ss1 <- mkGenSyms binders
+       -- Bring all of binders in the recursive group into scope for the
+       -- whole group.
+       ; (ss1_other,rss) <- addBinds ss1 $ repSts (map unLoc (recS_stmts stmt))
+       ; MASSERT(sort ss1 == sort ss1_other)
+       ; z <- repRecSt (nonEmptyCoreList rss)
+       ; (ss2,zs) <- addBinds ss1 (repSts ss)
+       ; return (ss1++ss2, z : zs) }
 repSts []    = return ([],[])
 repSts other = notHandled "Exotic statement" (ppr other)
 
@@ -1486,21 +1499,44 @@ repBinds (EmptyLocalBinds _)
   = do  { core_list <- coreList decQTyConName []
         ; return ([], core_list) }
 
-repBinds b@(HsIPBinds {}) = notHandled "Implicit parameters" (ppr b)
+repBinds (HsIPBinds _ (IPBinds _ decs))
+ = do   { ips <- mapM rep_implicit_param_bind decs
+        ; core_list <- coreList decQTyConName
+                                (de_loc (sort_by_loc ips))
+        ; return ([], core_list)
+        }
+
+repBinds b@(HsIPBinds _ XHsIPBinds {})
+ = notHandled "Implicit parameter binds extension" (ppr b)
 
 repBinds (HsValBinds _ decs)
- = do   { let { bndrs = hsSigTvBinders decs ++ collectHsValBinders decs }
+ = do   { let { bndrs = hsScopedTvBinders decs ++ collectHsValBinders decs }
                 -- No need to worry about detailed scopes within
                 -- the binding group, because we are talking Names
                 -- here, so we can safely treat it as a mutually
                 -- recursive group
-                -- For hsSigTvBinders see Note [Scoped type variables in bindings]
+                -- For hsScopedTvBinders see Note [Scoped type variables in bindings]
         ; ss        <- mkGenSyms bndrs
         ; prs       <- addBinds ss (rep_val_binds decs)
         ; core_list <- coreList decQTyConName
                                 (de_loc (sort_by_loc prs))
         ; return (ss, core_list) }
 repBinds b@(XHsLocalBindsLR {}) = notHandled "Local binds extensions" (ppr b)
+
+rep_implicit_param_bind :: LIPBind GhcRn -> DsM (SrcSpan, Core TH.DecQ)
+rep_implicit_param_bind (L loc (IPBind _ ename (L _ rhs)))
+ = do { name <- case ename of
+                    Left (L _ n) -> rep_implicit_param_name n
+                    Right _ ->
+                        panic "rep_implicit_param_bind: post typechecking"
+      ; rhs' <- repE rhs
+      ; ipb <- repImplicitParamBind name rhs'
+      ; return (loc, ipb) }
+rep_implicit_param_bind (L _ b@(XIPBind _))
+ = notHandled "Implicit parameter bind extension" (ppr b)
+
+rep_implicit_param_name :: HsIPName -> DsM (Core String)
+rep_implicit_param_name (HsIPName name) = coreStringLit (unpackFS name)
 
 rep_val_binds :: HsValBinds GhcRn -> DsM [(SrcSpan, Core TH.DecQ)]
 -- Assumes: all the binders of the binding are already in the meta-env
@@ -1892,7 +1928,7 @@ unC (MkC x) = x
 
 rep2 :: Name -> [ CoreExpr ] -> DsM (Core a)
 rep2 n xs = do { id <- dsLookupGlobalId n
-               ; return (MkC (foldl App (Var id) xs)) }
+               ; return (MkC (foldl' App (Var id) xs)) }
 
 dataCon' :: Name -> [CoreExpr] -> DsM (Core a)
 dataCon' n args = do { id <- dsLookupDataCon n
@@ -2014,6 +2050,9 @@ repCaseE (MkC e) (MkC ms) = rep2 caseEName [e, ms]
 repDoE :: Core [TH.StmtQ] -> DsM (Core TH.ExpQ)
 repDoE (MkC ss) = rep2 doEName [ss]
 
+repMDoE :: Core [TH.StmtQ] -> DsM (Core TH.ExpQ)
+repMDoE (MkC ss) = rep2 mdoEName [ss]
+
 repComp :: Core [TH.StmtQ] -> DsM (Core TH.ExpQ)
 repComp (MkC ss) = rep2 compEName [ss]
 
@@ -2040,6 +2079,9 @@ repSectionL (MkC x) (MkC y) = rep2 sectionLName [x,y]
 
 repSectionR :: Core TH.ExpQ -> Core TH.ExpQ -> DsM (Core TH.ExpQ)
 repSectionR (MkC x) (MkC y) = rep2 sectionRName [x,y]
+
+repImplicitParamVar :: Core String -> DsM (Core TH.ExpQ)
+repImplicitParamVar (MkC x) = rep2 implicitParamVarEName [x]
 
 ------------ Right hand sides (guarded expressions) ----
 repGuarded :: Core [TH.Q (TH.Guard, TH.Exp)] -> DsM (Core TH.BodyQ)
@@ -2073,6 +2115,9 @@ repNoBindSt (MkC e) = rep2 noBindSName [e]
 
 repParSt :: Core [[TH.StmtQ]] -> DsM (Core TH.StmtQ)
 repParSt (MkC sss) = rep2 parSName [sss]
+
+repRecSt :: Core [TH.StmtQ] -> DsM (Core TH.StmtQ)
+repRecSt (MkC ss) = rep2 recSName [ss]
 
 -------------- Range (Arithmetic sequences) -----------
 repFrom :: Core TH.ExpQ -> DsM (Core TH.ExpQ)
@@ -2255,6 +2300,9 @@ repFunDep (MkC xs) (MkC ys) = rep2 funDepName [xs, ys]
 repProto :: Name -> Core TH.Name -> Core TH.TypeQ -> DsM (Core TH.DecQ)
 repProto mk_sig (MkC s) (MkC ty) = rep2 mk_sig [s, ty]
 
+repImplicitParamBind :: Core String -> Core TH.ExpQ -> DsM (Core TH.DecQ)
+repImplicitParamBind (MkC n) (MkC e) = rep2 implicitParamBindDName [n, e]
+
 repCtxt :: Core [TH.PredQ] -> DsM (Core TH.CxtQ)
 repCtxt (MkC tys) = rep2 cxtName [tys]
 
@@ -2355,6 +2403,9 @@ repTLit (MkC lit) = rep2 litTName [lit]
 
 repTWildCard :: DsM (Core TH.TypeQ)
 repTWildCard = rep2 wildCardTName []
+
+repTImplicitParam :: Core String -> Core TH.TypeQ -> DsM (Core TH.TypeQ)
+repTImplicitParam (MkC n) (MkC e) = rep2 implicitParamTName [n, e]
 
 repTStar :: DsM (Core TH.TypeQ)
 repTStar = rep2 starKName []

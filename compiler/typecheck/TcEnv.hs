@@ -18,7 +18,7 @@ module TcEnv(
         tcExtendGlobalEnv, tcExtendTyConEnv,
         tcExtendGlobalEnvImplicit, setGlobalTypeEnv,
         tcExtendGlobalValEnv,
-        tcLookupLocatedGlobal, tcLookupGlobal,
+        tcLookupLocatedGlobal, tcLookupGlobal, tcLookupGlobalOnly,
         tcLookupTyCon, tcLookupClass,
         tcLookupDataCon, tcLookupPatSyn, tcLookupConLike,
         tcLookupLocatedGlobalId, tcLookupLocatedTyCon,
@@ -228,6 +228,15 @@ tcLookupGlobal name
             Succeeded thing -> return thing
             Failed msg      -> failWithTc msg
         }}}
+
+-- Look up only in this module's global env't. Don't look in imports, etc.
+-- Panic if it's not there.
+tcLookupGlobalOnly :: Name -> TcM TyThing
+tcLookupGlobalOnly name
+  = do { env <- getGblEnv
+       ; return $ case lookupNameEnv (tcg_type_env env) name of
+                    Just thing -> thing
+                    Nothing    -> pprPanic "tcLookupGlobalOnly" (ppr name) }
 
 tcLookupDataCon :: Name -> TcM DataCon
 tcLookupDataCon name = do
@@ -567,7 +576,7 @@ tc_extend_local_env top_lvl extra_env thing_inside
 -- The second argument of type TyVarSet is a set of type variables
 -- that are bound together with extra_env and should not be regarded
 -- as free in the types of extra_env.
-  = do  { traceTc "env2" (ppr extra_env)
+  = do  { traceTc "tc_extend_local_env" (ppr extra_env)
         ; env0 <- getLclEnv
         ; env1 <- tcExtendLocalTypeEnv env0 extra_env
         ; stage <- getStage
@@ -605,8 +614,10 @@ tcExtendLocalTypeEnv lcl_env@(TcLclEnv { tcl_env = lcl_type_env }) tc_ty_things
                        tvs
           _other    -> tvs `unionVarSet` id_tvs
         where
-           id_tvs = tyCoVarsOfType (idType id)
-           is_closed_type = not (anyVarSet isTyVar id_tvs)
+           id_ty          = idType id
+           id_tvs         = tyCoVarsOfType id_ty
+           id_co_tvs      = closeOverKinds (coVarsOfType id_ty)
+           is_closed_type = not (anyVarSet isTyVar (id_tvs `minusVarSet` id_co_tvs))
            -- We only care about being closed wrt /type/ variables
            -- E.g. a top-level binding might have a type like
            --          foo :: t |> co

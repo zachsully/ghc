@@ -351,7 +351,7 @@ orphNamesOfType (TyVarTy _)          = emptyNameSet
 orphNamesOfType (LitTy {})           = emptyNameSet
 orphNamesOfType (TyConApp tycon tys) = orphNamesOfTyCon tycon
                                        `unionNameSet` orphNamesOfTypes tys
-orphNamesOfType (ForAllTy bndr res)  = orphNamesOfType (binderKind bndr)
+orphNamesOfType (ForAllTy bndr res)  = orphNamesOfType (binderType bndr)
                                        `unionNameSet` orphNamesOfType res
 orphNamesOfType (FunTy arg res)      = unitNameSet funTyConName    -- NB!  See Trac #8535
                                        `unionNameSet` orphNamesOfType arg
@@ -369,8 +369,13 @@ orphNamesOfThings f = foldr (unionNameSet . f) emptyNameSet
 orphNamesOfTypes :: [Type] -> NameSet
 orphNamesOfTypes = orphNamesOfThings orphNamesOfType
 
+orphNamesOfMCo :: MCoercion -> NameSet
+orphNamesOfMCo MRefl    = emptyNameSet
+orphNamesOfMCo (MCo co) = orphNamesOfCo co
+
 orphNamesOfCo :: Coercion -> NameSet
-orphNamesOfCo (Refl _ ty)           = orphNamesOfType ty
+orphNamesOfCo (Refl ty)             = orphNamesOfType ty
+orphNamesOfCo (GRefl _ ty mco)      = orphNamesOfType ty `unionNameSet` orphNamesOfMCo mco
 orphNamesOfCo (TyConAppCo _ tc cos) = unitNameSet (getName tc) `unionNameSet` orphNamesOfCos cos
 orphNamesOfCo (AppCo co1 co2)       = orphNamesOfCo co1 `unionNameSet` orphNamesOfCo co2
 orphNamesOfCo (ForAllCo _ kind_co co)
@@ -385,7 +390,6 @@ orphNamesOfCo (TransCo co1 co2)     = orphNamesOfCo co1 `unionNameSet` orphNames
 orphNamesOfCo (NthCo _ _ co)        = orphNamesOfCo co
 orphNamesOfCo (LRCo  _ co)          = orphNamesOfCo co
 orphNamesOfCo (InstCo co arg)       = orphNamesOfCo co `unionNameSet` orphNamesOfCo arg
-orphNamesOfCo (CoherenceCo co1 co2) = orphNamesOfCo co1 `unionNameSet` orphNamesOfCo co2
 orphNamesOfCo (KindCo co)           = orphNamesOfCo co
 orphNamesOfCo (SubCo co)            = orphNamesOfCo co
 orphNamesOfCo (AxiomRuleCo _ cs)    = orphNamesOfCos cs

@@ -22,6 +22,7 @@ module GHCi.Message
   , Pipe(..), remoteCall, remoteTHCall, readPipe, writePipe
   ) where
 
+import Prelude -- See note [Why do we import Prelude here?]
 import GHCi.RemoteTypes
 import GHCi.FFI
 import GHCi.TH.Binary ()
@@ -43,6 +44,7 @@ import Data.Dynamic
 import Data.Typeable (TypeRep)
 import Data.IORef
 import Data.Map (Map)
+import Foreign
 import GHC.Generics
 import GHC.Stack.CCS
 import qualified Language.Haskell.TH        as TH
@@ -202,6 +204,18 @@ data Message a where
                    -> [RemoteRef (TH.Q ())]
                    -> Message (QResult ())
 
+  -- | Remote interface to GHC.Exts.Heap.getClosureData. This is used by
+  -- the GHCi debugger to inspect values in the heap for :print and
+  -- type reconstruction.
+  GetClosure
+    :: HValueRef
+    -> Message (GenClosure HValueRef)
+
+  -- | Evaluate something. This is used to support :force in GHCi.
+  Seq
+    :: HValueRef
+    -> Message (EvalResult ())
+
 deriving instance Show (Message a)
 
 
@@ -245,6 +259,7 @@ data THMessage a where
 
   StartRecover :: THMessage ()
   EndRecover :: Bool -> THMessage ()
+  FailIfErrs :: THMessage (THResult ())
 
   -- | Indicates that this RunTH is finished, and the next message
   -- will be the result of RunTH (a QResult).
@@ -275,9 +290,10 @@ getTHMessage = do
     14 -> THMsg <$> return ExtsEnabled
     15 -> THMsg <$> return StartRecover
     16 -> THMsg <$> EndRecover <$> get
-    17 -> return (THMsg RunTHDone)
-    18 -> THMsg <$> AddModFinalizer <$> get
-    19 -> THMsg <$> (AddForeignFilePath <$> get <*> get)
+    17 -> THMsg <$> return FailIfErrs
+    18 -> return (THMsg RunTHDone)
+    19 -> THMsg <$> AddModFinalizer <$> get
+    20 -> THMsg <$> (AddForeignFilePath <$> get <*> get)
     _  -> THMsg <$> AddCorePlugin <$> get
 
 putTHMessage :: THMessage a -> Put
@@ -299,10 +315,11 @@ putTHMessage m = case m of
   ExtsEnabled                 -> putWord8 14
   StartRecover                -> putWord8 15
   EndRecover a                -> putWord8 16 >> put a
-  RunTHDone                   -> putWord8 17
-  AddModFinalizer a           -> putWord8 18 >> put a
-  AddForeignFilePath lang a   -> putWord8 19 >> put lang >> put a
-  AddCorePlugin a             -> putWord8 20 >> put a
+  FailIfErrs                  -> putWord8 17
+  RunTHDone                   -> putWord8 18
+  AddModFinalizer a           -> putWord8 19 >> put a
+  AddForeignFilePath lang a   -> putWord8 20 >> put lang >> put a
+  AddCorePlugin a             -> putWord8 21 >> put a
 
 
 data EvalOpts = EvalOpts
@@ -410,6 +427,22 @@ data QState = QState
   }
 instance Show QState where show _ = "<QState>"
 
+-- Orphan instances of Binary for Ptr / FunPtr by conversion to Word64.
+-- This is to support Binary StgInfoTable which includes these.
+instance Binary (Ptr a) where
+  put p = put (fromIntegral (ptrToWordPtr p) :: Word64)
+  get = (wordPtrToPtr . fromIntegral) <$> (get :: Get Word64)
+
+instance Binary (FunPtr a) where
+  put = put . castFunPtrToPtr
+  get = castPtrToFunPtr <$> get
+
+-- Binary instances to support the GetClosure message
+instance Binary StgInfoTable
+instance Binary ClosureType
+instance Binary PrimType
+instance Binary a => Binary (GenClosure a)
+
 data Msg = forall a . (Binary a, Show a) => Msg (Message a)
 
 getMessage :: Get Msg
@@ -450,7 +483,9 @@ getMessage = do
       31 -> Msg <$> return StartTH
       32 -> Msg <$> (RunModFinalizers <$> get <*> get)
       33 -> Msg <$> (AddSptEntry <$> get <*> get)
-      _  -> Msg <$> (RunTH <$> get <*> get <*> get <*> get)
+      34 -> Msg <$> (RunTH <$> get <*> get <*> get <*> get)
+      35 -> Msg <$> (GetClosure <$> get)
+      _  -> Msg <$> (Seq <$> get)
 
 putMessage :: Message a -> Put
 putMessage m = case m of
@@ -489,6 +524,8 @@ putMessage m = case m of
   RunModFinalizers a b        -> putWord8 32 >> put a >> put b
   AddSptEntry a b             -> putWord8 33 >> put a >> put b
   RunTH st q loc ty           -> putWord8 34 >> put st >> put q >> put loc >> put ty
+  GetClosure a                -> putWord8 35 >> put a
+  Seq a                       -> putWord8 36 >> put a
 
 -- -----------------------------------------------------------------------------
 -- Reading/writing messages

@@ -178,10 +178,13 @@ mkHsApp e1 e2 = addCLoc e1 e2 (HsApp noExt e1 e2)
 
 mkHsAppType :: (XAppTypeE (GhcPass id) ~ LHsWcType GhcRn)
             => LHsExpr (GhcPass id) -> LHsWcType GhcRn -> LHsExpr (GhcPass id)
-mkHsAppType e t = addCLoc e (hswc_body t) (HsAppType t e)
+mkHsAppType e t = addCLoc e t_body (HsAppType paren_wct e)
+  where
+    t_body    = hswc_body t
+    paren_wct = t { hswc_body = parenthesizeHsType appPrec t_body }
 
 mkHsAppTypes :: LHsExpr GhcRn -> [LHsWcType GhcRn] -> LHsExpr GhcRn
-mkHsAppTypes = foldl mkHsAppType
+mkHsAppTypes = foldl' mkHsAppType
 
 mkHsLam :: [LPat GhcPs] -> LHsExpr GhcPs -> LHsExpr GhcPs
 mkHsLam pats body = mkHsPar (L (getLoc body) (HsLam noExt matches))
@@ -207,7 +210,7 @@ nlHsTyApp fun_id tys
 
 nlHsTyApps :: IdP (GhcPass id) -> [Type] -> [LHsExpr (GhcPass id)]
            -> LHsExpr (GhcPass id)
-nlHsTyApps fun_id tys xs = foldl nlHsApp (nlHsTyApp fun_id tys) xs
+nlHsTyApps fun_id tys xs = foldl' nlHsApp (nlHsTyApp fun_id tys) xs
 
 --------- Adding parens ---------
 mkLHsPar :: LHsExpr (GhcPass id) -> LHsExpr (GhcPass id)
@@ -415,17 +418,17 @@ nlHsSyntaxApps (SyntaxExpr { syn_expr      = fun
                            , syn_res_wrap  = res_wrap }) args
   | [] <- arg_wraps   -- in the noSyntaxExpr case
   = ASSERT( isIdHsWrapper res_wrap )
-    foldl nlHsApp (noLoc fun) args
+    foldl' nlHsApp (noLoc fun) args
 
   | otherwise
-  = mkLHsWrap res_wrap (foldl nlHsApp (noLoc fun) (zipWithEqual "nlHsSyntaxApps"
+  = mkLHsWrap res_wrap (foldl' nlHsApp (noLoc fun) (zipWithEqual "nlHsSyntaxApps"
                                                      mkLHsWrap arg_wraps args))
 
 nlHsApps :: IdP (GhcPass id) -> [LHsExpr (GhcPass id)] -> LHsExpr (GhcPass id)
-nlHsApps f xs = foldl nlHsApp (nlHsVar f) xs
+nlHsApps f xs = foldl' nlHsApp (nlHsVar f) xs
 
 nlHsVarApps :: IdP (GhcPass id) -> [IdP (GhcPass id)] -> LHsExpr (GhcPass id)
-nlHsVarApps f xs = noLoc (foldl mk (HsVar noExt (noLoc f))
+nlHsVarApps f xs = noLoc (foldl' mk (HsVar noExt (noLoc f))
                                                (map ((HsVar noExt) . noLoc) xs))
                  where
                    mk f a = HsApp noExt (noLoc f) (noLoc a)
@@ -497,11 +500,17 @@ nlHsParTy :: LHsType (GhcPass p)                        -> LHsType (GhcPass p)
 
 nlHsAppTy f t = noLoc (HsAppTy noExt f (parenthesizeHsType appPrec t))
 nlHsTyVar x   = noLoc (HsTyVar noExt NotPromoted (noLoc x))
-nlHsFunTy a b = noLoc (HsFunTy noExt a b)
+nlHsFunTy a b = noLoc (HsFunTy noExt (parenthesizeHsType funPrec a)
+                                     (parenthesize_fun_tail b))
+  where
+    parenthesize_fun_tail (L loc (HsFunTy ext ty1 ty2))
+      = L loc (HsFunTy ext (parenthesizeHsType funPrec ty1)
+                           (parenthesize_fun_tail ty2))
+    parenthesize_fun_tail lty = lty
 nlHsParTy t   = noLoc (HsParTy noExt t)
 
 nlHsTyConApp :: IdP (GhcPass p) -> [LHsType (GhcPass p)] -> LHsType (GhcPass p)
-nlHsTyConApp tycon tys  = foldl nlHsAppTy (nlHsTyVar tycon) tys
+nlHsTyConApp tycon tys  = foldl' nlHsAppTy (nlHsTyVar tycon) tys
 
 {-
 Tuples.  All these functions are *pre-typechecker* because they lack
@@ -695,7 +704,7 @@ The derived Eq instance for Glurp (without any kind signatures) would be:
   instance Eq a => Eq (Glurp a) where
     (==) = coerce @(Wat 'Proxy -> Wat 'Proxy -> Bool)
                   @(Glurp a    -> Glurp a    -> Bool)
-                  (==)
+                  (==) :: Glurp a -> Glurp a -> Bool
 
 (Where the visible type applications use types produced by typeToLHsType.)
 
@@ -1027,7 +1036,11 @@ collectStmtBinders (ParStmt _ xs _ _)      = collectLStmtsBinders
                                     $ [s | ParStmtBlock _ ss _ _ <- xs, s <- ss]
 collectStmtBinders (TransStmt { trS_stmts = stmts }) = collectLStmtsBinders stmts
 collectStmtBinders (RecStmt { recS_stmts = ss })     = collectLStmtsBinders ss
-collectStmtBinders ApplicativeStmt{} = []
+collectStmtBinders (ApplicativeStmt _ args _) = concatMap collectArgBinders args
+ where
+  collectArgBinders (_, ApplicativeArgOne _ pat _ _) = collectPatBinders pat
+  collectArgBinders (_, ApplicativeArgMany _ _ _ pat) = collectPatBinders pat
+  collectArgBinders _ = []
 collectStmtBinders XStmtLR{} = panic "collectStmtBinders"
 
 

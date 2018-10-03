@@ -443,7 +443,7 @@ checkFamInstConsistency directlyImpMods
            -- as quickly as possible, so that we aren't typechecking
            -- values with inconsistent axioms in scope.
            --
-           -- See also Note [Tying the knot] and Note [Type-checking inside the knot]
+           -- See also Note [Tying the knot]
            -- for why we are doing this at all.
            ; let check_now = famInstEnvElts env1
            ; mapM_ (checkForConflicts (emptyFamInstEnv, env2))           check_now
@@ -763,11 +763,15 @@ unusedInjTvsInRHS :: TyCon -> [Bool] -> [Type] -> Type -> Pair TyVarSet
 unusedInjTvsInRHS tycon injList lhs rhs =
   (`minusVarSet` injRhsVars) <$> injLHSVars
     where
+      inj_pairs :: [(Type, ArgFlag)]
+      -- All the injective arguments, paired with their visiblity
+      inj_pairs = ASSERT2( injList `equalLength` lhs
+                         , ppr tycon $$ ppr injList $$ ppr lhs )
+                  filterByList injList (lhs `zip` tyConArgFlags tycon lhs)
+
       -- set of type and kind variables in which type family is injective
-      (invis_pairs, vis_pairs)
-        = partitionInvisibles tycon snd (zipEqual "unusedInjTvsInRHS" injList lhs)
-      invis_lhs = uncurry filterByList $ unzip invis_pairs
-      vis_lhs   = uncurry filterByList $ unzip vis_pairs
+      invis_lhs, vis_lhs :: [Type]
+      (invis_lhs, vis_lhs) = partitionInvisibles inj_pairs
 
       invis_vars = tyCoVarsOfTypes invis_lhs
       Pair invis_vars' vis_vars = splitVisVarsOfTypes vis_lhs

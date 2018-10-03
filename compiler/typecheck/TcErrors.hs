@@ -20,7 +20,6 @@ import TcType
 import RnUnbound ( unknownNameSuggestions )
 import Type
 import TyCoRep
-import Kind
 import Unify            ( tcMatchTys )
 import Module
 import FamInst
@@ -213,7 +212,12 @@ report_unsolved mb_binds_var type_errors expr_holes
                             , cec_expr_holes = expr_holes
                             , cec_type_holes = type_holes
                             , cec_out_of_scope_holes = out_of_scope_holes
-                            , cec_suppress = False -- See Note [Suppressing error messages]
+                            , cec_suppress = insolubleWC wanted
+                                 -- See Note [Suppressing error messages]
+                                 -- Suppress low-priority errors if there
+                                 -- are insolule errors anywhere;
+                                 -- See Trac #15539 and c.f. setting ic_status
+                                 -- in TcSimplify.setImplicationStatus
                             , cec_warn_redundant = warn_redundant
                             , cec_binds    = mb_binds_var }
 
@@ -387,7 +391,7 @@ reportImplic ctxt implic@(Implic { ic_skols = tvs, ic_telescope = m_telescope
                                  , ic_given = given
                                  , ic_wanted = wanted, ic_binds = evb
                                  , ic_status = status, ic_info = info
-                                 , ic_env = tcl_env, ic_tclvl = tc_lvl })
+                                 , ic_tclvl = tc_lvl })
   | BracketSkol <- info
   , not insoluble
   = return ()        -- For Template Haskell brackets report only
@@ -402,13 +406,14 @@ reportImplic ctxt implic@(Implic { ic_skols = tvs, ic_telescope = m_telescope
          warnRedundantConstraints ctxt' tcl_env info' dead_givens
        ; when bad_telescope $ reportBadTelescope ctxt tcl_env m_telescope tvs }
   where
+    tcl_env      = implicLclEnv implic
     insoluble    = isInsolubleStatus status
-    (env1, tvs') = mapAccumL tidyTyCoVarBndr (cec_tidy ctxt) tvs
+    (env1, tvs') = mapAccumL tidyVarBndr (cec_tidy ctxt) tvs
     info'        = tidySkolemInfo env1 info
     implic' = implic { ic_skols = tvs'
                      , ic_given = map (tidyEvVar env1) given
                      , ic_info  = info' }
-    ctxt1 | NoEvBindsVar{} <- evb    = noDeferredBindings ctxt
+    ctxt1 | CoEvBindsVar{} <- evb    = noDeferredBindings ctxt
           | otherwise                = ctxt
           -- If we go inside an implication that has no term
           -- evidence (e.g. unifying under a forall), we can't defer
@@ -462,14 +467,14 @@ warnRedundantConstraints ctxt env info ev_vars
    redundant_evs =
        filterOut is_type_error $
        case info of -- See Note [Redundant constraints in instance decls]
-         InstSkol -> filterOut improving ev_vars
+         InstSkol -> filterOut (improving . idType) ev_vars
          _        -> ev_vars
 
    -- See #15232
    is_type_error = isJust . userTypeError_maybe . idType
 
-   improving ev_var = any isImprovementPred $
-                      transSuperClasses (idType ev_var)
+   improving pred -- (transSuperClasses p) does not include p
+     = any isImprovementPred (pred : transSuperClasses pred)
 
 reportBadTelescope :: ReportErrCtxt -> TcLclEnv -> Maybe SDoc -> [TcTyVar] -> TcM ()
 reportBadTelescope ctxt env (Just telescope) skols
@@ -609,22 +614,28 @@ reportWanteds ctxt tc_lvl (WC { wc_simple = simples, wc_impl = implics })
     is_irred _ (IrredPred {}) = True
     is_irred _ _              = False
 
-    given_eq_spec = case find_gadt_match (cec_encl ctxt) of
-       Just imp -> ("insoluble1a", is_given_eq, True,  mkGivenErrorReporter imp)
-       Nothing  -> ("insoluble1b", is_given_eq, False, ignoreErrorReporter)
-                  -- False means don't suppress subsequent errors
-                  -- Reason: we don't report all given errors
-                  --         (see mkGivenErrorReporter), and we should only suppress
-                  --         subsequent errors if we actually report this one!
-                  --         Trac #13446 is an example
+    given_eq_spec  -- See Note [Given errors]
+      | has_gadt_match (cec_encl ctxt)
+      = ("insoluble1a", is_given_eq, True,  mkGivenErrorReporter)
+      | otherwise
+      = ("insoluble1b", is_given_eq, False, ignoreErrorReporter)
+          -- False means don't suppress subsequent errors
+          -- Reason: we don't report all given errors
+          --         (see mkGivenErrorReporter), and we should only suppress
+          --         subsequent errors if we actually report this one!
+          --         Trac #13446 is an example
 
-    find_gadt_match [] = Nothing
-    find_gadt_match (implic : implics)
+    -- See Note [Given errors]
+    has_gadt_match [] = False
+    has_gadt_match (implic : implics)
       | PatSkol {} <- ic_info implic
       , not (ic_no_eqs implic)
-      = Just implic
+      , wopt Opt_WarnInaccessibleCode (implicDynFlags implic)
+          -- Don't bother doing this if -Winaccessible-code isn't enabled.
+          -- See Note [Avoid -Winaccessible-code when deriving] in TcInstDcls.
+      = True
       | otherwise
-      = find_gadt_match implics
+      = has_gadt_match implics
 
 ---------------
 isSkolemTy :: TcLevel -> Type -> Bool
@@ -632,8 +643,8 @@ isSkolemTy :: TcLevel -> Type -> Bool
 isSkolemTy tc_lvl ty
   | Just tv <- getTyVar_maybe ty
   =  isSkolemTyVar tv
-  || (isSigTyVar tv && isTouchableMetaTyVar tc_lvl tv)
-     -- The last case is for touchable SigTvs
+  || (isTyVarTyVar tv && isTouchableMetaTyVar tc_lvl tv)
+     -- The last case is for touchable TyVarTvs
      -- we postpone untouchables to a latter test (too obscure)
 
   | otherwise
@@ -693,14 +704,17 @@ mkUserTypeError ctxt ct = mkErrorMsgFromCt ctxt ct
                             Nothing  -> pprPanic "mkUserTypeError" (ppr ct)
 
 
-mkGivenErrorReporter :: Implication -> Reporter
+mkGivenErrorReporter :: Reporter
 -- See Note [Given errors]
-mkGivenErrorReporter implic ctxt cts
+mkGivenErrorReporter ctxt cts
   = do { (ctxt, binds_msg, ct) <- relevantBindings True ctxt ct
        ; dflags <- getDynFlags
-       ; let ct' = setCtLoc ct (setCtLocEnv (ctLoc ct) (ic_env implic))
+       ; let (implic:_) = cec_encl ctxt
+                 -- Always non-empty when mkGivenErrorReporter is called
+             ct' = setCtLoc ct (setCtLocEnv (ctLoc ct) (implicLclEnv implic))
                    -- For given constraints we overwrite the env (and hence src-loc)
-                  -- with one from the implication.  See Note [Inaccessible code]
+                   -- with one from the immediately-enclosing implication.
+                   -- See Note [Inaccessible code]
 
              inaccessible_msg = hang (text "Inaccessible code in")
                                    2 (ppr (ic_info implic))
@@ -753,7 +767,7 @@ which arguably is OK.  It's more debatable for
 but it's tricky to distinguish these cases so we don't report
 either.
 
-The bottom line is this: find_gadt_match looks for an enclosing
+The bottom line is this: has_gadt_match looks for an enclosing
 pattern match which binds some equality constraints.  If we
 find one, we report the insoluble Given.
 -}
@@ -1233,9 +1247,9 @@ givenConstraintsMsg :: ReportErrCtxt -> SDoc
 givenConstraintsMsg ctxt =
     let constraints :: [(Type, RealSrcSpan)]
         constraints =
-          do { Implic{ ic_given = given, ic_env = env } <- cec_encl ctxt
+          do { implic@Implic{ ic_given = given } <- cec_encl ctxt
              ; constraint <- given
-             ; return (varType constraint, tcl_loc env) }
+             ; return (varType constraint, tcl_loc (implicLclEnv implic)) }
 
         pprConstraint (constraint, loc) =
           ppr constraint <+> nest 2 (parens (text "from" <+> ppr loc))
@@ -1603,7 +1617,7 @@ mkTyVarEqErr' dflags ctxt report ct oriented tv1 co1 ty2
   , isUserSkolem ctxt tv1   -- ty2 won't be a meta-tyvar, or else the thing would
                             -- be oriented the other way round;
                             -- see TcCanonical.canEqTyVarTyVar
-    || isSigTyVar tv1 && not (isTyVarTy ty2)
+    || isTyVarTyVar tv1 && not (isTyVarTy ty2)
     || ctEqRel ct == ReprEq
      -- the cases below don't really apply to ReprEq (except occurs check)
   = mkErrorMsgFromCt ctxt ct $ mconcat
@@ -1630,7 +1644,7 @@ mkTyVarEqErr' dflags ctxt report ct oriented tv1 co1 ty2
              extra3 = relevant_bindings $
                       ppWhen (not (null interesting_tyvars)) $
                       hang (text "Type variable kinds:") 2 $
-                      vcat (map (tyvar_binding . tidyTyVarOcc (cec_tidy ctxt))
+                      vcat (map (tyvar_binding . tidyTyCoVarOcc (cec_tidy ctxt))
                                 interesting_tyvars)
 
              tyvar_binding tv = ppr tv <+> dcolon <+> ppr (tyVarKind tv)
@@ -1666,7 +1680,7 @@ mkTyVarEqErr' dflags ctxt report ct oriented tv1 co1 ty2
 
   -- If the immediately-enclosing implication has 'tv' a skolem, and
   -- we know by now its an InferSkol kind of skolem, then presumably
-  -- it started life as a SigTv, else it'd have been unified, given
+  -- it started life as a TyVarTv, else it'd have been unified, given
   -- that there's no occurs-check or forall problem
   | (implic:_) <- cec_encl ctxt
   , Implic { ic_skols = skols } <- implic
@@ -1679,7 +1693,7 @@ mkTyVarEqErr' dflags ctxt report ct oriented tv1 co1 ty2
 
   -- Check for skolem escape
   | (implic:_) <- cec_encl ctxt   -- Get the innermost context
-  , Implic { ic_env = env, ic_skols = skols, ic_info = skol_info } <- implic
+  , Implic { ic_skols = skols, ic_info = skol_info } <- implic
   , let esc_skols = filter (`elemVarSet` (tyCoVarsOfType ty2)) skols
   , not (null esc_skols)
   = do { let msg = important $ misMatchMsg ct oriented ty1 ty2
@@ -1697,17 +1711,17 @@ mkTyVarEqErr' dflags ctxt report ct oriented tv1 co1 ty2
                                            what <+> text "variables are")
                                <+> text "bound by"
                              , nest 2 $ ppr skol_info
-                             , nest 2 $ text "at" <+> ppr (tcl_loc env) ] ]
+                             , nest 2 $ text "at" <+>
+                               ppr (tcl_loc (implicLclEnv implic)) ] ]
        ; mkErrorMsgFromCt ctxt ct (mconcat [msg, tv_extra, report]) }
 
   -- Nastiest case: attempt to unify an untouchable variable
   -- So tv is a meta tyvar (or started that way before we
   -- generalised it).  So presumably it is an *untouchable*
-  -- meta tyvar or a SigTv, else it'd have been unified
+  -- meta tyvar or a TyVarTv, else it'd have been unified
   -- See Note [Error messages for untouchables]
   | (implic:_) <- cec_encl ctxt   -- Get the innermost context
-  , Implic { ic_env = env, ic_given = given
-           , ic_tclvl = lvl, ic_info = skol_info } <- implic
+  , Implic { ic_given = given, ic_tclvl = lvl, ic_info = skol_info } <- implic
   = ASSERT2( not (isTouchableMetaTyVar lvl tv1)
            , ppr tv1 $$ ppr lvl )  -- See Note [Error messages for untouchables]
     do { let msg = important $ misMatchMsg ct oriented ty1 ty2
@@ -1716,7 +1730,8 @@ mkTyVarEqErr' dflags ctxt report ct oriented tv1 co1 ty2
                   sep [ quotes (ppr tv1) <+> text "is untouchable"
                       , nest 2 $ text "inside the constraints:" <+> pprEvVarTheta given
                       , nest 2 $ text "bound by" <+> ppr skol_info
-                      , nest 2 $ text "at" <+> ppr (tcl_loc env) ]
+                      , nest 2 $ text "at" <+>
+                        ppr (tcl_loc (implicLclEnv implic)) ]
              tv_extra = important $ extraTyVarEqInfo ctxt tv1 ty2
              add_sig  = important $ suggestAddSig ctxt ty1 ty2
        ; mkErrorMsgFromCt ctxt ct $ mconcat
@@ -1805,7 +1820,8 @@ misMatchOrCND ctxt ct oriented ty1 ty2
     eq_pred = ctEvPred ev
     orig    = ctEvOrigin ev
     givens  = [ given | given <- getUserGivens ctxt, not (ic_no_eqs given)]
-              -- Keep only UserGivens that have some equalities
+              -- Keep only UserGivens that have some equalities.
+              -- See Note [Suppress redundant givens during error reporting]
 
 couldNotDeduce :: [UserGiven] -> (ThetaType, CtOrigin) -> SDoc
 couldNotDeduce givens (wanteds, orig)
@@ -1819,11 +1835,49 @@ pp_givens givens
          (g:gs) ->      ppr_given (text "from the context:") g
                  : map (ppr_given (text "or from:")) gs
     where
-       ppr_given herald (Implic { ic_given = gs, ic_info = skol_info
-                                , ic_env = env })
-           = hang (herald <+> pprEvVarTheta gs)
+       ppr_given herald implic@(Implic { ic_given = gs, ic_info = skol_info })
+           = hang (herald <+> pprEvVarTheta (mkMinimalBySCs evVarPred gs))
+             -- See Note [Suppress redundant givens during error reporting]
+             -- for why we use mkMinimalBySCs above.
                 2 (sep [ text "bound by" <+> ppr skol_info
-                       , text "at" <+> ppr (tcl_loc env) ])
+                       , text "at" <+> ppr (tcl_loc (implicLclEnv implic)) ])
+
+{-
+Note [Suppress redundant givens during error reporting]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When GHC is unable to solve a constraint and prints out an error message, it
+will print out what given constraints are in scope to provide some context to
+the programmer. But we shouldn't print out /every/ given, since some of them
+are not terribly helpful to diagnose type errors. Consider this example:
+
+  foo :: Int :~: Int -> a :~: b -> a :~: c
+  foo Refl Refl = Refl
+
+When reporting that GHC can't solve (a ~ c), there are two givens in scope:
+(Int ~ Int) and (a ~ b). But (Int ~ Int) is trivially soluble (i.e.,
+redundant), so it's not terribly useful to report it in an error message.
+To accomplish this, we discard any Implications that do not bind any
+equalities by filtering the `givens` selected in `misMatchOrCND` (based on
+the `ic_no_eqs` field of the Implication).
+
+But this is not enough to avoid all redundant givens! Consider this example,
+from #15361:
+
+  goo :: forall (a :: Type) (b :: Type) (c :: Type).
+         a :~~: b -> a :~~: c
+  goo HRefl = HRefl
+
+Matching on HRefl brings the /single/ given (* ~ *, a ~ b) into scope.
+The (* ~ *) part arises due the kinds of (:~~:) being unified. More
+importantly, (* ~ *) is redundant, so we'd like not to report it. However,
+the Implication (* ~ *, a ~ b) /does/ bind an equality (as reported by its
+ic_no_eqs field), so the test above will keep it wholesale.
+
+To refine this given, we apply mkMinimalBySCs on it to extract just the (a ~ b)
+part. This works because mkMinimalBySCs eliminates reflexive equalities in
+addition to superclasses (see Note [Remove redundant provided dicts]
+in TcPatSyn).
+-}
 
 extraTyVarEqInfo :: ReportErrCtxt -> TcTyVar -> TcType -> SDoc
 -- Add on extra info about skolem constants
@@ -1929,8 +1983,7 @@ mkExpectedActualMsg ty1 ty2 (TypeEqOrigin { uo_actual = act
   | KindLevel <- level, occurs_check_error       = (True, Nothing, empty)
   | isUnliftedTypeKind act, isLiftedTypeKind exp = (False, Nothing, msg2)
   | isLiftedTypeKind act, isUnliftedTypeKind exp = (False, Nothing, msg3)
-  | isLiftedTypeKind exp && not (isConstraintKind exp)
-                                                 = (False, Nothing, msg4)
+  | tcIsLiftedTypeKind exp                       = (False, Nothing, msg4)
   | Just msg <- num_args_msg                     = (False, Nothing, msg $$ msg1)
   | KindLevel <- level, Just th <- maybe_thing   = (False, Nothing, msg5 th)
   | act `pickyEqType` ty1, exp `pickyEqType` ty2 = (True, Just NotSwapped, empty)
@@ -1985,7 +2038,7 @@ mkExpectedActualMsg ty1 ty2 (TypeEqOrigin { uo_actual = act
                  2 (text "but" <+> quotes th <+> text "has kind" <+>
                     quotes (ppr act))
       where
-        kind_desc | isConstraintKind exp = text "a constraint"
+        kind_desc | tcIsConstraintKind exp = text "a constraint"
 
                     -- TYPE t0
                   | Just (tc, [arg]) <- tcSplitTyConApp_maybe exp
@@ -2501,12 +2554,13 @@ mk_dict_err ctxt@(CEC {cec_encl = implics}) (ct, (matches, unifiers, unsafe_over
 
     matching_givens = mapMaybe matchable useful_givens
 
-    matchable (Implic { ic_given = evvars, ic_info = skol_info, ic_env = env })
+    matchable implic@(Implic { ic_given = evvars, ic_info = skol_info })
       = case ev_vars_matching of
              [] -> Nothing
              _  -> Just $ hang (pprTheta ev_vars_matching)
                             2 (sep [ text "bound by" <+> ppr skol_info
-                                   , text "at" <+> ppr (tcl_loc env) ])
+                                   , text "at" <+>
+                                     ppr (tcl_loc (implicLclEnv implic)) ])
         where ev_vars_matching = filter ev_var_matches (map evVarPred evvars)
               ev_var_matches ty = case getClassPredTys_maybe ty of
                  Just (clas', tys')

@@ -159,7 +159,7 @@ contents of the search path:
 
 .. ghc-flag:: -i⟨dir⟩[:⟨dir⟩]*
     :shortdesc: add ⟨dir⟩, ⟨dir2⟩, etc. to import path
-    :type: dynamic/ ``:set``
+    :type: dynamic
     :category: search-path
 
     .. index::
@@ -170,7 +170,7 @@ contents of the search path:
 
 .. ghc-flag:: -i
     :shortdesc: Empty the import directory list
-    :type: dynamic/ ``:set``
+    :type: dynamic
     :category: search-path
 
     resets the search path back to nothing.
@@ -396,6 +396,19 @@ compilation:
 
     Keep intermediate ``.hi`` files. This is the default. You may use
     ``-no-keep-hi-files`` if you are not interested in the ``.hi`` files.
+
+.. ghc-flag:: -keep-hscpp-file
+              -keep-hscpp-files
+    :shortdesc: Retain intermediate ``.hscpp`` files.
+    :type: dynamic
+    :category: keep-intermediates
+
+    .. index::
+       single: temporary files; keeping
+
+    Keep the output of the ``CPP`` pre-processor phase as ``.hscpp`` files.
+    A ``.hscpp`` file is only created, if a module gets compiled and uses the
+    C pre-processor.
 
 .. ghc-flag:: -keep-llvm-file
               -keep-llvm-files
@@ -790,7 +803,7 @@ be able to pick a particular implementation of strings::
         toString s = s
 
     module A where
-        import Text
+        import Str
         z = toString empty
 
 By replacing ``Str.hs`` with a signature ``Str.hsig``, ``A`` (and

@@ -22,6 +22,7 @@ import GhcPrelude
 
 import Panic
 
+import System.Environment (lookupEnv)
 import System.FilePath
 import Data.List
 
@@ -32,7 +33,18 @@ import System.Environment (getExecutablePath)
 
 -- Windows
 #if defined(mingw32_HOST_OS)
+#  if MIN_VERSION_Win32(2,5,0)
+#    if !MIN_VERSION_base(4,11,0)
 import qualified System.Win32.Types as Win32
+#    endif
+#  else
+import qualified System.Win32.Info as Win32
+#  endif
+#  if MIN_VERSION_base(4,11,0)
+import System.Environment (getExecutablePath)
+import System.Directory (doesDirectoryExist)
+#  else
+import Data.Char
 import Exception
 import Foreign
 import Foreign.C.String
@@ -41,6 +53,7 @@ import System.Win32.Types (DWORD, LPTSTR, HANDLE)
 import System.Win32.Types (failIfNull, failIf, iNVALID_HANDLE_VALUE)
 import System.Win32.File (createFile,closeHandle, gENERIC_READ, fILE_SHARE_READ, oPEN_EXISTING, fILE_ATTRIBUTE_NORMAL, fILE_FLAG_BACKUP_SEMANTICS )
 import System.Win32.DLL (loadLibrary, getProcAddress)
+#  endif
 #endif
 
 #if defined(mingw32_HOST_OS)
@@ -115,15 +128,35 @@ findTopDir :: Maybe String -- Maybe TopDir path (without the '-B' prefix).
            -> IO String    -- TopDir (in Unix format '/' separated)
 findTopDir (Just minusb) = return (normalise minusb)
 findTopDir Nothing
-    = do -- Get directory of executable
-         maybe_exec_dir <- getBaseDir
-         case maybe_exec_dir of
-             -- "Just" on Windows, "Nothing" on unix
-             Nothing  -> throwGhcExceptionIO (InstallationError "missing -B<dir> option")
-             Just dir -> return dir
+    = do -- The _GHC_TOP_DIR environment variable can be used to specify
+         -- the top dir when the -B argument is not specified. It is not
+         -- intended for use by users, it was added specifically for the
+         -- purpose of running GHC within GHCi.
+         maybe_env_top_dir <- lookupEnv "_GHC_TOP_DIR"
+         case maybe_env_top_dir of
+             Just env_top_dir -> return env_top_dir
+             Nothing -> do
+                 -- Get directory of executable
+                 maybe_exec_dir <- getBaseDir
+                 case maybe_exec_dir of
+                     -- "Just" on Windows, "Nothing" on unix
+                     Nothing -> throwGhcExceptionIO $
+                         InstallationError "missing -B<dir> option"
+                     Just dir -> return dir
 
 getBaseDir :: IO (Maybe String)
+
 #if defined(mingw32_HOST_OS)
+
+-- locate the "base dir" when given the path
+-- to the real ghc executable (as opposed to symlink)
+-- that is running this function.
+rootDir :: FilePath -> FilePath
+rootDir = takeDirectory . takeDirectory . normalise
+
+#if MIN_VERSION_base(4,11,0)
+getBaseDir = Just . (\p -> p </> "lib") . rootDir <$> getExecutablePath
+#else
 -- Assuming we are running ghc, accessed by path  $(stuff)/<foo>/ghc.exe,
 -- return the path $(stuff)/lib.
 getBaseDir = try_size 2048 -- plenty, PATH_MAX is 512 under Win32.
@@ -199,9 +232,10 @@ type GetFinalPath = HANDLE -> LPTSTR -> DWORD -> DWORD -> IO DWORD
 
 foreign import WINDOWS_CCONV unsafe "dynamic"
   makeGetFinalPathNameByHandle :: FunPtr GetFinalPath -> GetFinalPath
+#endif
 #elif defined(darwin_HOST_OS) || defined(linux_HOST_OS)
 -- on unix, this is a bit more confusing.
--- The layout right now is somehting like
+-- The layout right now is something like
 --
 --   /bin/ghc-X.Y.Z <- wrapper script (1)
 --   /bin/ghc       <- symlink to wrapper script (2)
@@ -232,7 +266,7 @@ findToolDir
   -> IO (Maybe FilePath)
 #if defined(mingw32_HOST_OS)
 findToolDir top_dir = go 0 (top_dir </> "..")
-  where maxDepth = 2
+  where maxDepth = 3
         go :: Int -> FilePath -> IO (Maybe FilePath)
         go k path
           | k == maxDepth = throwGhcExceptionIO $

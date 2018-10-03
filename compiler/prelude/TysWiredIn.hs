@@ -29,9 +29,9 @@ module TysWiredIn (
 
         -- * Ordering
         orderingTyCon,
-        ltDataCon, ltDataConId,
-        eqDataCon, eqDataConId,
-        gtDataCon, gtDataConId,
+        ordLTDataCon, ordLTDataConId,
+        ordEQDataCon, ordEQDataConId,
+        ordGTDataCon, ordGTDataConId,
         promotedLTDataCon, promotedEQDataCon, promotedGTDataCon,
 
         -- * Boxing primitive types
@@ -80,6 +80,7 @@ module TysWiredIn (
 
         -- ** Constraint tuples
         cTupleTyConName, cTupleTyConNames, isCTupleTyConName,
+        cTupleTyConNameArity_maybe,
         cTupleDataConName, cTupleDataConNames,
 
         -- * Any
@@ -95,7 +96,8 @@ module TysWiredIn (
         liftedTypeKindTyConName,
 
         -- * Equality predicates
-        heqTyCon, heqClass, heqDataCon,
+        heqTyCon, heqTyConName, heqClass, heqDataCon,
+        eqTyCon, eqTyConName, eqClass, eqDataCon, eqTyCon_RDR,
         coercibleTyCon, coercibleTyConName, coercibleDataCon, coercibleClass,
 
         -- * RuntimeRep and friends
@@ -159,6 +161,8 @@ import BooleanFormula   ( mkAnd )
 
 import qualified Data.ByteString.Char8 as BS
 
+import Data.List        ( elemIndex )
+
 alpha_tyvar :: [TyVar]
 alpha_tyvar = [alphaTyVar]
 
@@ -215,6 +219,7 @@ wiredInTyCons = [ -- Units are not treated like other tuples, because then
                 , listTyCon
                 , maybeTyCon
                 , heqTyCon
+                , eqTyCon
                 , coercibleTyCon
                 , typeNatKindCon
                 , typeSymbolKindCon
@@ -243,9 +248,19 @@ mkWiredInIdName mod fs uniq id
 
 -- See Note [Kind-changing of (~) and Coercible]
 -- in libraries/ghc-prim/GHC/Types.hs
+eqTyConName, eqDataConName, eqSCSelIdName :: Name
+eqTyConName   = mkWiredInTyConName   UserSyntax gHC_TYPES (fsLit "~")   eqTyConKey   eqTyCon
+eqDataConName = mkWiredInDataConName UserSyntax gHC_TYPES (fsLit "Eq#") eqDataConKey eqDataCon
+eqSCSelIdName = mkWiredInIdName gHC_TYPES (fsLit "eq_sel") eqSCSelIdKey eqSCSelId
+
+eqTyCon_RDR :: RdrName
+eqTyCon_RDR = nameRdrName eqTyConName
+
+-- See Note [Kind-changing of (~) and Coercible]
+-- in libraries/ghc-prim/GHC/Types.hs
 heqTyConName, heqDataConName, heqSCSelIdName :: Name
 heqTyConName   = mkWiredInTyConName   UserSyntax gHC_TYPES (fsLit "~~")   heqTyConKey      heqTyCon
-heqDataConName = mkWiredInDataConName UserSyntax gHC_TYPES (fsLit "Eq#")  heqDataConKey heqDataCon
+heqDataConName = mkWiredInDataConName UserSyntax gHC_TYPES (fsLit "HEq#") heqDataConKey heqDataCon
 heqSCSelIdName = mkWiredInIdName gHC_TYPES (fsLit "heq_sel") heqSCSelIdKey heqSCSelId
 
 -- See Note [Kind-changing of (~) and Coercible] in libraries/ghc-prim/GHC/Types.hs
@@ -474,8 +489,8 @@ pcDataCon n univs = pcDataConWithFixity False n univs
 pcDataConWithFixity :: Bool      -- ^ declared infix?
                     -> Name      -- ^ datacon name
                     -> [TyVar]   -- ^ univ tyvars
-                    -> [TyVar]   -- ^ ex tyvars
-                    -> [TyVar]   -- ^ user-written tyvars
+                    -> [TyCoVar] -- ^ ex tycovars
+                    -> [TyCoVar] -- ^ user-written tycovars
                     -> [Type]    -- ^ args
                     -> TyCon
                     -> DataCon
@@ -489,7 +504,7 @@ pcDataConWithFixity infx n = pcDataConWithFixity' infx n (dataConWorkerUnique (n
 -- one DataCon unique per pair of Ints.
 
 pcDataConWithFixity' :: Bool -> Name -> Unique -> RuntimeRepInfo
-                     -> [TyVar] -> [TyVar] -> [TyVar]
+                     -> [TyVar] -> [TyCoVar] -> [TyCoVar]
                      -> [Type] -> TyCon -> DataCon
 -- The Name should be in the DataName name space; it's the name
 -- of the DataCon itself.
@@ -509,7 +524,7 @@ pcDataConWithFixity' declared_infix dc_name wrk_key rri
                 (map (const no_bang) arg_tys)
                 []      -- No labelled fields
                 tyvars ex_tyvars
-                (mkTyVarBinders Specified user_tyvars)
+                (mkTyCoVarBinders Specified user_tyvars)
                 []      -- No equality spec
                 []      -- No theta
                 arg_tys (mkTyConApp tycon (mkTyVarTys tyvars))
@@ -573,7 +588,7 @@ constraintKind   = mkTyConApp constraintKindTyCon []
 mkFunKind :: Kind -> Kind -> Kind
 mkFunKind = mkFunTy
 
-mkForAllKind :: TyVar -> ArgFlag -> Kind -> Kind
+mkForAllKind :: TyCoVar -> ArgFlag -> Kind -> Kind
 mkForAllKind = mkForAllTy
 
 {-
@@ -764,6 +779,17 @@ isCTupleTyConName n
  = ASSERT2( isExternalName n, ppr n )
    nameModule n == gHC_CLASSES
    && n `elemNameSet` cTupleTyConNameSet
+
+-- | If the given name is that of a constraint tuple, return its arity.
+-- Note that this is inefficient.
+cTupleTyConNameArity_maybe :: Name -> Maybe Arity
+cTupleTyConNameArity_maybe n
+  | not (isCTupleTyConName n) = Nothing
+  | otherwise = fmap adjustArity (n `elemIndex` cTupleTyConNames)
+  where
+    -- Since `cTupleTyConNames` jumps straight from the `0` to the `2`
+    -- case, we have to adjust accordingly our calculated arity.
+    adjustArity a = if a > 0 then a + 1 else a
 
 cTupleDataConName :: Arity -> Name
 cTupleDataConName arity
@@ -1000,10 +1026,28 @@ mk_sum arity = (tycon, sum_cons)
 -- necessary because the functional-dependency coverage check looks
 -- through superclasses, and (~#) is handled in that check.
 
-heqTyCon, coercibleTyCon :: TyCon
-heqClass, coercibleClass :: Class
-heqDataCon, coercibleDataCon :: DataCon
-heqSCSelId, coercibleSCSelId :: Id
+eqTyCon,   heqTyCon,   coercibleTyCon   :: TyCon
+eqClass,   heqClass,   coercibleClass   :: Class
+eqDataCon, heqDataCon, coercibleDataCon :: DataCon
+eqSCSelId, heqSCSelId, coercibleSCSelId :: Id
+
+(eqTyCon, eqClass, eqDataCon, eqSCSelId)
+  = (tycon, klass, datacon, sc_sel_id)
+  where
+    tycon     = mkClassTyCon eqTyConName binders roles
+                             rhs klass
+                             (mkPrelTyConRepName eqTyConName)
+    klass     = mk_class tycon sc_pred sc_sel_id
+    datacon   = pcDataCon eqDataConName tvs [sc_pred] tycon
+
+    -- Kind: forall k. k -> k -> Constraint
+    binders   = mkTemplateTyConBinders [liftedTypeKind] (\[k] -> [k,k])
+    roles     = [Nominal, Nominal, Nominal]
+    rhs       = mkDataTyConRhs [datacon]
+
+    tvs@[k,a,b] = binderVars binders
+    sc_pred     = mkTyConApp eqPrimTyCon (mkTyVarTys [k,k,a,b])
+    sc_sel_id   = mkDictSelId eqSCSelIdName klass
 
 (heqTyCon, heqClass, heqDataCon, heqSCSelId)
   = (tycon, klass, datacon, sc_sel_id)
@@ -1045,6 +1089,8 @@ mk_class :: TyCon -> PredType -> Id -> Class
 mk_class tycon sc_pred sc_sel_id
   = mkClass (tyConName tycon) (tyConTyVars tycon) [] [sc_pred] [sc_sel_id]
             [] [] (mkAnd []) tycon
+
+
 
 {- *********************************************************************
 *                                                                      *
@@ -1354,17 +1400,17 @@ trueDataConId  = dataConWorkId trueDataCon
 
 orderingTyCon :: TyCon
 orderingTyCon = pcTyCon orderingTyConName Nothing
-                        [] [ltDataCon, eqDataCon, gtDataCon]
+                        [] [ordLTDataCon, ordEQDataCon, ordGTDataCon]
 
-ltDataCon, eqDataCon, gtDataCon :: DataCon
-ltDataCon = pcDataCon ltDataConName  [] [] orderingTyCon
-eqDataCon = pcDataCon eqDataConName  [] [] orderingTyCon
-gtDataCon = pcDataCon gtDataConName  [] [] orderingTyCon
+ordLTDataCon, ordEQDataCon, ordGTDataCon :: DataCon
+ordLTDataCon = pcDataCon ordLTDataConName  [] [] orderingTyCon
+ordEQDataCon = pcDataCon ordEQDataConName  [] [] orderingTyCon
+ordGTDataCon = pcDataCon ordGTDataConName  [] [] orderingTyCon
 
-ltDataConId, eqDataConId, gtDataConId :: Id
-ltDataConId = dataConWorkId ltDataCon
-eqDataConId = dataConWorkId eqDataCon
-gtDataConId = dataConWorkId gtDataCon
+ordLTDataConId, ordEQDataConId, ordGTDataConId :: Id
+ordLTDataConId = dataConWorkId ordLTDataCon
+ordEQDataConId = dataConWorkId ordEQDataCon
+ordGTDataConId = dataConWorkId ordGTDataCon
 
 {-
 ************************************************************************
@@ -1505,9 +1551,9 @@ promotedLTDataCon
   , promotedEQDataCon
   , promotedGTDataCon
   :: TyCon
-promotedLTDataCon     = promoteDataCon ltDataCon
-promotedEQDataCon     = promoteDataCon eqDataCon
-promotedGTDataCon     = promoteDataCon gtDataCon
+promotedLTDataCon     = promoteDataCon ordLTDataCon
+promotedEQDataCon     = promoteDataCon ordEQDataCon
+promotedGTDataCon     = promoteDataCon ordGTDataCon
 
 -- Promoted List
 promotedConsDataCon, promotedNilDataCon :: TyCon

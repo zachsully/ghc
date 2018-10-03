@@ -20,13 +20,16 @@ generally likely to indicate bugs in your program. These are:
     * :ghc-flag:`-Wdeprecations`
     * :ghc-flag:`-Wdeprecated-flags`
     * :ghc-flag:`-Wunrecognised-pragmas`
-    * :ghc-flag:`-Wduplicate-constraints`
     * :ghc-flag:`-Wduplicate-exports`
     * :ghc-flag:`-Woverflowed-literals`
     * :ghc-flag:`-Wempty-enumerations`
     * :ghc-flag:`-Wmissing-fields`
     * :ghc-flag:`-Wmissing-methods`
     * :ghc-flag:`-Wwrong-do-bind`
+    * :ghc-flag:`-Wsimplifiable-class-constraints`
+    * :ghc-flag:`-Wtyped-holes`
+    * :ghc-flag:`-Wdeferred-type-errors`
+    * :ghc-flag:`-Wpartial-type-signatures`
     * :ghc-flag:`-Wunsupported-calling-conventions`
     * :ghc-flag:`-Wdodgy-foreign-imports`
     * :ghc-flag:`-Winline-rule-shadowing`
@@ -34,6 +37,7 @@ generally likely to indicate bugs in your program. These are:
     * :ghc-flag:`-Wtabs`
     * :ghc-flag:`-Wunrecognised-warning-flags`
     * :ghc-flag:`-Winaccessible-code`
+    * :ghc-flag:`-Wstar-binder`
 
 The following flags are simple ways to select standard "packages" of warnings:
 
@@ -81,6 +85,8 @@ The following flags are simple ways to select standard "packages" of warnings:
         * :ghc-flag:`-Widentities`
         * :ghc-flag:`-Wredundant-constraints`
         * :ghc-flag:`-Wpartial-fields`
+        * :ghc-flag:`-Wmissed-specialisations`
+        * :ghc-flag:`-Wall-missed-specialisations`
 
 .. ghc-flag:: -Weverything
     :shortdesc: enable all warnings supported by GHC
@@ -283,7 +289,7 @@ of ``-W(no-)*``.
 
     Defer variable out-of-scope errors (errors about names without a leading underscore)
     until runtime. This will turn variable-out-of-scope errors into warnings.
-    Using a value that depends on a typed hole produces a runtime error,
+    Using a value that depends on an out-of-scope variable produces a runtime error,
     the same as :ghc-flag:`-fdefer-type-errors` (which implies this option).
     See :ref:`typed-holes` and :ref:`defer-type-errors`.
 
@@ -409,22 +415,6 @@ of ``-W(no-)*``.
     An alias for :ghc-flag:`-Wwarnings-deprecations`.
 
     This option is on by default.
-
-.. ghc-flag:: -Wamp
-    :shortdesc: *(deprecated)* warn on definitions conflicting with the
-        Applicative-Monad Proposal (AMP)
-    :type: dynamic
-    :reverse: -Wno-amp
-    :category:
-
-    .. index::
-       single: AMP
-       single: Applicative-Monad Proposal
-
-    This option is deprecated.
-
-    Caused a warning to be emitted when a definition was in conflict with
-    the AMP (Applicative-Monad proosal).
 
 .. ghc-flag:: -Wnoncanonical-monad-instances
     :shortdesc: warn when ``Applicative`` or ``Monad`` instances have
@@ -1185,11 +1175,41 @@ of ``-W(no-)*``.
     since we're passing ``Foo1`` and ``Foo2`` here, it follows that ``t ~
     Char``, and ``u ~ Int``, and thus ``t ~ u`` cannot hold.
 
+.. ghc-flag:: -Wstar-binder
+     :shortdesc: warn about binding the ``(*)`` type operator despite
+         :ghc-flag:`-XStarIsType`
+     :type: dynamic
+     :reverse: -Wno-star-binder
+
+     Under :ghc-flag:`-XStarIsType`, a ``*`` in types is not an operator nor
+     even a name, it is special syntax that stands for ``Data.Kind.Type``. This
+     means that an expression like ``Either * Char`` is parsed as ``Either (*)
+     Char`` and not ``(*) Either Char``.
+
+     In binding positions, we have similar parsing rules. Consider the following
+     example ::
+
+         {-# LANGUAGE TypeOperators, TypeFamilies, StarIsType #-}
+
+         type family a + b
+         type family a * b
+
+     While ``a + b`` is parsed as ``(+) a b`` and becomes a binding position for
+     the ``(+)`` type operator, ``a * b`` is parsed as ``a (*) b`` and is rejected.
+
+     As a workaround, we allow to bind ``(*)`` in prefix form::
+
+         type family (*) a b
+
+     This is a rather fragile arrangement, as generally a programmer expects
+     ``(*) a b`` to be equivalent to ``a * b``. With :ghc-flag:`-Wstar-binder`
+     we warn when this special treatment of ``(*)`` takes place.
+
 .. ghc-flag:: -Wsimplifiable-class-constraints
-    :shortdesc: 2arn about class constraints in a type signature that can
+    :shortdesc: Warn about class constraints in a type signature that can
         be simplified using a top-level instance declaration.
     :type: dynamic
-    :reverse: -Wno-overlapping-patterns
+    :reverse: -Wno-simplifiable-class-constraints
     :category:
 
     :since: 8.2

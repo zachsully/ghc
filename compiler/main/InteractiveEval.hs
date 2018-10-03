@@ -76,6 +76,7 @@ import UniqSupply
 import MonadUtils
 import Module
 import PrelNames  ( toDynName, pretendNameIsInScope )
+import TysWiredIn ( isCTupleTyConName )
 import Panic
 import Maybes
 import ErrUtils
@@ -758,6 +759,7 @@ getInfo allInfo name
                        -- The one we looked for in the first place!
                | pretendNameIsInScope n = True
                | isBuiltInSyntax n      = True
+               | isCTupleTyConName n    = True
                | isExternalName n       = isJust (lookupGRE_Name rdr_env n)
                | otherwise              = True
 
@@ -942,7 +944,11 @@ compileParsedExprRemote expr@(L loc _) = withSession $ \hsc_env -> do
         ValBinds noExt
                      (unitBag $ mkHsVarBind loc (getRdrName expr_name) expr) []
 
-  Just ([_id], hvals_io, fix_env) <- liftIO $ hscParsedStmt hsc_env let_stmt
+  pstmt <- liftIO $ hscParsedStmt hsc_env let_stmt
+  let (hvals_io, fix_env) = case pstmt of
+        Just ([_id], hvals_io', fix_env') -> (hvals_io', fix_env')
+        _ -> panic "compileParsedExprRemote"
+
   updateFixityEnv fix_env
   status <- liftIO $ evalStmt hsc_env False (EvalThis hvals_io)
   case status of
@@ -990,20 +996,22 @@ moduleIsBootOrNotObjectLinkable mod_summary = withSession $ \hsc_env ->
 -- RTTI primitives
 
 obtainTermFromVal :: HscEnv -> Int -> Bool -> Type -> a -> IO Term
-obtainTermFromVal hsc_env bound force ty x =
-              cvObtainTerm hsc_env bound force ty (unsafeCoerce# x)
+obtainTermFromVal hsc_env bound force ty x
+  | gopt Opt_ExternalInterpreter (hsc_dflags hsc_env)
+  = throwIO (InstallationError
+      "this operation requires -fno-external-interpreter")
+  | otherwise
+  = cvObtainTerm hsc_env bound force ty (unsafeCoerce# x)
 
 obtainTermFromId :: HscEnv -> Int -> Bool -> Id -> IO Term
 obtainTermFromId hsc_env bound force id =  do
-  let dflags = hsc_dflags hsc_env
-  hv <- Linker.getHValue hsc_env (varName id) >>= wormhole dflags
+  hv <- Linker.getHValue hsc_env (varName id)
   cvObtainTerm hsc_env bound force (idType id) hv
 
 -- Uses RTTI to reconstruct the type of an Id, making it less polymorphic
 reconstructType :: HscEnv -> Int -> Id -> IO (Maybe Type)
 reconstructType hsc_env bound id = do
-  let dflags = hsc_dflags hsc_env
-  hv <- Linker.getHValue hsc_env (varName id) >>= wormhole dflags
+  hv <- Linker.getHValue hsc_env (varName id)
   cvReconstructType hsc_env bound (idType id) hv
 
 mkRuntimeUnkTyVar :: Name -> Kind -> TyVar

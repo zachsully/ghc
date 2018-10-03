@@ -5,7 +5,7 @@
 #
 # .. ghc-flag::
 #     :shortdesc: A short description (REQUIRED)
-#     :type: dynamic, mode, dynamix/ ``:set`` (REQUIRED)
+#     :type: dynamic or mode  (REQUIRED)
 #     :reverse: The reverse of the flag
 #     :category: The category to list the flag under (default: 'misc')
 #     :noindex: Do not list the flag anywhere (good for duplicates)
@@ -46,9 +46,11 @@
 
 from docutils import nodes
 from docutils.parsers.rst import Directive, directives
+import sphinx
 from sphinx import addnodes
 from sphinx.domains.std import GenericObject
 from sphinx.errors import SphinxError
+from distutils.version import LooseVersion
 from utils import build_table_from_list
 
 ### Settings
@@ -109,6 +111,8 @@ class GenericFlag(GenericObject):
         type_node = nodes.paragraph()
         reverse_node = nodes.paragraph()
 
+        assert flag_type in ('dynamic', 'mode'), ('Unknown flag type for %s: %s' %
+                                                     (name_string, flag_type))
 
         # Nodes expect an internal ViewList type for the content,
         # we are just spoofing it here
@@ -597,14 +601,18 @@ def purge_flags(app, env, docname):
 ### Initialization
 
 def setup(app):
+    # The override argument to add_directive_to_domain is only supported by >= 1.8
+    sphinx_version = LooseVersion(sphinx.__version__)
+    override_arg = {'override': True} if sphinx_version >= LooseVersion('1.8') else {}
 
     # Add ghc-flag directive, and override the class with our own
     app.add_object_type('ghc-flag', 'ghc-flag')
-    app.add_directive_to_domain('std', 'ghc-flag', Flag)
+    app.add_directive_to_domain('std', 'ghc-flag', Flag, **override_arg)
 
     # Add extension directive, and override the class with our own
     app.add_object_type('extension', 'extension')
-    app.add_directive_to_domain('std', 'extension', LanguageExtension)
+    app.add_directive_to_domain('std', 'extension', LanguageExtension,
+                                **override_arg)
     # NB: language-extension would be misinterpreted by sphinx, and produce
     # lang="extensions" XML attributes
 

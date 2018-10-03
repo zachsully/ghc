@@ -678,7 +678,7 @@ for example).
 
 .. ghc-flag:: -package ⟨name⟩
     :shortdesc: Expose package ⟨pkg⟩
-    :type: dynamic/ ``:set``
+    :type: dynamic
     :category: linking
 
     If you are using a Haskell "package" (see :ref:`packages`), don't
@@ -1004,6 +1004,9 @@ for example).
     change RTS options at run-time, in which case ``-with-rtsopts``
     would be the *only* way to set them.)
 
+    Use the runtime flag :rts-flag:`--info` on the executable program
+    to see the options set with ``-with-rtsopts``.
+
     Note that ``-with-rtsopts`` has no effect when used with
     ``-no-hs-main``; see :ref:`using-own-main` for details.
 
@@ -1166,3 +1169,17 @@ for example).
 
     Also, you may need to use the :ghc-flag:`-rdynamic` flag to ensure that
     that symbols are not dropped from your PIE objects.
+
+.. ghc-flag:: -keep-cafs
+    :shortdesc: Do not garbage-collect CAFs (top-level expressions) at runtime
+    :type: dynamic
+    :category: linking
+
+    :since: 8.8.1
+
+    Disables the RTS's normal behaviour of garbage-collecting CAFs
+    (Constant Applicative Forms, in other words top-level
+    expressions). This option is useful for specialised applications
+    that do runtime dynamic linking, where code dynamically linked in
+    the future might require the value of a CAF that would otherwise
+    be garbage-collected.

@@ -110,12 +110,10 @@ tc_poly_expr expr res_ty
     do { traceTc "tcPolyExpr" (ppr res_ty); tc_poly_expr_nc expr res_ty }
 
 tc_poly_expr_nc (L loc expr) res_ty
-  = do { traceTc "tcPolyExprNC" (ppr res_ty)
+  = setSrcSpan loc $
+    do { traceTc "tcPolyExprNC" (ppr res_ty)
        ; (wrap, expr')
            <- tcSkolemiseET GenSigCtxt res_ty $ \ res_ty ->
-              setSrcSpan loc $
-                -- NB: setSrcSpan *after* skolemising, so we get better
-                -- skolem locations
               tcExpr expr res_ty
        ; return $ L loc (mkHsWrap wrap expr') }
 
@@ -1350,7 +1348,9 @@ tcArgs fun orig_fun_ty fun_orig orig_args herald
                     ; traceTc "VTA" (vcat [ppr tv, debugPprType kind
                                           , debugPprType ty_arg
                                           , debugPprType (typeKind ty_arg)
+                                          , debugPprType inner_ty
                                           , debugPprType insted_ty ])
+
                     ; (inner_wrap, args', res_ty)
                         <- go acc_args (n+1) insted_ty args
                    -- inner_wrap :: insted_ty "->" (map typeOf args') -> res_ty
@@ -1636,6 +1636,10 @@ tcExprSig expr (CompleteSig { sig_bndr = poly_id, sig_loc = loc })
   = setSrcSpan loc $   -- Sets the location for the implication constraint
     do { (tv_prs, theta, tau) <- tcInstType tcInstSkolTyVars poly_id
        ; given <- newEvVars theta
+       ; traceTc "tcExprSig: CompleteSig" $
+         vcat [ text "poly_id:" <+> ppr poly_id <+> dcolon <+> ppr (idType poly_id)
+              , text "tv_prs:" <+> ppr tv_prs ]
+
        ; let skol_info = SigSkol ExprSigCtxt (idType poly_id) tv_prs
              skol_tvs  = map snd tv_prs
        ; (ev_binds, expr') <- checkConstraints skol_info skol_tvs given $
@@ -1845,12 +1849,7 @@ tcUnboundId rn_expr unbound res_ty
       ; let occ = unboundVarOcc unbound
       ; name <- newSysName occ
       ; let ev = mkLocalId name ty
-      ; loc <- getCtLocM HoleOrigin Nothing
-      ; let can = CHoleCan { cc_ev = CtWanted { ctev_pred = ty
-                                              , ctev_dest = EvVarDest ev
-                                              , ctev_nosh = WDeriv
-                                              , ctev_loc  = loc}
-                           , cc_hole = ExprHole unbound }
+      ; can <- newHoleCt (ExprHole unbound) ev ty
       ; emitInsoluble can
       ; tcWrapResultO (UnboundOccurrenceOf occ) rn_expr (HsVar noExt (noLoc ev))
                                                                      ty res_ty }
@@ -2737,7 +2736,7 @@ missingFields con fields
     header = text "Fields of" <+> quotes (ppr con) <+>
              text "not initialised"
 
--- callCtxt fun args = text "In the call" <+> parens (ppr (foldl mkHsApp fun args))
+-- callCtxt fun args = text "In the call" <+> parens (ppr (foldl' mkHsApp fun args))
 
 noPossibleParents :: [LHsRecUpdField GhcRn] -> SDoc
 noPossibleParents rbinds

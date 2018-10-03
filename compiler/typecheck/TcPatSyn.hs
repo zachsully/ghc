@@ -9,22 +9,21 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module TcPatSyn ( tcInferPatSynDecl, tcCheckPatSynDecl
-                , tcPatSynBuilderBind, tcPatSynBuilderOcc, nonBidirectionalErr
+module TcPatSyn ( tcPatSynDecl, tcPatSynBuilderBind
+                , tcPatSynBuilderOcc, nonBidirectionalErr
   ) where
 
 import GhcPrelude
 
 import HsSyn
 import TcPat
-import Type( mkEmptyTCvSubst, tidyTyVarBinders, tidyTypes, tidyType )
+import Type( mkEmptyTCvSubst, tidyTyCoVarBinders, tidyTypes, tidyType )
 import TcRnMonad
 import TcSigs( emptyPragEnv, completeSigFromId )
 import TcType( mkMinimalBySCs )
 import TcEnv
 import TcMType
-import TcHsSyn( zonkTyVarBindersX, zonkTcTypeToTypes
-              , zonkTcTypeToType, emptyZonkEnv )
+import TcHsSyn
 import TysPrim
 import TysWiredIn  ( runtimeRepTy )
 import Name
@@ -53,7 +52,7 @@ import FieldLabel
 import Bag
 import Util
 import ErrUtils
-import Control.Monad ( zipWithM )
+import Control.Monad ( zipWithM, when )
 import Data.List( partition )
 
 #include "HsVersions.h"
@@ -66,6 +65,58 @@ import Data.List( partition )
 ************************************************************************
 -}
 
+tcPatSynDecl :: PatSynBind GhcRn GhcRn
+             -> Maybe TcSigInfo
+             -> TcM (LHsBinds GhcTc, TcGblEnv)
+tcPatSynDecl psb@(PSB { psb_id = L _ name, psb_args = details }) mb_sig
+  = recoverM recover $
+    case mb_sig of
+      Nothing                 -> tcInferPatSynDecl psb
+      Just (TcPatSynSig tpsi) -> tcCheckPatSynDecl psb tpsi
+      _ -> panic "tcPatSynDecl"
+
+  where
+    -- See Note [Pattern synonym error recovery]
+    recover = do { matcher_name <- newImplicitBinder name mkMatcherOcc
+                 ; let placeholder = AConLike $ PatSynCon $
+                                     mk_placeholder matcher_name
+                 ; gbl_env <- tcExtendGlobalEnv [placeholder] getGblEnv
+                 ; return (emptyBag, gbl_env) }
+
+    (_arg_names, _rec_fields, is_infix) = collectPatSynArgInfo details
+    mk_placeholder matcher_name
+      = mkPatSyn name is_infix
+                        ([mkTyVarBinder Specified alphaTyVar], []) ([], [])
+                        [] -- Arg tys
+                        alphaTy
+                        (matcher_id, True) Nothing
+                        []  -- Field labels
+       where
+         -- The matcher_id is used only by the desugarer, so actually
+         -- and error-thunk would probably do just as well here.
+         matcher_id = mkLocalId matcher_name $
+                      mkSpecForAllTys [alphaTyVar] alphaTy
+
+tcPatSynDecl (XPatSynBind {}) _ = panic "tcPatSynDecl"
+
+{- Note [Pattern synonym error recovery]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+If type inference for a pattern synonym fails , we can't continue with
+the rest of tc_patsyn_finish, because we may get knock-on errors, or
+even a crash.  E.g. from
+   pattern What = True :: Maybe
+we get a kind error; and we must stop right away (Trac #15289).
+Hence the 'when insoluble failM' in tcInferPatSyn.
+
+But does that abort compilation entirely?  No -- we can recover
+and carry on, just as we do for value bindings, provided we plug in
+placeholder for the pattern synonym.  The goal of the placeholder
+is not to cause a raft of follow-on errors.  I've used the simplest
+thing for now, but we might need to elaborate it a bit later.  (e.g.
+I've given it zero args, which may cause knock-on errors if it is
+used in a pattern.) But it'll do for now.
+-}
+
 tcInferPatSynDecl :: PatSynBind GhcRn GhcRn
                   -> TcM (LHsBinds GhcTc, TcGblEnv)
 tcInferPatSynDecl PSB{ psb_id = lname@(L _ name), psb_args = details,
@@ -76,14 +127,19 @@ tcInferPatSynDecl PSB{ psb_id = lname@(L _ name), psb_args = details,
        ; let (arg_names, rec_fields, is_infix) = collectPatSynArgInfo details
        ; (tclvl, wanted, ((lpat', args), pat_ty))
             <- pushLevelAndCaptureConstraints  $
-               tcInferNoInst $ \ exp_ty ->
-               tcPat PatSyn lpat exp_ty $
+               tcInferNoInst                   $ \ exp_ty ->
+               tcPat PatSyn lpat exp_ty        $
                mapM tcLookupId arg_names
 
        ; let named_taus = (name, pat_ty) : map (\arg -> (getName arg, varType arg)) args
 
-       ; (qtvs, req_dicts, ev_binds, _) <- simplifyInfer tclvl NoRestrictions []
-                                                         named_taus wanted
+       ; (qtvs, req_dicts, ev_binds, insoluble)
+               <- simplifyInfer tclvl NoRestrictions [] named_taus wanted
+
+       ; when insoluble failM
+              -- simplifyInfer doesn't fail if there are errors.  But to avoid
+              -- knock-on errors, or even crashes, we want to stop here.
+              -- See Note [Pattern synonym error recovery]
 
        ; let (ex_tvs, prov_dicts) = tcCollectEx lpat'
              ex_tv_set  = mkVarSet ex_tvs
@@ -131,7 +187,7 @@ badUnivTvErr ex_tvs bad_tv
          , nest 2 (ppr_with_kind bad_tv)
          , hang (text "Existentially-bound variables:")
               2 (vcat (map ppr_with_kind ex_tvs))
-         , text "Probable fix: give the pattern synoym a type signature"
+         , text "Probable fix: give the pattern synonym a type signature"
          ]
   where
     ppr_with_kind tv = ppr tv <+> dcolon <+> ppr (tyVarKind tv)
@@ -493,10 +549,10 @@ a pattern synonym.  What about the /building/ side?
   tcPatSynBuilderBind, by converting the pattern to an expression and
   typechecking it.
 
-  At one point, for ImplicitBidirectional I used SigTvs (instead of
+  At one point, for ImplicitBidirectional I used TyVarTvs (instead of
   TauTvs) in tcCheckPatSynDecl.  But (a) strengthening the check here
   is redundant since tcPatSynBuilderBind does the job, (b) it was
-  still incomplete (SigTvs can unify with each other), and (c) it
+  still incomplete (TyVarTvs can unify with each other), and (c) it
   didn't even work (Trac #13441 was accepted with
   ExplicitBidirectional, but rejected if expressed in
   ImplicitBidirectional form.  Conclusion: trying to be too clever is
@@ -555,15 +611,15 @@ tc_patsyn_finish lname dir is_infix lpat'
   = do { -- Zonk everything.  We are about to build a final PatSyn
          -- so there had better be no unification variables in there
 
-         (ze, univ_tvs') <- zonkTyVarBindersX emptyZonkEnv univ_tvs
-       ; req_theta'      <- zonkTcTypeToTypes ze req_theta
+         (ze, univ_tvs') <- zonkTyVarBinders univ_tvs
+       ; req_theta'      <- zonkTcTypesToTypesX ze req_theta
        ; (ze, ex_tvs')   <- zonkTyVarBindersX ze ex_tvs
-       ; prov_theta'     <- zonkTcTypeToTypes ze prov_theta
-       ; pat_ty'         <- zonkTcTypeToType ze pat_ty
-       ; arg_tys'        <- zonkTcTypeToTypes ze arg_tys
+       ; prov_theta'     <- zonkTcTypesToTypesX ze prov_theta
+       ; pat_ty'         <- zonkTcTypeToTypeX ze pat_ty
+       ; arg_tys'        <- zonkTcTypesToTypesX ze arg_tys
 
-       ; let (env1, univ_tvs) = tidyTyVarBinders emptyTidyEnv univ_tvs'
-             (env2, ex_tvs)   = tidyTyVarBinders env1 ex_tvs'
+       ; let (env1, univ_tvs) = tidyTyCoVarBinders emptyTidyEnv univ_tvs'
+             (env2, ex_tvs)   = tidyTyCoVarBinders env1 ex_tvs'
              req_theta  = tidyTypes env2 req_theta'
              prov_theta = tidyTypes env2 prov_theta'
              arg_tys    = tidyTypes env2 arg_tys'
@@ -661,7 +717,7 @@ tcPatSynMatcher (L loc name) lpat
                              -- See Note [Exported LocalIds] in Id
 
              inst_wrap = mkWpEvApps prov_dicts <.> mkWpTyApps ex_tys
-             cont' = foldl nlHsApp (mkLHsWrap inst_wrap (nlHsVar cont)) cont_args
+             cont' = foldl' nlHsApp (mkLHsWrap inst_wrap (nlHsVar cont)) cont_args
 
              fail' = nlHsApps fail [nlHsVar voidPrimId]
 
@@ -772,10 +828,15 @@ tcPatSynBuilderBind (PSB { psb_id = L loc name, psb_def = lpat
 
   | Right match_group <- mb_match_group  -- Bidirectional
   = do { patsyn <- tcLookupPatSyn name
-       ; let Just (builder_id, need_dummy_arg) = patSynBuilder patsyn
-                   -- Bidirectional, so patSynBuilder returns Just
+       ; case patSynBuilder patsyn of {
+           Nothing -> return emptyBag ;
+             -- This case happens if we found a type error in the
+             -- pattern synonym, recovered, and put a placeholder
+             -- with patSynBuilder=Nothing in the environment
 
-             match_group' | need_dummy_arg = add_dummy_arg match_group
+           Just (builder_id, need_dummy_arg) ->  -- Normal case
+    do { -- Bidirectional, so patSynBuilder returns Just
+         let match_group' | need_dummy_arg = add_dummy_arg match_group
                           | otherwise      = match_group
 
              bind = FunBind { fun_ext = placeHolderNamesTc
@@ -790,7 +851,7 @@ tcPatSynBuilderBind (PSB { psb_id = L loc name, psb_def = lpat
          ppr patsyn $$ ppr builder_id <+> dcolon <+> ppr (idType builder_id)
        ; (builder_binds, _) <- tcPolyCheck emptyPragEnv sig (noLoc bind)
        ; traceTc "tcPatSynBuilderBind }" $ ppr builder_binds
-       ; return builder_binds }
+       ; return builder_binds } } }
 
   | otherwise = panic "tcPatSynBuilderBind"  -- Both cases dealt with
   where
@@ -864,8 +925,8 @@ tcPatToExpr name args pat = go pat
                     -> Either MsgDoc (HsExpr GhcRn)
     mkPrefixConExpr lcon@(L loc _) pats
       = do { exprs <- mapM go pats
-           ; return (foldl (\x y -> HsApp noExt (L loc x) y)
-                           (HsVar noExt lcon) exprs) }
+           ; return (foldl' (\x y -> HsApp noExt (L loc x) y)
+                            (HsVar noExt lcon) exprs) }
 
     mkRecordConExpr :: Located Name -> HsRecFields GhcRn (LPat GhcRn)
                     -> Either MsgDoc (HsExpr GhcRn)
@@ -954,7 +1015,7 @@ tcPatToExpr name args pat = go pat
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 For a bidirectional pattern synonym we need to produce an /expression/
 that matches the supplied /pattern/, given values for the arguments
-of the pattern synoymy.  For example
+of the pattern synonym.  For example
   pattern F x y = (Just x, [y])
 The 'builder' for F looks like
   $builderF x y = (Just x, [y])

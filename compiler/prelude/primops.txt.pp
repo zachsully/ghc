@@ -91,10 +91,11 @@ section "The word size story."
          This is normally set based on the {\tt config.h} parameter
          {\tt SIZEOF\_HSWORD}, i.e., 32 bits on 32-bit machines, 64
          bits on 64-bit machines.  However, it can also be explicitly
-         set to a smaller number, e.g., 31 bits, to allow the
+         set to a smaller number than 64, e.g., 62 bits, to allow the
          possibility of using tag bits. Currently GHC itself has only
-         32-bit and 64-bit variants, but 30 or 31-bit code can be
+         32-bit and 64-bit variants, but 61, 62, or 63-bit code can be
          exported as an external core file for use in other back ends.
+         30 and 31-bit code is no longer supported.
 
          GHC also implements a primitive unsigned integer type {\tt
          Word\#} which always has the same number of bits as {\tt
@@ -142,13 +143,8 @@ section "The word size story."
 
 -- Define synonyms for indexing ops.
 
-#if WORD_SIZE_IN_BITS < 32
-#define INT32 Int32#
-#define WORD32 Word32#
-#else
 #define INT32 Int#
 #define WORD32 Word#
-#endif
 
 #if WORD_SIZE_IN_BITS < 64
 #define INT64 Int64#
@@ -184,7 +180,7 @@ primop   OrdOp   "ord#"  GenPrimOp   Char# -> Int#
 
 ------------------------------------------------------------------------
 section "Int#"
-        {Operations on native-size integers (30+ bits).}
+        {Operations on native-size integers (32+ bits).}
 ------------------------------------------------------------------------
 
 primtype Int#
@@ -321,7 +317,7 @@ primop   ISrlOp   "uncheckedIShiftRL#" GenPrimOp Int# -> Int# -> Int#
 
 ------------------------------------------------------------------------
 section "Word#"
-        {Operations on native-sized unsigned words (30+ bits).}
+        {Operations on native-sized unsigned words (32+ bits).}
 ------------------------------------------------------------------------
 
 primtype Word#
@@ -480,28 +476,6 @@ primop   Narrow16WordOp    "narrow16Word#"    Monadic   Word# -> Word#
 primop   Narrow32WordOp    "narrow32Word#"    Monadic   Word# -> Word#
 
 
-#if WORD_SIZE_IN_BITS < 32
-------------------------------------------------------------------------
-section "Int32#"
-        {Operations on 32-bit integers ({\tt Int32\#}).  This type is only used
-         if plain {\tt Int\#} has less than 32 bits.  In any case, the operations
-         are not primops; they are implemented (if needed) as ccalls instead.}
-------------------------------------------------------------------------
-
-primtype Int32#
-
-------------------------------------------------------------------------
-section "Word32#"
-        {Operations on 32-bit unsigned words. This type is only used
-         if plain {\tt Word\#} has less than 32 bits. In any case, the operations
-         are not primops; they are implemented (if needed) as ccalls instead.}
-------------------------------------------------------------------------
-
-primtype Word32#
-
-#endif
-
-
 #if WORD_SIZE_IN_BITS < 64
 ------------------------------------------------------------------------
 section "Int64#"
@@ -644,6 +618,21 @@ primop   DoubleTanhOp   "tanhDouble#"      Monadic
    with
    code_size = { primOpCodeSizeForeignCall }
 
+primop   DoubleAsinhOp   "asinhDouble#"      Monadic
+   Double# -> Double#
+   with
+   code_size = { primOpCodeSizeForeignCall }
+
+primop   DoubleAcoshOp   "acoshDouble#"      Monadic
+   Double# -> Double#
+   with
+   code_size = { primOpCodeSizeForeignCall }
+
+primop   DoubleAtanhOp   "atanhDouble#"      Monadic
+   Double# -> Double#
+   with
+   code_size = { primOpCodeSizeForeignCall }
+
 primop   DoublePowerOp   "**##" Dyadic
    Double# -> Double# -> Double#
    {Exponentiation.}
@@ -766,6 +755,21 @@ primop   FloatCoshOp   "coshFloat#"      Monadic
    code_size = { primOpCodeSizeForeignCall }
 
 primop   FloatTanhOp   "tanhFloat#"      Monadic
+   Float# -> Float#
+   with
+   code_size = { primOpCodeSizeForeignCall }
+
+primop   FloatAsinhOp   "asinhFloat#"      Monadic
+   Float# -> Float#
+   with
+   code_size = { primOpCodeSizeForeignCall }
+
+primop   FloatAcoshOp   "acoshFloat#"      Monadic
+   Float# -> Float#
+   with
+   code_size = { primOpCodeSizeForeignCall }
+
+primop   FloatAtanhOp   "atanhFloat#"      Monadic
    Float# -> Float#
    with
    code_size = { primOpCodeSizeForeignCall }
@@ -1676,7 +1680,7 @@ primop  CopyByteArrayOp "copyByteArray#" GenPrimOp
 
 primop  CopyMutableByteArrayOp "copyMutableByteArray#" GenPrimOp
   MutableByteArray# s -> Int# -> MutableByteArray# s -> Int# -> Int# -> State# s -> State# s
-  {Copy a range of the first MutableByteArray# to the specified region in the second MutableByteArray#.
+  {Copy a range of the first MutableByteArray\# to the specified region in the second MutableByteArray\#.
    Both arrays must fully contain the specified ranges, but this is not checked. The regions are
    allowed to overlap, although this is only possible when the same array is provided
    as both the source and the destination.}
@@ -1687,10 +1691,10 @@ primop  CopyMutableByteArrayOp "copyMutableByteArray#" GenPrimOp
 
 primop  CopyByteArrayToAddrOp "copyByteArrayToAddr#" GenPrimOp
   ByteArray# -> Int# -> Addr# -> Int# -> State# s -> State# s
-  {Copy a range of the ByteArray# to the memory range starting at the Addr#.
-   The ByteArray# and the memory region at Addr# must fully contain the
-   specified ranges, but this is not checked. The Addr# must not point into the
-   ByteArray# (e.g. if the ByteArray# were pinned), but this is not checked
+  {Copy a range of the ByteArray\# to the memory range starting at the Addr\#.
+   The ByteArray\# and the memory region at Addr\# must fully contain the
+   specified ranges, but this is not checked. The Addr\# must not point into the
+   ByteArray\# (e.g. if the ByteArray\# were pinned), but this is not checked
    either.}
   with
   has_side_effects = True
@@ -1699,10 +1703,10 @@ primop  CopyByteArrayToAddrOp "copyByteArrayToAddr#" GenPrimOp
 
 primop  CopyMutableByteArrayToAddrOp "copyMutableByteArrayToAddr#" GenPrimOp
   MutableByteArray# s -> Int# -> Addr# -> Int# -> State# s -> State# s
-  {Copy a range of the MutableByteArray# to the memory range starting at the
-   Addr#. The MutableByteArray# and the memory region at Addr# must fully
-   contain the specified ranges, but this is not checked. The Addr# must not
-   point into the MutableByteArray# (e.g. if the MutableByteArray# were
+  {Copy a range of the MutableByteArray\# to the memory range starting at the
+   Addr\#. The MutableByteArray\# and the memory region at Addr\# must fully
+   contain the specified ranges, but this is not checked. The Addr\# must not
+   point into the MutableByteArray\# (e.g. if the MutableByteArray\# were
    pinned), but this is not checked either.}
   with
   has_side_effects = True
@@ -1711,10 +1715,10 @@ primop  CopyMutableByteArrayToAddrOp "copyMutableByteArrayToAddr#" GenPrimOp
 
 primop  CopyAddrToByteArrayOp "copyAddrToByteArray#" GenPrimOp
   Addr# -> MutableByteArray# s -> Int# -> Int# -> State# s -> State# s
-  {Copy a memory range starting at the Addr# to the specified range in the
-   MutableByteArray#. The memory region at Addr# and the ByteArray# must fully
-   contain the specified ranges, but this is not checked. The Addr# must not
-   point into the MutableByteArray# (e.g. if the MutableByteArray# were pinned),
+  {Copy a memory range starting at the Addr\# to the specified range in the
+   MutableByteArray\#. The memory region at Addr\# and the ByteArray\# must fully
+   contain the specified ranges, but this is not checked. The Addr\# must not
+   point into the MutableByteArray\# (e.g. if the MutableByteArray\# were pinned),
    but this is not checked either.}
   with
   has_side_effects = True
@@ -1894,7 +1898,7 @@ primop  WriteArrayArrayOp_MutableArrayArray "writeMutableArrayArrayArray#" GenPr
 
 primop  CopyArrayArrayOp "copyArrayArray#" GenPrimOp
   ArrayArray# -> Int# -> MutableArrayArray# s -> Int# -> Int# -> State# s -> State# s
-  {Copy a range of the ArrayArray# to the specified region in the MutableArrayArray#.
+  {Copy a range of the ArrayArray\# to the specified region in the MutableArrayArray\#.
    Both arrays must fully contain the specified ranges, but this is not checked.
    The two arrays must not be the same array in different states, but this is not checked either.}
   with
@@ -2224,25 +2228,37 @@ primop  WriteMutVarOp "writeMutVar#"  GenPrimOp
 primop  SameMutVarOp "sameMutVar#" GenPrimOp
    MutVar# s a -> MutVar# s a -> Int#
 
--- Note [Why not an unboxed tuple in atomicModifyMutVar#?]
+-- Note [Why not an unboxed tuple in atomicModifyMutVar2#?]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 --
--- Looking at the type of atomicModifyMutVar#, one might wonder why
+-- Looking at the type of atomicModifyMutVar2#, one might wonder why
 -- it doesn't return an unboxed tuple. e.g.,
 --
---   MutVar# s a -> (a -> (# a, b #)) -> State# s -> (# State# s, b #)
+--   MutVar# s a -> (a -> (# a, b #)) -> State# s -> (# State# s, a, (# a, b #) #)
 --
--- The reason is that atomicModifyMutVar# relies on laziness for its atomicity.
--- Given a MutVar# containing x, atomicModifyMutVar# merely replaces the
+-- The reason is that atomicModifyMutVar2# relies on laziness for its atomicity.
+-- Given a MutVar# containing x, atomicModifyMutVar2# merely replaces
 -- its contents with a thunk of the form (fst (f x)). This can be done using an
 -- atomic compare-and-swap as it is merely replacing a pointer.
 
-primop  AtomicModifyMutVarOp "atomicModifyMutVar#" GenPrimOp
-   MutVar# s a -> (a -> b) -> State# s -> (# State# s, c #)
-   { Modify the contents of a {\tt MutVar\#}. Note that this isn't strictly
-     speaking the correct type for this function, it should really be
-     {\tt MutVar# s a -> (a -> (a,b)) -> State# s -> (# State# s, b #)}, however
-     we don't know about pairs here. }
+primop  AtomicModifyMutVar2Op "atomicModifyMutVar2#" GenPrimOp
+   MutVar# s a -> (a -> c) -> State# s -> (# State# s, a, c #)
+   { Modify the contents of a {\tt MutVar\#}, returning the previous
+     contents and the result of applying the given function to the
+     previous contents. Note that this isn't strictly
+     speaking the correct type for this function; it should really be
+     {\tt MutVar\# s a -> (a -> (a,b)) -> State\# s -> (\# State\# s, a, (a, b) \#)},
+     but we don't know about pairs here. }
+   with
+   out_of_line = True
+   has_side_effects = True
+   can_fail         = True
+
+primop  AtomicModifyMutVar_Op "atomicModifyMutVar_#" GenPrimOp
+   MutVar# s a -> (a -> a) -> State# s -> (# State# s, a, a #)
+   { Modify the contents of a {\tt MutVar\#}, returning the previous
+     contents and the result of applying the given function to the
+     previous contents. }
    with
    out_of_line = True
    has_side_effects = True
@@ -2774,13 +2790,13 @@ primop  CompactResizeOp "compactResize#" GenPrimOp
 
 primop  CompactContainsOp "compactContains#" GenPrimOp
    Compact# -> a -> State# RealWorld -> (# State# RealWorld, Int# #)
-   { Returns 1# if the object is contained in the compact, 0# otherwise. }
+   { Returns 1\# if the object is contained in the compact, 0\# otherwise. }
    with
    out_of_line      = True
 
 primop  CompactContainsAnyOp "compactContainsAny#" GenPrimOp
    a -> State# RealWorld -> (# State# RealWorld, Int# #)
-   { Returns 1# if the object is in any compact at all, 0# otherwise. }
+   { Returns 1\# if the object is in any compact at all, 0\# otherwise. }
    with
    out_of_line      = True
 
@@ -2802,11 +2818,11 @@ primop  CompactGetNextBlockOp "compactGetNextBlock#" GenPrimOp
 primop  CompactAllocateBlockOp "compactAllocateBlock#" GenPrimOp
    Word# -> Addr# -> State# RealWorld -> (# State# RealWorld, Addr# #)
    { Attempt to allocate a compact block with the given size (in
-     bytes) at the given address. The first argument is a hint to
-     the allocator, allocation might be satisfied at a different
-     address (which is returned).
+     bytes, given by the first argument). The {\texttt Addr\#} is a pointer to
+     previous block of the compact or {\texttt nullAddr\#} to create a new compact.
+
      The resulting block is not known to the GC until
-     compactFixupPointers# is called on it, and care must be taken
+     {\texttt compactFixupPointers\#} is called on it, and care must be taken
      so that the address does not escape or memory will be leaked.
    }
    with
@@ -2938,7 +2954,7 @@ section "Tag to enum stuff"
 ------------------------------------------------------------------------
 
 primop  DataToTagOp "dataToTag#" GenPrimOp
-   a -> Int#
+   a -> Int#  -- Zero-indexed; the first constructor has tag zero
    with
    can_fail   = True -- See Note [dataToTag#]
    strictness = { \ _arity -> mkClosedStrictSig [evalDmd] topRes }
@@ -3138,8 +3154,18 @@ primop  TraceEventOp "traceEvent#" GenPrimOp
    Addr# -> State# s -> State# s
    { Emits an event via the RTS tracing framework.  The contents
      of the event is the zero-terminated byte string passed as the first
-     argument.  The event will be emitted either to the .eventlog file,
+     argument.  The event will be emitted either to the {\tt .eventlog} file,
      or to stderr, depending on the runtime RTS flags. }
+   with
+   has_side_effects = True
+   out_of_line      = True
+
+primop  TraceEventBinaryOp "traceBinaryEvent#" GenPrimOp
+   Addr# -> Int# -> State# s -> State# s
+   { Emits an event via the RTS tracing framework.  The contents
+     of the event is the binary object passed as the first argument with
+     the the given length passed as the second argument. The event will be
+     emitted to the {\tt .eventlog} file. }
    with
    has_side_effects = True
    out_of_line      = True
@@ -3148,7 +3174,7 @@ primop  TraceMarkerOp "traceMarker#" GenPrimOp
    Addr# -> State# s -> State# s
    { Emits a marker event via the RTS tracing framework.  The contents
      of the event is the zero-terminated byte string passed as the first
-     argument.  The event will be emitted either to the .eventlog file,
+     argument.  The event will be emitted either to the {\tt .eventlog} file,
      or to stderr, depending on the runtime RTS flags. }
    with
    has_side_effects = True

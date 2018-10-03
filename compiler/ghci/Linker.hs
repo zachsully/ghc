@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP, NondecreasingIndentation, TupleSections, RecordWildCards #-}
+{-# LANGUAGE BangPatterns #-}
 {-# OPTIONS_GHC -fno-cse #-}
 -- -fno-cse is needed for GLOBAL_VAR's to behave properly
 
@@ -86,35 +87,45 @@ import Foreign (Ptr)
 The persistent linker state *must* match the actual state of the
 C dynamic linker at all times, so we keep it in a private global variable.
 
-The global IORef used for PersistentLinkerState actually contains another MVar.
-The reason for this is that we want to allow another loaded copy of the GHC
-library to side-effect the PLS and for those changes to be reflected here.
+The global IORef used for PersistentLinkerState actually contains another MVar,
+which in turn contains a Maybe PersistentLinkerState. The MVar serves to ensure
+mutual exclusion between multiple loaded copies of the GHC library. The Maybe
+may be Nothing to indicate that the linker has not yet been initialised.
 
 The PersistentLinkerState maps Names to actual closures (for
 interpreted code only), for use during linking.
 -}
 #if STAGE < 2
-GLOBAL_VAR_M(v_PersistentLinkerState, newMVar (panic "Dynamic linker not initialised"), MVar PersistentLinkerState)
-GLOBAL_VAR(v_InitLinkerDone, False, Bool) -- Set True when dynamic linker is initialised
+GLOBAL_VAR_M( v_PersistentLinkerState
+            , newMVar Nothing
+            , MVar (Maybe PersistentLinkerState))
 #else
 SHARED_GLOBAL_VAR_M( v_PersistentLinkerState
                    , getOrSetLibHSghcPersistentLinkerState
                    , "getOrSetLibHSghcPersistentLinkerState"
-                   , newMVar (panic "Dynamic linker not initialised")
-                   , MVar PersistentLinkerState)
--- Set True when dynamic linker is initialised
-SHARED_GLOBAL_VAR( v_InitLinkerDone
-                 , getOrSetLibHSghcInitLinkerDone
-                 , "getOrSetLibHSghcInitLinkerDone"
-                 , False
-                 , Bool)
+                   , newMVar Nothing
+                   , MVar (Maybe PersistentLinkerState))
 #endif
 
+uninitialised :: a
+uninitialised = panic "Dynamic linker not initialised"
+
 modifyPLS_ :: (PersistentLinkerState -> IO PersistentLinkerState) -> IO ()
-modifyPLS_ f = readIORef v_PersistentLinkerState >>= flip modifyMVar_ f
+modifyPLS_ f = readIORef v_PersistentLinkerState
+  >>= flip modifyMVar_ (fmap pure . f . fromMaybe uninitialised)
 
 modifyPLS :: (PersistentLinkerState -> IO (PersistentLinkerState, a)) -> IO a
-modifyPLS f = readIORef v_PersistentLinkerState >>= flip modifyMVar f
+modifyPLS f = readIORef v_PersistentLinkerState
+  >>= flip modifyMVar (fmapFst pure . f . fromMaybe uninitialised)
+  where fmapFst f = fmap (\(x, y) -> (f x, y))
+
+readPLS :: IO PersistentLinkerState
+readPLS = readIORef v_PersistentLinkerState
+  >>= fmap (fromMaybe uninitialised) . readMVar
+
+modifyMbPLS_
+  :: (Maybe PersistentLinkerState -> IO (Maybe PersistentLinkerState)) -> IO ()
+modifyMbPLS_ f = readIORef v_PersistentLinkerState >>= flip modifyMVar_ f
 
 data PersistentLinkerState
    = PersistentLinkerState {
@@ -169,10 +180,10 @@ extendLoadedPkgs pkgs =
 
 extendLinkEnv :: [(Name,ForeignHValue)] -> IO ()
 extendLinkEnv new_bindings =
-  modifyPLS_ $ \pls -> do
-    let ce = closure_env pls
-    let new_ce = extendClosureEnv ce new_bindings
-    return pls{ closure_env = new_ce }
+  modifyPLS_ $ \pls@PersistentLinkerState{..} -> do
+    let new_ce = extendClosureEnv closure_env new_bindings
+    return $! pls{ closure_env = new_ce }
+    -- strictness is important for not retaining old copies of the pls
 
 deleteFromLinkEnv :: [Name] -> IO ()
 deleteFromLinkEnv to_remove =
@@ -254,7 +265,7 @@ withExtendedLinkEnv new_env action
 -- | Display the persistent linker state.
 showLinkerState :: DynFlags -> IO ()
 showLinkerState dflags
-  = do pls <- readIORef v_PersistentLinkerState >>= readMVar
+  = do pls <- readPLS
        putLogMsg dflags NoReason SevDump noSrcSpan
           (defaultDumpStyle dflags)
                  (vcat [text "----- Linker state -----",
@@ -289,11 +300,10 @@ showLinkerState dflags
 --
 initDynLinker :: HscEnv -> IO ()
 initDynLinker hsc_env =
-  modifyPLS_ $ \pls0 -> do
-    done <- readIORef v_InitLinkerDone
-    if done then return pls0
-            else do writeIORef v_InitLinkerDone True
-                    reallyInitDynLinker hsc_env
+  modifyMbPLS_ $ \pls -> do
+    case pls of
+      Just  _ -> return pls
+      Nothing -> Just <$> reallyInitDynLinker hsc_env
 
 reallyInitDynLinker :: HscEnv -> IO PersistentLinkerState
 reallyInitDynLinker hsc_env = do
@@ -918,16 +928,14 @@ dynLoadObjs hsc_env pls objs = do
                       -- can resolve dependencies when it loads this
                       -- library.
                       ldInputs =
-                        concatMap
-                            (\(lp, l) ->
-                                 [ Option ("-L" ++ lp)
-                                 , Option "-Xlinker"
-                                 , Option "-rpath"
-                                 , Option "-Xlinker"
-                                 , Option lp
-                                 , Option ("-l" ++  l)
-                                 ])
-                            (temp_sos pls)
+                           concatMap (\l -> [ Option ("-l" ++ l) ])
+                                     (nub $ snd <$> temp_sos pls)
+                        ++ concatMap (\lp -> [ Option ("-L" ++ lp)
+                                                    , Option "-Xlinker"
+                                                    , Option "-rpath"
+                                                    , Option "-Xlinker"
+                                                    , Option lp ])
+                                     (nub $ fst <$> temp_sos pls)
                         ++ concatMap
                              (\lp ->
                                  [ Option ("-L" ++ lp)
@@ -1095,15 +1103,19 @@ unload_wkr :: HscEnv
 -- Does the core unload business
 -- (the wrapper blocks exceptions and deals with the PLS get and put)
 
-unload_wkr hsc_env keep_linkables pls = do
+unload_wkr hsc_env keep_linkables pls@PersistentLinkerState{..}  = do
+  -- NB. careful strictness here to avoid keeping the old PLS when
+  -- we're unloading some code.  -fghci-leak-check with the tests in
+  -- testsuite/ghci can detect space leaks here.
+
   let (objs_to_keep, bcos_to_keep) = partition isObjectLinkable keep_linkables
 
       discard keep l = not (linkableInSet l keep)
 
       (objs_to_unload, remaining_objs_loaded) =
-         partition (discard objs_to_keep) (objs_loaded pls)
+         partition (discard objs_to_keep) objs_loaded
       (bcos_to_unload, remaining_bcos_loaded) =
-         partition (discard bcos_to_keep) (bcos_loaded pls)
+         partition (discard bcos_to_keep) bcos_loaded
 
   mapM_ unloadObjs objs_to_unload
   mapM_ unloadObjs bcos_to_unload
@@ -1114,7 +1126,7 @@ unload_wkr hsc_env keep_linkables pls = do
                    filter (not . null . linkableObjs) bcos_to_unload))) $
     purgeLookupSymbolCache hsc_env
 
-  let bcos_retained = mkModuleSet $ map linkableModule remaining_bcos_loaded
+  let !bcos_retained = mkModuleSet $ map linkableModule remaining_bcos_loaded
 
       -- Note that we want to remove all *local*
       -- (i.e. non-isExternal) names too (these are the
@@ -1122,13 +1134,13 @@ unload_wkr hsc_env keep_linkables pls = do
       keep_name (n,_) = isExternalName n &&
                         nameModule n `elemModuleSet` bcos_retained
 
-      itbl_env'     = filterNameEnv keep_name (itbl_env pls)
-      closure_env'  = filterNameEnv keep_name (closure_env pls)
+      itbl_env'     = filterNameEnv keep_name itbl_env
+      closure_env'  = filterNameEnv keep_name closure_env
 
-      new_pls = pls { itbl_env = itbl_env',
-                      closure_env = closure_env',
-                      bcos_loaded = remaining_bcos_loaded,
-                      objs_loaded = remaining_objs_loaded }
+      !new_pls = pls { itbl_env = itbl_env',
+                       closure_env = closure_env',
+                       bcos_loaded = remaining_bcos_loaded,
+                       objs_loaded = remaining_objs_loaded }
 
   return new_pls
   where
@@ -1335,8 +1347,8 @@ load_dyn hsc_env dll = do
   r <- loadDLL hsc_env dll
   case r of
     Nothing  -> return ()
-    Just err -> throwGhcExceptionIO (CmdLineError ("can't load .so/.DLL for: "
-                                                ++ dll ++ " (" ++ err ++ ")" ))
+    Just err -> cmdLineErrorIO ("can't load .so/.DLL for: "
+                                ++ dll ++ " (" ++ err ++ ")")
 
 loadFrameworks :: HscEnv -> Platform -> PackageConfig -> IO ()
 loadFrameworks hsc_env platform pkg
@@ -1348,8 +1360,8 @@ loadFrameworks hsc_env platform pkg
     load fw = do  r <- loadFramework hsc_env fw_dirs fw
                   case r of
                     Nothing  -> return ()
-                    Just err -> throwGhcExceptionIO (CmdLineError ("can't load framework: "
-                                                        ++ fw ++ " (" ++ err ++ ")" ))
+                    Just err -> cmdLineErrorIO ("can't load framework: "
+                                                ++ fw ++ " (" ++ err ++ ")" )
 
 -- Try to find an object file for a given library in the given paths.
 -- If it isn't present, we assume that addDLL in the RTS can find it,

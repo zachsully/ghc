@@ -29,7 +29,7 @@ import RnUtils          ( HsDocContext(..), mapFvRn, bindLocalNames
                         , checkDupRdrNames, inHsDocContext, bindLocalNamesFV
                         , checkShadowedRdrNames, warnUnusedTypePatterns
                         , extendTyVarEnvFVRn, newLocalBndrsRn )
-import RnUnbound        ( mkUnboundName )
+import RnUnbound        ( mkUnboundName, notInScopeErr )
 import RnNames
 import RnHsDoc          ( rnHsDoc, rnMbLHsDoc )
 import TcAnnotations    ( annCtxt )
@@ -38,7 +38,6 @@ import TcRnMonad
 import ForeignCall      ( CCallTarget(..) )
 import Module
 import HscTypes         ( Warnings(..), plusWarns )
-import Class            ( FunDep )
 import PrelNames        ( applicativeClassName, pureAName, thenAName
                         , monadClassName, returnMName, thenMName
                         , monadFailClassName, failMName, failMName_preMFP
@@ -765,8 +764,7 @@ rnFamInstEqn doc mb_cls rhs_kvars
              all_fvs  = fvs `addOneFV` unLoc tycon'
                         -- type instance => use, hence addOneFV
 
-       ; return (HsIB { hsib_ext = HsIBRn { hsib_vars = all_ibs
-                                          , hsib_closed = True }
+       ; return (HsIB { hsib_ext = all_ibs
                       , hsib_body
                           = FamEqn { feqn_ext    = noExt
                                    , feqn_tycon  = tycon'
@@ -1095,14 +1093,14 @@ badRuleVar name var
 badRuleLhsErr :: FastString -> LHsExpr GhcRn -> HsExpr GhcRn -> SDoc
 badRuleLhsErr name lhs bad_e
   = sep [text "Rule" <+> pprRuleName name <> colon,
-         nest 4 (vcat [err,
+         nest 2 (vcat [err,
                        text "in left-hand side:" <+> ppr lhs])]
     $$
     text "LHS must be of form (f e1 .. en) where f is not forall'd"
   where
     err = case bad_e of
-            HsUnboundVar _ uv -> text "Not in scope:" <+> ppr uv
-            _ -> text "Illegal expression:" <+> ppr bad_e
+            HsUnboundVar _ uv -> notInScopeErr (mkRdrUnqual (unboundVarOcc uv))
+            _                 -> text "Illegal expression:" <+> ppr bad_e
 
 {- **************************************************************
          *                                                      *
@@ -1691,7 +1689,7 @@ rnLDerivStrategy doc mds thing_inside
         NewtypeStrategy  -> boring_case (L loc NewtypeStrategy)
         ViaStrategy via_ty ->
           do (via_ty', fvs1) <- rnHsSigType doc via_ty
-             let HsIB { hsib_ext  = HsIBRn { hsib_vars = via_imp_tvs }
+             let HsIB { hsib_ext  = via_imp_tvs
                       , hsib_body = via_body } = via_ty'
                  (via_exp_tv_bndrs, _, _) = splitLHsSigmaTy via_body
                  via_exp_tvs = map hsLTyVarName via_exp_tv_bndrs
@@ -1745,7 +1743,7 @@ This should be rejected. Why? Because it would generate the following instance:
     instance Eq Quux where
       (==) = coerce @(Quux         -> Quux         -> Bool)
                     @(Const a Quux -> Const a Quux -> Bool)
-                    (==)
+                    (==) :: Const a Quux -> Const a Quux -> Bool
 
 This instance is ill-formed, as the `a` in `Const a Quux` is unbound. The
 problem is that `a` is never used anywhere in the derived class `Eq`. Since
@@ -2142,8 +2140,7 @@ extendPatSynEnv val_decls local_fix_env thing = do {
 *********************************************************
 -}
 
-rnFds :: [Located (FunDep (Located RdrName))]
-  -> RnM [Located (FunDep (Located Name))]
+rnFds :: [LHsFunDep GhcPs] -> RnM [LHsFunDep GhcRn]
 rnFds fds
   = mapM (wrapLocM rn_fds) fds
   where
@@ -2207,6 +2204,10 @@ add gp loc (SpliceD _ splice@(SpliceDecl _ _ flag)) ds
   where
     badImplicitSplice = text "Parse error: module header, import declaration"
                      $$ text "or top-level declaration expected."
+                     -- The compiler should suggest the above, and not using
+                     -- TemplateHaskell since the former suggestion is more
+                     -- relevant to the larger base of users.
+                     -- See Trac #12146 for discussion.
 
 -- Class declarations: pull out the fixity signatures to the top
 add gp@(HsGroup {hs_tyclds = ts, hs_fixds = fs}) l (TyClD _ d) ds

@@ -184,8 +184,9 @@ dsHsBind dflags (AbsBinds { abs_tvs = tyvars, abs_ev_vars = dicts
                           , abs_binds = binds, abs_sig = has_sig })
   = do { ds_binds <- addDictsDs (listToBag dicts) $
                      dsLHsBinds binds
-                                   -- addDictsDs: push type constraints deeper
-                                   --             for inner pattern match check
+                         -- addDictsDs: push type constraints deeper
+                         --             for inner pattern match check
+                         -- See Check, Note [Type and Term Equality Propagation]
 
        ; ds_ev_binds <- dsTcEvBinds_s ev_binds
 
@@ -1279,8 +1280,9 @@ ds_ev_typeable ty (EvTypeableTrFun ev1 ev2)
        }
 
 ds_ev_typeable ty (EvTypeableTyLit ev)
-  = do { fun  <- dsLookupGlobalId tr_fun
-       ; dict <- dsEvTerm ev       -- Of type KnownNat/KnownSym
+  = -- See Note [Typeable for Nat and Symbol] in TcInteract
+    do { fun  <- dsLookupGlobalId tr_fun
+       ; dict <- dsEvTerm ev       -- Of type KnownNat/KnownSymbol
        ; let proxy = mkTyApps (Var proxyHashId) [ty_kind, ty]
        ; return (mkApps (mkTyApps (Var fun) [ty]) [ dict, proxy ]) }
   where

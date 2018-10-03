@@ -41,6 +41,7 @@ import GHC.Lexeme       ( startsVarSym, startsVarId )
 import GHC.ForeignSrcLang.Type
 import Language.Haskell.TH.LanguageExtensions
 import Numeric.Natural
+import Prelude
 
 import qualified Control.Monad.Fail as Fail
 
@@ -473,7 +474,7 @@ addForeignFile = addForeignSource
 -- Note that for non-C languages (for example C++) @extern "C"@ directives
 -- must be used to get symbols that we can access from Haskell.
 --
--- To get better errors, it is reccomended to use #line pragmas when
+-- To get better errors, it is recommended to use #line pragmas when
 -- emitting C files, e.g.
 --
 -- > {-# LANGUAGE CPP #-}
@@ -494,7 +495,7 @@ addForeignSource lang src = do
   runIO $ writeFile path src
   addForeignFilePath lang path
 
--- | Same as 'addForeignSource', but expects to recieve a path pointing to the
+-- | Same as 'addForeignSource', but expects to receive a path pointing to the
 -- foreign file instead of a 'String' of its contents. Consider using this in
 -- conjunction with 'addTempFile'.
 --
@@ -1600,9 +1601,10 @@ data Exp
   | UnboxedSumE Exp SumAlt SumArity    -- ^ @{ (\#|e|\#) }@
   | CondE Exp Exp Exp                  -- ^ @{ if e1 then e2 else e3 }@
   | MultiIfE [(Guard, Exp)]            -- ^ @{ if | g1 -> e1 | g2 -> e2 }@
-  | LetE [Dec] Exp                     -- ^ @{ let x=e1;   y=e2 in e3 }@
+  | LetE [Dec] Exp                     -- ^ @{ let { x=e1; y=e2 } in e3 }@
   | CaseE Exp [Match]                  -- ^ @{ case e of m1; m2 }@
   | DoE [Stmt]                         -- ^ @{ do { p <- e1; e2 }  }@
+  | MDoE [Stmt]                        -- ^ @{ mdo { x <- e1 y; y <- e2 x; } }@
   | CompE [Stmt]                       -- ^ @{ [ (x,y) | x <- xs, y <- ys ] }@
       --
       -- The result expression of the comprehension is
@@ -1620,8 +1622,14 @@ data Exp
   | RecConE Name [FieldExp]            -- ^ @{ T { x = y, z = w } }@
   | RecUpdE Exp [FieldExp]             -- ^ @{ (f x) { z = w } }@
   | StaticE Exp                        -- ^ @{ static e }@
-  | UnboundVarE Name                   -- ^ @{ _x }@ (hole)
+  | UnboundVarE Name                   -- ^ @{ _x }@
+                                       --
+                                       -- This is used for holes or unresolved
+                                       -- identifiers in AST quotes. Note that
+                                       -- it could either have a variable name
+                                       -- or constructor name.
   | LabelE String                      -- ^ @{ #x }@ ( Overloaded label )
+  | ImplicitParamVarE String           -- ^ @{ ?x }@ ( Implicit parameter )
   deriving( Show, Eq, Ord, Data, Generic )
 
 type FieldExp = (Name,Exp)
@@ -1641,10 +1649,11 @@ data Guard
   deriving( Show, Eq, Ord, Data, Generic )
 
 data Stmt
-  = BindS Pat Exp
-  | LetS [ Dec ]
-  | NoBindS Exp
-  | ParS [[Stmt]]
+  = BindS Pat Exp -- ^ @p <- e@
+  | LetS [ Dec ]  -- ^ @{ let { x=e1; y=e2 } }@
+  | NoBindS Exp   -- ^ @e@
+  | ParS [[Stmt]] -- ^ @x <- e1 | s2, s3 | s4@ (in 'CompE')
+  | RecS [Stmt]   -- ^ @rec { s1; s2 }@
   deriving( Show, Eq, Ord, Data, Generic )
 
 data Range = FromR Exp | FromThenR Exp Exp
@@ -1723,6 +1732,12 @@ data Dec
       -- pattern synonyms are supported. See 'PatSynArgs' for details
 
   | PatSynSigD Name PatSynType  -- ^ A pattern synonym's type signature.
+
+  | ImplicitParamBindD String Exp
+      -- ^ @{ ?x = expr }@
+      --
+      -- Implicit parameter binding declaration. Can only be used in let
+      -- and where clauses which consist entirely of implicit bindings.
   deriving( Show, Eq, Ord, Data, Generic )
 
 -- | Varieties of allowed instance overlap.
@@ -2009,6 +2024,7 @@ data Type = ForallT [TyVarBndr] Cxt Type  -- ^ @forall \<vars\>. \<ctxt\> => \<t
           | ConstraintT                   -- ^ @Constraint@
           | LitT TyLit                    -- ^ @0,1,2, etc.@
           | WildCardT                     -- ^ @_@
+          | ImplicitParamT String Type    -- ^ @?x :: t@
       deriving( Show, Eq, Ord, Data, Generic )
 
 data TyVarBndr = PlainTV  Name            -- ^ @a@

@@ -535,7 +535,7 @@ performance.
 
 .. rts-flag:: -I ⟨seconds⟩
 
-    :default: 0.3 seconds
+    :default: 0.3 seconds in the threaded runtime, 0 in the non-threaded runtime
 
     .. index::
        single: idle GC
@@ -1219,6 +1219,7 @@ Getting information about the RTS
         ,("Word size", "64")
         ,("Compiler unregisterised", "NO")
         ,("Tables next to code", "YES")
+        ,("Flag -with-rtsopts", "")
         ]
 
     The information is formatted such that it can be read as a of type
@@ -1269,3 +1270,6 @@ Getting information about the RTS
         performance optimisation that is not available on all platforms.
         This field tells you whether the program has been compiled with this
         optimisation. (Usually yes, except on unusual platforms.)
+
+    ``Flag -with-rtsopts``
+        The value of the GHC flag :ghc-flag:`-with-rtsopts=⟨opts⟩` at compile/link time.

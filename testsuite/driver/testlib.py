@@ -3,13 +3,9 @@
 # (c) Simon Marlow 2002
 #
 
-from __future__ import print_function
-
 import io
 import shutil
 import os
-import errno
-import string
 import re
 import traceback
 import time
@@ -18,32 +14,29 @@ import copy
 import glob
 import sys
 from math import ceil, trunc
+from pathlib import PurePath
 import collections
 import subprocess
 
-from testglobals import *
-from testutil import *
+from testglobals import config, ghc_env, default_testopts, brokens, t
+from testutil import strip_quotes, lndir, link_or_copy_file
 extra_src_files = {'T4198': ['exitminus1.c']} # TODO: See #12223
 
+global pool_sema
 if config.use_threads:
     import threading
-    try:
-        import thread
-    except ImportError: # Python 3
-        import _thread as thread
+    pool_sema = threading.BoundedSemaphore(value=config.threads)
 
 global wantToStop
 wantToStop = False
 
-global pool_sema
-if config.use_threads:
-    pool_sema = threading.BoundedSemaphore(value=config.threads)
-
 def stopNow():
     global wantToStop
     wantToStop = True
+
 def stopping():
     return wantToStop
+
 
 # Options valid for the current test only (these get reset to
 # testdir_testopts after each test).
@@ -91,7 +84,7 @@ def normal( name, opts ):
     return;
 
 def skip( name, opts ):
-    opts.skip = 1
+    opts.skip = True
 
 def expect_fail( name, opts ):
     # The compiler, testdriver, OS or platform is missing a certain
@@ -210,7 +203,6 @@ def _expect_broken_for( name, opts, bug, ways ):
     opts.expect_fail_for = ways
 
 def record_broken(name, opts, bug):
-    global brokens
     me = (bug, opts.testdir, name)
     if not me in brokens:
         brokens.append(me)
@@ -431,19 +423,19 @@ def multi_cpu_race(name, opts):
 
 # ---
 def literate( name, opts ):
-    opts.literate = 1;
+    opts.literate = True
 
 def c_src( name, opts ):
-    opts.c_src = 1;
+    opts.c_src = True
 
 def objc_src( name, opts ):
-    opts.objc_src = 1;
+    opts.objc_src = True
 
 def objcpp_src( name, opts ):
-    opts.objcpp_src = 1;
+    opts.objcpp_src = True
 
 def cmm_src( name, opts ):
-    opts.cmm_src = 1;
+    opts.cmm_src = True
 
 def outputdir( odir ):
     return lambda name, opts, d=odir: _outputdir(name, opts, d)
@@ -458,12 +450,6 @@ def pre_cmd( cmd ):
 
 def _pre_cmd( name, opts, cmd ):
     opts.pre_cmd = cmd
-
-# ----
-
-def clean_cmd( cmd ):
-    # TODO. Remove all calls to clean_cmd.
-    return lambda _name, _opts: None
 
 # ----
 
@@ -504,7 +490,6 @@ def no_check_hp(name, opts):
 
 def filter_stdout_lines( regex ):
     """ Filter lines of stdout with the given regular expression """
-    import re
     def f( name, opts ):
         _normalise_fun(name, opts, lambda s: '\n'.join(re.findall(regex, s)))
     return f
@@ -627,8 +612,9 @@ def newTestDir(tempdir, dir):
 testdir_suffix = '.run'
 
 def _newTestDir(name, opts, tempdir, dir):
+    testdir = os.path.join('', *(p for p in PurePath(dir).parts if p != '..'))
     opts.srcdir = os.path.join(os.getcwd(), dir)
-    opts.testdir = os.path.join(tempdir, dir, name + testdir_suffix)
+    opts.testdir = os.path.join(tempdir, testdir, name + testdir_suffix)
     opts.compiler_always_flags = config.compiler_always_flags
 
 # -----------------------------------------------------------------------------
@@ -970,8 +956,9 @@ def ghci_script( name, way, script):
 
     # We pass HC and HC_OPTS as environment variables, so that the
     # script can invoke the correct compiler by using ':! $HC $HC_OPTS'
-    cmd = ('HC={{compiler}} HC_OPTS="{flags}" {{compiler}} {flags} {way_flags}'
+    cmd = ('HC={{compiler}} HC_OPTS="{flags}" {{compiler}} {way_flags} {flags}'
           ).format(flags=flags, way_flags=way_flags)
+      # NB: put way_flags before flags so that flags in all.T can overrie others
 
     getTestOpts().stdin = script
     return simple_run( name, way, cmd, getTestOpts().extra_run_opts )
@@ -986,19 +973,19 @@ def compile_fail( name, way, extra_hc_opts ):
     return do_compile( name, way, 1, '', [], extra_hc_opts )
 
 def backpack_typecheck( name, way, extra_hc_opts ):
-    return do_compile( name, way, 0, '', [], "-fno-code -fwrite-interface " + extra_hc_opts, backpack=1 )
+    return do_compile( name, way, 0, '', [], "-fno-code -fwrite-interface " + extra_hc_opts, backpack=True )
 
 def backpack_typecheck_fail( name, way, extra_hc_opts ):
-    return do_compile( name, way, 1, '', [], "-fno-code -fwrite-interface " + extra_hc_opts, backpack=1 )
+    return do_compile( name, way, 1, '', [], "-fno-code -fwrite-interface " + extra_hc_opts, backpack=True )
 
 def backpack_compile( name, way, extra_hc_opts ):
-    return do_compile( name, way, 0, '', [], extra_hc_opts, backpack=1 )
+    return do_compile( name, way, 0, '', [], extra_hc_opts, backpack=True )
 
 def backpack_compile_fail( name, way, extra_hc_opts ):
-    return do_compile( name, way, 1, '', [], extra_hc_opts, backpack=1 )
+    return do_compile( name, way, 1, '', [], extra_hc_opts, backpack=True )
 
 def backpack_run( name, way, extra_hc_opts ):
-    return compile_and_run__( name, way, '', [], extra_hc_opts, backpack=1 )
+    return compile_and_run__( name, way, '', [], extra_hc_opts, backpack=True )
 
 def multimod_compile( name, way, top_mod, extra_hc_opts ):
     return do_compile( name, way, 0, top_mod, [], extra_hc_opts )
@@ -1228,7 +1215,7 @@ def simple_build(name, way, extra_hc_opts, should_fail, top_mod, link, addsuf, b
         if config.verbose >= 1 and _expect_pass(way):
             print('Compile failed (exit code {0}) errors were:'.format(exit_code))
             actual_stderr_path = in_testdir(name, 'comp.stderr')
-            if_verbose_dump(1, actual_stderr_path)
+            dump_file(actual_stderr_path)
 
     # ToDo: if the sub-shell was killed by ^C, then exit
 
@@ -1575,7 +1562,7 @@ def compare_outputs(way, kind, normaliser, expected_file, actual_file,
 
     # See Note [Output comparison].
     if whitespace_normaliser(expected_str) == whitespace_normaliser(actual_str):
-        return 1
+        return True
     else:
         if config.verbose >= 1 and _expect_pass(way):
             print('Actual ' + kind + ' output differs from expected:')
@@ -1590,19 +1577,19 @@ def compare_outputs(way, kind, normaliser, expected_file, actual_file,
             # See Note [Output comparison].
             r = runCmd('diff -uw "{0}" "{1}"'.format(expected_normalised_path,
                                                         actual_normalised_path),
-                        print_output = 1)
+                        print_output=True)
 
             # If for some reason there were no non-whitespace differences,
             # then do a full diff
             if r == 0:
                 r = runCmd('diff -u "{0}" "{1}"'.format(expected_normalised_path,
                                                            actual_normalised_path),
-                           print_output = 1)
+                           print_output=True)
 
         if config.accept and (getTestOpts().expect == 'fail' or
                               way in getTestOpts().expect_fail_for):
             if_verbose(1, 'Test is expected to fail. Not accepting new output.')
-            return 0
+            return False
         elif config.accept and actual_raw:
             if config.accept_platform:
                 if_verbose(1, 'Accepting new output for platform "'
@@ -1616,13 +1603,13 @@ def compare_outputs(way, kind, normaliser, expected_file, actual_file,
                 if_verbose(1, 'Accepting new output.')
 
             write_file(expected_path, actual_raw)
-            return 1
+            return True
         elif config.accept:
             if_verbose(1, 'No output. Deleting "{0}".'.format(expected_path))
             os.remove(expected_path)
-            return 1
+            return True
         else:
-            return 0
+            return False
 
 # Note [Output comparison]
 #
@@ -1642,7 +1629,7 @@ def compare_outputs(way, kind, normaliser, expected_file, actual_file,
 
 def normalise_whitespace( str ):
     # Merge contiguous whitespace characters into a single space.
-    return ' '.join(w for w in str.split())
+    return ' '.join(str.split())
 
 callSite_re = re.compile(r', called at (.+):[\d]+:[\d]+ in [\w\-\.]+:')
 
@@ -1806,24 +1793,20 @@ def if_verbose( n, s ):
     if config.verbose >= n:
         print(s)
 
-def if_verbose_dump( n, f ):
-    if config.verbose >= n:
-        try:
-            with io.open(f) as file:
-                print(file.read())
-        except Exception:
-            print('')
+def dump_file(f):
+    try:
+        with io.open(f) as file:
+            print(file.read())
+    except Exception:
+        print('')
 
-def runCmd(cmd, stdin=None, stdout=None, stderr=None, timeout_multiplier=1.0, print_output=0):
+def runCmd(cmd, stdin=None, stdout=None, stderr=None, timeout_multiplier=1.0, print_output=False):
     timeout_prog = strip_quotes(config.timeout_prog)
     timeout = str(int(ceil(config.timeout * timeout_multiplier)))
 
     # Format cmd using config. Example: cmd='{hpc} report A.tix'
     cmd = cmd.format(**config.__dict__)
     if_verbose(3, cmd + ('< ' + os.path.basename(stdin) if stdin else ''))
-
-    # declare the buffers to a default
-    stdin_buffer  = None
 
     stdin_file = io.open(stdin, 'rb') if stdin else None
     stdout_buffer = b''
@@ -1849,7 +1832,7 @@ def runCmd(cmd, stdin=None, stdout=None, stderr=None, timeout_multiplier=1.0, pr
     finally:
         if stdin_file:
             stdin_file.close()
-        if config.verbose >= 1 and print_output >= 1:
+        if config.verbose >= 1 and print_output:
             if stdout_buffer:
                 sys.stdout.buffer.write(stdout_buffer)
             if stderr_buffer:
@@ -1882,7 +1865,7 @@ def gsNotWorking():
     print("GhostScript not available for hp2ps tests")
 
 global gs_working
-gs_working = 0
+gs_working = False
 if config.have_profiling:
   if config.gs != '':
     resultGood = runCmd(genGSCmd(config.confdir + '/good.ps'));
@@ -1891,7 +1874,7 @@ if config.have_profiling:
                                    ' >/dev/null 2>&1')
         if resultBad != 0:
             print("GhostScript available for hp2ps tests")
-            gs_working = 1;
+            gs_working = True
         else:
             gsNotWorking();
     else:
@@ -1948,7 +1931,6 @@ def find_expected_file(name, suff):
 
 if config.msys:
     import stat
-    import time
     def cleanup():
         testdir = getTestOpts().testdir
         max_attempts = 5

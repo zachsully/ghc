@@ -29,7 +29,7 @@ module StgCmmMonad (
 
         mkCall, mkCmmCall,
 
-        forkClosureBody, forkLneBody, forkAlts, codeOnly,
+        forkClosureBody, forkLneBody, forkAlts, forkAltPair, codeOnly,
 
         ConTagZ,
 
@@ -632,9 +632,18 @@ forkAlts branch_fcodes
                                       , cgs_hp_usg = cgs_hp_usg state }
               (_us, results) = mapAccumL compile us branch_fcodes
               (branch_results, branch_out_states) = unzip results
-        ; setState $ foldl stateIncUsage state branch_out_states
+        ; setState $ foldl' stateIncUsage state branch_out_states
                 -- NB foldl.  state is the *left* argument to stateIncUsage
         ; return branch_results }
+
+forkAltPair :: FCode a -> FCode a -> FCode (a,a)
+-- Most common use of 'forkAlts'; having this helper function avoids
+-- accidental use of failible pattern-matches in @do@-notation
+forkAltPair x y = do
+  xy' <- forkAlts [x,y]
+  case xy' of
+    [x',y'] -> return (x',y')
+    _ -> panic "forkAltPair"
 
 -- collect the code emitted by an FCode computation
 getCodeR :: FCode a -> FCode (a, CmmAGraph)

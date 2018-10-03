@@ -47,17 +47,11 @@ module CoreMonad (
     putMsg, putMsgS, errorMsg, errorMsgS, warnMsg,
     fatalErrorMsg, fatalErrorMsgS,
     debugTraceMsg, debugTraceMsgS,
-    dumpIfSet_dyn,
-
-    -- * Getting 'Name's
-    thNameToGhcName
+    dumpIfSet_dyn
   ) where
 
 import GhcPrelude hiding ( read )
 
-import Convert
-import RdrName
-import Name
 import CoreSyn
 import HscTypes
 import Module
@@ -67,7 +61,6 @@ import Annotations
 
 import IOEnv hiding     ( liftIO, failM, failWithM )
 import qualified IOEnv  ( liftIO )
-import TcEnv            ( lookupGlobal )
 import Var
 import Outputable
 import FastString
@@ -82,15 +75,12 @@ import Data.List
 import Data.Ord
 import Data.Dynamic
 import Data.IORef
-import Data.Maybe
 import Data.Map (Map)
 import qualified Data.Map as Map
 import qualified Data.Map.Strict as MapStrict
 import Data.Word
 import Control.Monad
 import Control.Applicative ( Alternative(..) )
-
-import qualified Language.Haskell.TH as TH
 
 {-
 ************************************************************************
@@ -343,6 +333,79 @@ pprSimplCount (SimplCount { ticks = tks, details = dts, log1 = l1, log2 = l2 })
           else Outputable.empty
     ]
 
+{- Note [Which transformations are innocuous]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+At one point (Jun 18) I wondered if some transformations (ticks)
+might be  "innocuous", in the sense that they do not unlock a later
+transformation that does not occur in the same pass.  If so, we could
+refrain from bumping the overall tick-count for such innocuous
+transformations, and perhaps terminate the simplifier one pass
+earlier.
+
+BUt alas I found that virtually nothing was innocuous!  This Note
+just records what I learned, in case anyone wants to try again.
+
+These transformations are not innocuous:
+
+*** NB: I think these ones could be made innocuous
+          EtaExpansion
+          LetFloatFromLet
+
+LetFloatFromLet
+    x = K (let z = e2 in Just z)
+  prepareRhs transforms to
+    x2 = let z=e2 in Just z
+    x  = K xs
+  And now more let-floating can happen in the
+  next pass, on x2
+
+PreInlineUnconditionally
+  Example in spectral/cichelli/Auxil
+     hinsert = ...let lo = e in
+                  let j = ...lo... in
+                  case x of
+                    False -> ()
+                    True -> case lo of I# lo' ->
+                              ...j...
+  When we PreInlineUnconditionally j, lo's occ-info changes to once,
+  so it can be PreInlineUnconditionally in the next pass, and a
+  cascade of further things can happen.
+
+PostInlineUnconditionally
+  let x = e in
+  let y = ...x.. in
+  case .. of { A -> ...x...y...
+               B -> ...x...y... }
+  Current postinlineUnconditinaly will inline y, and then x; sigh.
+
+  But PostInlineUnconditionally might also unlock subsequent
+  transformations for the same reason as PreInlineUnconditionally,
+  so it's probably not innocuous anyway.
+
+KnownBranch, BetaReduction:
+  May drop chunks of code, and thereby enable PreInlineUnconditionally
+  for some let-binding which now occurs once
+
+EtaExpansion:
+  Example in imaginary/digits-of-e1
+    fail = \void. e          where e :: IO ()
+  --> etaExpandRhs
+    fail = \void. (\s. (e |> g) s) |> sym g      where g :: IO () ~ S -> (S,())
+  --> Next iteration of simplify
+    fail1 = \void. \s. (e |> g) s
+    fail = fail1 |> Void#->sym g
+  And now inline 'fail'
+
+CaseMerge:
+  case x of y {
+    DEFAULT -> case y of z { pi -> ei }
+    alts2 }
+  ---> CaseMerge
+    case x of { pi -> let z = y in ei
+              ; alts2 }
+  The "let z=y" case-binder-swap gets dealt with in the next pass
+-}
+
 pprTickCounts :: Map Tick Int -> SDoc
 pprTickCounts counts
   = vcat (map pprTickGroup groups)
@@ -360,7 +423,7 @@ pprTickGroup group@((tick1,_):_)
                | (tick,n) <- sortBy (flip (comparing snd)) group])
 pprTickGroup [] = panic "pprTickGroup"
 
-data Tick
+data Tick  -- See Note [Which transformations are innocuous]
   = PreInlineUnconditionally    Id
   | PostInlineUnconditionally   Id
 
@@ -381,7 +444,6 @@ data Tick
   | CaseIdentity                Id      -- Case binder
   | FillInCaseDefault           Id      -- Case binder
 
-  | BottomFound
   | SimplifierDone              -- Ticked at each iteration of the simplifier
 
 instance Outputable Tick where
@@ -410,7 +472,6 @@ tickToTag (CaseMerge _)                 = 10
 tickToTag (CaseElim _)                  = 11
 tickToTag (CaseIdentity _)              = 12
 tickToTag (FillInCaseDefault _)         = 13
-tickToTag BottomFound                   = 14
 tickToTag SimplifierDone                = 16
 tickToTag (AltMerge _)                  = 17
 
@@ -430,7 +491,6 @@ tickString (AltMerge _)                 = "AltMerge"
 tickString (CaseElim _)                 = "CaseElim"
 tickString (CaseIdentity _)             = "CaseIdentity"
 tickString (FillInCaseDefault _)        = "FillInCaseDefault"
-tickString BottomFound                  = "BottomFound"
 tickString SimplifierDone               = "SimplifierDone"
 
 pprTickCts :: Tick -> SDoc
@@ -782,45 +842,3 @@ dumpIfSet_dyn flag str doc
        ; unqual <- getPrintUnqualified
        ; when (dopt flag dflags) $ liftIO $
          Err.dumpSDoc dflags unqual flag str doc }
-
-{-
-************************************************************************
-*                                                                      *
-               Finding TyThings
-*                                                                      *
-************************************************************************
--}
-
-instance MonadThings CoreM where
-    lookupThing name = do { hsc_env <- getHscEnv
-                          ; liftIO $ lookupGlobal hsc_env name }
-
-{-
-************************************************************************
-*                                                                      *
-               Template Haskell interoperability
-*                                                                      *
-************************************************************************
--}
-
--- | Attempt to convert a Template Haskell name to one that GHC can
--- understand. Original TH names such as those you get when you use
--- the @'foo@ syntax will be translated to their equivalent GHC name
--- exactly. Qualified or unqualified TH names will be dynamically bound
--- to names in the module being compiled, if possible. Exact TH names
--- will be bound to the name they represent, exactly.
-thNameToGhcName :: TH.Name -> CoreM (Maybe Name)
-thNameToGhcName th_name
-  =  do { names <- mapMaybeM lookup (thRdrNameGuesses th_name)
-          -- Pick the first that works
-          -- E.g. reify (mkName "A") will pick the class A in preference
-          -- to the data constructor A
-        ; return (listToMaybe names) }
-  where
-    lookup rdr_name
-      | Just n <- isExact_maybe rdr_name   -- This happens in derived code
-      = return $ if isExternalName n then Just n else Nothing
-      | Just (rdr_mod, rdr_occ) <- isOrig_maybe rdr_name
-      = do { cache <- getOrigNameCache
-           ; return $ lookupOrigNameCache cache rdr_mod rdr_occ }
-      | otherwise = return Nothing

@@ -16,7 +16,7 @@ module TcEvidence (
   lookupEvBind, evBindMapBinds, foldEvBindMap, filterEvBindMap,
   isEmptyEvBindMap,
   EvBind(..), emptyTcEvBinds, isEmptyTcEvBinds, mkGivenEvBind, mkWantedEvBind,
-  evBindVar, isNoEvBindsVar,
+  evBindVar, isCoEvBindsVar,
 
   -- EvTerm (already a CoreExpr)
   EvTerm(..), EvExpr,
@@ -35,7 +35,9 @@ module TcEvidence (
   mkTcAxInstCo, mkTcUnbranchedAxInstCo, mkTcForAllCo, mkTcForAllCos,
   mkTcSymCo, mkTcTransCo, mkTcNthCo, mkTcLRCo, mkTcSubCo, maybeTcSubCo,
   tcDowngradeRole,
-  mkTcAxiomRuleCo, mkTcCoherenceLeftCo, mkTcCoherenceRightCo, mkTcPhantomCo,
+  mkTcAxiomRuleCo, mkTcGReflRightCo, mkTcGReflLeftCo, mkTcPhantomCo,
+  mkTcCoherenceLeftCo,
+  mkTcCoherenceRightCo,
   mkTcKindCo,
   tcCoercionKind, coVarsOfTcCo,
   mkTcCoVarCo,
@@ -115,8 +117,12 @@ mkTcSubCo              :: TcCoercionN -> TcCoercionR
 maybeTcSubCo           :: EqRel -> TcCoercion -> TcCoercion
 tcDowngradeRole        :: Role -> Role -> TcCoercion -> TcCoercion
 mkTcAxiomRuleCo        :: CoAxiomRule -> [TcCoercion] -> TcCoercionR
-mkTcCoherenceLeftCo    :: TcCoercion -> TcCoercionN -> TcCoercion
-mkTcCoherenceRightCo   :: TcCoercion -> TcCoercionN -> TcCoercion
+mkTcGReflRightCo       :: Role -> TcType -> TcCoercionN -> TcCoercion
+mkTcGReflLeftCo        :: Role -> TcType -> TcCoercionN -> TcCoercion
+mkTcCoherenceLeftCo    :: Role -> TcType -> TcCoercionN
+                       -> TcCoercion -> TcCoercion
+mkTcCoherenceRightCo   :: Role -> TcType -> TcCoercionN
+                       -> TcCoercion -> TcCoercion
 mkTcPhantomCo          :: TcCoercionN -> TcType -> TcType -> TcCoercionP
 mkTcKindCo             :: TcCoercion -> TcCoercionN
 mkTcCoVarCo            :: CoVar -> TcCoercion
@@ -148,6 +154,8 @@ mkTcSubCo              = mkSubCo
 maybeTcSubCo           = maybeSubCo
 tcDowngradeRole        = downgradeRole
 mkTcAxiomRuleCo        = mkAxiomRuleCo
+mkTcGReflRightCo       = mkGReflRightCo
+mkTcGReflLeftCo        = mkGReflLeftCo
 mkTcCoherenceLeftCo    = mkCoherenceLeftCo
 mkTcCoherenceRightCo   = mkCoherenceRightCo
 mkTcPhantomCo          = mkPhantomCo
@@ -356,7 +364,7 @@ collectHsWrapBinders wrap = go wrap []
     go (WpEvLam v)       wraps = add_lam v (gos wraps)
     go (WpTyLam v)       wraps = add_lam v (gos wraps)
     go (WpCompose w1 w2) wraps = go w1 (w2:wraps)
-    go wrap              wraps = ([], foldl (<.>) wrap wraps)
+    go wrap              wraps = ([], foldl' (<.>) wrap wraps)
 
     gos []     = ([], WpHole)
     gos (w:ws) = go w ws
@@ -400,7 +408,7 @@ data EvBindsVar
       -- See Note [Tracking redundant constraints] in TcSimplify
     }
 
-  | NoEvBindsVar {  -- See Note [No evidence bindings]
+  | CoEvBindsVar {  -- See Note [Coercion evidence only]
 
       -- See above for comments on ebv_uniq, evb_tcvs
       ebv_uniq :: Unique,
@@ -413,11 +421,11 @@ instance Data.Data TcEvBinds where
   gunfold _ _  = error "gunfold"
   dataTypeOf _ = Data.mkNoRepType "TcEvBinds"
 
-{- Note [No evidence bindings]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+{- Note [Coercion evidence only]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Class constraints etc give rise to /term/ bindings for evidence, and
 we have nowhere to put term bindings in /types/.  So in some places we
-use NoEvBindsVar (see newNoTcEvBinds) to signal that no term-level
+use CoEvBindsVar (see newCoTcEvBinds) to signal that no term-level
 evidence bindings are allowed.  Notebly ():
 
   - Places in types where we are solving kind constraints (all of which
@@ -427,9 +435,9 @@ evidence bindings are allowed.  Notebly ():
   - When unifying forall-types
 -}
 
-isNoEvBindsVar :: EvBindsVar -> Bool
-isNoEvBindsVar (NoEvBindsVar {}) = True
-isNoEvBindsVar (EvBindsVar {})   = False
+isCoEvBindsVar :: EvBindsVar -> Bool
+isCoEvBindsVar (CoEvBindsVar {}) = True
+isCoEvBindsVar (EvBindsVar {})   = False
 
 -----------------
 newtype EvBindMap
@@ -920,8 +928,8 @@ instance Outputable TcEvBinds where
 instance Outputable EvBindsVar where
   ppr (EvBindsVar { ebv_uniq = u })
      = text "EvBindsVar" <> angleBrackets (ppr u)
-  ppr (NoEvBindsVar { ebv_uniq = u })
-     = text "NoEvBindsVar" <> angleBrackets (ppr u)
+  ppr (CoEvBindsVar { ebv_uniq = u })
+     = text "CoEvBindsVar" <> angleBrackets (ppr u)
 
 instance Uniquable EvBindsVar where
   getUnique = ebv_uniq

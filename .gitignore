@@ -204,3 +204,14 @@ GIT_COMMIT_ID
 
 # Should be equal to testdir_suffix from testsuite/driver/testlib.py.
 *.run
+
+# -----------------------------------------------------------------------------
+# Output of ghc-in-ghci
+
+/.ghci-objects/
+
+# -----------------------------------------------------------------------------
+# ghc.nix
+ghc.nix/
+
+

@@ -393,7 +393,7 @@ basicKnownKeyNames
 
         -- The Ordering type
         , orderingTyConName
-        , ltDataConName, eqDataConName, gtDataConName
+        , ordLTDataConName, ordEQDataConName, ordGTDataConName
 
         -- The SPEC type for SpecConstr
         , specTyConName
@@ -432,9 +432,6 @@ basicKnownKeyNames
         , typeErrorAppendDataConName
         , typeErrorVAppendDataConName
         , typeErrorShowTypeDataConName
-
-        -- homogeneous equality
-        , eqTyConName
 
     ] ++ case cIntegerLibraryType of
            IntegerGMP    -> [integerSDataConName,naturalSDataConName]
@@ -633,9 +630,9 @@ le_RDR                  = varQual_RDR  gHC_CLASSES (fsLit "<=")
 lt_RDR                  = varQual_RDR  gHC_CLASSES (fsLit "<")
 gt_RDR                  = varQual_RDR  gHC_CLASSES (fsLit ">")
 compare_RDR             = varQual_RDR  gHC_CLASSES (fsLit "compare")
-ltTag_RDR               = dataQual_RDR gHC_TYPES (fsLit "LT")
-eqTag_RDR               = dataQual_RDR gHC_TYPES (fsLit "EQ")
-gtTag_RDR               = dataQual_RDR gHC_TYPES (fsLit "GT")
+ltTag_RDR               = nameRdrName  ordLTDataConName
+eqTag_RDR               = nameRdrName  ordEQDataConName
+gtTag_RDR               = nameRdrName  ordGTDataConName
 
 eqClass_RDR, numClass_RDR, ordClass_RDR, enumClass_RDR, monadClass_RDR
     :: RdrName
@@ -646,10 +643,11 @@ enumClass_RDR           = nameRdrName enumClassName
 monadClass_RDR          = nameRdrName monadClassName
 
 map_RDR, append_RDR :: RdrName
-map_RDR                 = varQual_RDR gHC_BASE (fsLit "map")
-append_RDR              = varQual_RDR gHC_BASE (fsLit "++")
+map_RDR                 = nameRdrName mapName
+append_RDR              = nameRdrName appendName
 
-foldr_RDR, build_RDR, returnM_RDR, bindM_RDR, failM_RDR_preMFP, failM_RDR:: RdrName
+foldr_RDR, build_RDR, returnM_RDR, bindM_RDR, failM_RDR_preMFP,
+  failM_RDR :: RdrName
 foldr_RDR               = nameRdrName foldrName
 build_RDR               = nameRdrName buildName
 returnM_RDR             = nameRdrName returnMName
@@ -825,9 +823,9 @@ conIsRecord_RDR   = varQual_RDR gHC_GENERICS (fsLit "conIsRecord")
 
 prefixDataCon_RDR     = dataQual_RDR gHC_GENERICS (fsLit "Prefix")
 infixDataCon_RDR      = dataQual_RDR gHC_GENERICS (fsLit "Infix")
-leftAssocDataCon_RDR  = dataQual_RDR gHC_GENERICS (fsLit "LeftAssociative")
-rightAssocDataCon_RDR = dataQual_RDR gHC_GENERICS (fsLit "RightAssociative")
-notAssocDataCon_RDR   = dataQual_RDR gHC_GENERICS (fsLit "NotAssociative")
+leftAssocDataCon_RDR  = nameRdrName leftAssociativeDataConName
+rightAssocDataCon_RDR = nameRdrName rightAssociativeDataConName
+notAssocDataCon_RDR   = nameRdrName notAssociativeDataConName
 
 uAddrDataCon_RDR   = dataQual_RDR gHC_GENERICS (fsLit "UAddr")
 uCharDataCon_RDR   = dataQual_RDR gHC_GENERICS (fsLit "UChar")
@@ -846,7 +844,7 @@ uWordHash_RDR   = varQual_RDR gHC_GENERICS (fsLit "uWord#")
 fmap_RDR, replace_RDR, pure_RDR, ap_RDR, liftA2_RDR, foldable_foldr_RDR,
     foldMap_RDR, null_RDR, all_RDR, traverse_RDR, mempty_RDR,
     mappend_RDR :: RdrName
-fmap_RDR                = varQual_RDR gHC_BASE (fsLit "fmap")
+fmap_RDR                = nameRdrName fmapName
 replace_RDR             = varQual_RDR gHC_BASE (fsLit "<$")
 pure_RDR                = nameRdrName pureAName
 ap_RDR                  = nameRdrName apAName
@@ -856,11 +854,8 @@ foldMap_RDR             = varQual_RDR dATA_FOLDABLE       (fsLit "foldMap")
 null_RDR                = varQual_RDR dATA_FOLDABLE       (fsLit "null")
 all_RDR                 = varQual_RDR dATA_FOLDABLE       (fsLit "all")
 traverse_RDR            = varQual_RDR dATA_TRAVERSABLE    (fsLit "traverse")
-mempty_RDR              = varQual_RDR gHC_BASE            (fsLit "mempty")
-mappend_RDR             = varQual_RDR gHC_BASE            (fsLit "mappend")
-
-eqTyCon_RDR :: RdrName
-eqTyCon_RDR = tcQual_RDR dATA_TYPE_EQUALITY (fsLit "~")
+mempty_RDR              = nameRdrName memptyName
+mappend_RDR             = nameRdrName mappendName
 
 ----------------------
 varQual_RDR, tcQual_RDR, clsQual_RDR, dataQual_RDR
@@ -889,11 +884,11 @@ runMainIOName, runRWName :: Name
 runMainIOName = varQual gHC_TOP_HANDLER (fsLit "runMainIO") runMainKey
 runRWName     = varQual gHC_MAGIC       (fsLit "runRW#")    runRWKey
 
-orderingTyConName, ltDataConName, eqDataConName, gtDataConName :: Name
+orderingTyConName, ordLTDataConName, ordEQDataConName, ordGTDataConName :: Name
 orderingTyConName = tcQual  gHC_TYPES (fsLit "Ordering") orderingTyConKey
-ltDataConName     = dcQual gHC_TYPES (fsLit "LT") ltDataConKey
-eqDataConName     = dcQual gHC_TYPES (fsLit "EQ") eqDataConKey
-gtDataConName     = dcQual gHC_TYPES (fsLit "GT") gtDataConKey
+ordLTDataConName     = dcQual gHC_TYPES (fsLit "LT") ordLTDataConKey
+ordEQDataConName     = dcQual gHC_TYPES (fsLit "EQ") ordEQDataConKey
+ordGTDataConName     = dcQual gHC_TYPES (fsLit "GT") ordGTDataConKey
 
 specTyConName :: Name
 specTyConName     = tcQual gHC_TYPES (fsLit "SPEC") specTyConKey
@@ -1531,10 +1526,6 @@ fingerprintDataConName :: Name
 fingerprintDataConName =
     dcQual gHC_FINGERPRINT_TYPE (fsLit "Fingerprint") fingerprintDataConKey
 
--- homogeneous equality. See Note [The equality types story] in TysPrim
-eqTyConName :: Name
-eqTyConName        = tcQual dATA_TYPE_EQUALITY (fsLit "~")         eqTyConKey
-
 {-
 ************************************************************************
 *                                                                      *
@@ -1917,7 +1908,7 @@ charDataConKey, consDataConKey, doubleDataConKey, falseDataConKey,
     floatDataConKey, intDataConKey, integerSDataConKey, nilDataConKey,
     ratioDataConKey, stableNameDataConKey, trueDataConKey, wordDataConKey,
     word8DataConKey, ioDataConKey, integerDataConKey, heqDataConKey,
-    coercibleDataConKey, nothingDataConKey, justDataConKey :: Unique
+    coercibleDataConKey, eqDataConKey, nothingDataConKey, justDataConKey :: Unique
 
 charDataConKey                          = mkPreludeDataConUnique  1
 consDataConKey                          = mkPreludeDataConUnique  2
@@ -1928,6 +1919,7 @@ intDataConKey                           = mkPreludeDataConUnique  6
 integerSDataConKey                      = mkPreludeDataConUnique  7
 nothingDataConKey                       = mkPreludeDataConUnique  8
 justDataConKey                          = mkPreludeDataConUnique  9
+eqDataConKey                            = mkPreludeDataConUnique 10
 nilDataConKey                           = mkPreludeDataConUnique 11
 ratioDataConKey                         = mkPreludeDataConUnique 12
 word8DataConKey                         = mkPreludeDataConUnique 13
@@ -1949,10 +1941,11 @@ leftDataConKey, rightDataConKey :: Unique
 leftDataConKey                          = mkPreludeDataConUnique 25
 rightDataConKey                         = mkPreludeDataConUnique 26
 
-ltDataConKey, eqDataConKey, gtDataConKey :: Unique
-ltDataConKey                            = mkPreludeDataConUnique 27
-eqDataConKey                            = mkPreludeDataConUnique 28
-gtDataConKey                            = mkPreludeDataConUnique 29
+ordLTDataConKey, ordEQDataConKey, ordGTDataConKey :: Unique
+ordLTDataConKey                         = mkPreludeDataConUnique 27
+ordEQDataConKey                         = mkPreludeDataConUnique 28
+ordGTDataConKey                         = mkPreludeDataConUnique 29
+
 
 coercibleDataConKey                     = mkPreludeDataConUnique 32
 
@@ -2377,12 +2370,14 @@ starArrStarArrStarKindRepKey = mkPreludeMiscIdUnique 522
 
 -- Dynamic
 toDynIdKey :: Unique
-toDynIdKey            = mkPreludeMiscIdUnique 550
+toDynIdKey            = mkPreludeMiscIdUnique 523
+
 
 bitIntegerIdKey :: Unique
-bitIntegerIdKey       = mkPreludeMiscIdUnique 551
+bitIntegerIdKey       = mkPreludeMiscIdUnique 550
 
-heqSCSelIdKey, coercibleSCSelIdKey :: Unique
+heqSCSelIdKey, eqSCSelIdKey, coercibleSCSelIdKey :: Unique
+eqSCSelIdKey        = mkPreludeMiscIdUnique 551
 heqSCSelIdKey       = mkPreludeMiscIdUnique 552
 coercibleSCSelIdKey = mkPreludeMiscIdUnique 553
 

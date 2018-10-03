@@ -3,6 +3,12 @@
 ## 4.12.0.0 *TBA*
   * Bundled with GHC *TBA*
 
+  * Support the characters from recent versions of Unicode (up to v. 12) in
+    literals (#5518).
+
+## 4.12.0.0 *TBA*
+  * Bundled with GHC *TBA*
+
   * The STM invariant-checking mechanism (`always` and `alwaysSucceeds`), which
     was deprecated in GHC 8.4, has been removed (as proposed in
     <https://github.com/ghc-proposals/ghc-proposals/blob/master/proposals/0011-deprecate-stm-invariants.rst>).
@@ -36,6 +42,11 @@
   * `Data.Monoid.Ap` has been introduced
 
   * `Control.Exception.throw` is now levity polymorphic. (#15180)
+
+  * `Data.Ord.Down` now has a number of new instances. These include:
+    `MonadFix`, `MonadZip`, `Data`, `Foldable`, `Traversable`, `Eq1`, `Ord1`,
+    `Read1`, `Show1`, `Generic`, `Generic1`. (#15098)
+
 
 ## 4.11.1.0 *TBA*
   * Bundled with GHC 8.4.2

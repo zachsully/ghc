@@ -96,7 +96,7 @@ dsIPBinds (IPBinds ev_binds ip_binds) body
     ds_ip_bind (L _ (IPBind _ ~(Right n) e)) body
       = do e' <- dsLExpr e
            return (Let (NonRec n e') body)
-    ds_ip_bind (L _ (XCIPBind _)) _ = panic "dsIPBinds"
+    ds_ip_bind (L _ (XIPBind _)) _ = panic "dsIPBinds"
 dsIPBinds (XHsIPBinds _) _ = panic "dsIPBinds"
 
 -------------------------
@@ -636,12 +636,18 @@ ds_expr _ expr@(RecordUpd { rupd_expr = record_expr, rupd_flds = fields
     mk_alt upd_fld_env con
       = do { let (univ_tvs, ex_tvs, eq_spec,
                   prov_theta, _req_theta, arg_tys, _) = conLikeFullSig con
-                 subst = zipTvSubst univ_tvs in_inst_tys
+                 user_tvs =
+                   case con of
+                     RealDataCon data_con -> dataConUserTyVars data_con
+                     PatSynCon _          -> univ_tvs ++ ex_tvs
+                       -- The order here is because of the order in `TcPatSyn`.
+                 in_subst  = zipTvSubst univ_tvs in_inst_tys
+                 out_subst = zipTvSubst univ_tvs out_inst_tys
 
                 -- I'm not bothering to clone the ex_tvs
-           ; eqs_vars   <- mapM newPredVarDs (substTheta subst (eqSpecPreds eq_spec))
-           ; theta_vars <- mapM newPredVarDs (substTheta subst prov_theta)
-           ; arg_ids    <- newSysLocalsDs (substTysUnchecked subst arg_tys)
+           ; eqs_vars   <- mapM newPredVarDs (substTheta in_subst (eqSpecPreds eq_spec))
+           ; theta_vars <- mapM newPredVarDs (substTheta in_subst prov_theta)
+           ; arg_ids    <- newSysLocalsDs (substTysUnchecked in_subst arg_tys)
            ; let field_labels = conLikeFieldLabels con
                  val_args = zipWithEqual "dsExpr:RecordUpd" mk_val_arg
                                          field_labels arg_ids
@@ -650,14 +656,17 @@ ds_expr _ expr@(RecordUpd { rupd_expr = record_expr, rupd_flds = fields
 
                  inst_con = noLoc $ mkHsWrap wrap (HsConLikeOut noExt con)
                         -- Reconstruct with the WrapId so that unpacking happens
-                 -- The order here is because of the order in `TcPatSyn`.
                  wrap = mkWpEvVarApps theta_vars                                <.>
                         dict_req_wrap                                           <.>
-                        mkWpTyApps    (mkTyVarTys ex_tvs)                       <.>
-                        mkWpTyApps    [ ty
-                                      | (tv, ty) <- univ_tvs `zip` out_inst_tys
+                        mkWpTyApps    [ lookupTyVar out_subst tv
+                                          `orElse` mkTyVarTy tv
+                                      | tv <- user_tvs
                                       , not (tv `elemVarEnv` wrap_subst) ]
-                 rhs = foldl (\a b -> nlHsApp a b) inst_con val_args
+                          -- Be sure to use user_tvs (which may be ordered
+                          -- differently than `univ_tvs ++ ex_tvs) above.
+                          -- See Note [DataCon user type variable binders]
+                          -- in DataCon.
+                 rhs = foldl' (\a b -> nlHsApp a b) inst_con val_args
 
                         -- Tediously wrap the application in a cast
                         -- Note [Update for GADTs]
@@ -901,7 +910,7 @@ dsDo stmts
       = do  { body     <- goL stmts
             ; rhs'     <- dsLExpr rhs
             ; var   <- selectSimpleMatchVarL pat
-            ; match <- matchSinglePat (Var var) (StmtCtxt DoExpr) pat
+            ; match <- matchSinglePatVar var (StmtCtxt DoExpr) pat
                                       res1_ty (cantFailMatchResult body)
             ; match_code <- handle_failure pat match fail_op
             ; dsSyntaxExpr bind_op [rhs', Lam var match_code] }

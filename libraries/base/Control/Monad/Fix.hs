@@ -29,17 +29,18 @@ import Data.Function ( fix )
 import Data.Maybe
 import Data.Monoid ( Dual(..), Sum(..), Product(..)
                    , First(..), Last(..), Alt(..), Ap(..) )
+import Data.Ord ( Down(..) )
 import GHC.Base ( Monad, NonEmpty(..), errorWithoutStackTrace, (.) )
 import GHC.Generics
 import GHC.List ( head, tail )
-import GHC.ST
+import Control.Monad.ST.Imp
 import System.IO
 
 -- | Monads having fixed points with a \'knot-tying\' semantics.
 -- Instances of 'MonadFix' should satisfy the following laws:
 --
 -- [/purity/]
---      @'mfix' ('return' . h)  =  'return' ('fix' h)@
+--      @'mfix' ('Control.Monad.return' . h)  =  'Control.Monad.return' ('fix' h)@
 --
 -- [/left shrinking/ (or /tightening/)]
 --      @'mfix' (\\x -> a >>= \\y -> f x y)  =  a >>= \\y -> 'mfix' (\\x -> f x y)@
@@ -149,3 +150,10 @@ instance (MonadFix f, MonadFix g) => MonadFix (f :*: g) where
       where
         fstP (a :*: _) = a
         sndP (_ :*: b) = b
+
+-- Instances for Data.Ord
+
+-- | @since 4.12.0.0
+instance MonadFix Down where
+    mfix f = Down (fix (getDown . f))
+      where getDown (Down x) = x

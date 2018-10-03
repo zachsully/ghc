@@ -292,10 +292,14 @@ addTickLHsBind (L pos (funBind@(FunBind { fun_id = (L _ id)  }))) = do
   tickish <- tickishType `liftM` getEnv
   if inline && tickish == ProfNotes then return (L pos funBind) else do
 
-  (fvs, mg@(MG { mg_alts = matches' })) <-
+  (fvs, mg) <-
         getFreeVars $
         addPathEntry name $
         addTickMatchGroup False (fun_matches funBind)
+
+  case mg of
+    MG {} -> return ()
+    _     -> panic "addTickLHsBind"
 
   blackListed <- isBlackListed pos
   exported_names <- liftM exports getEnv
@@ -315,7 +319,7 @@ addTickLHsBind (L pos (funBind@(FunBind { fun_id = (L _ id)  }))) = do
                 return Nothing
 
   let mbCons = maybe Prelude.id (:)
-  return $ L pos $ funBind { fun_matches = mg { mg_alts = matches' }
+  return $ L pos $ funBind { fun_matches = mg
                            , fun_tick = tick `mbCons` fun_tick funBind }
 
    where
@@ -810,7 +814,7 @@ addTickIPBind (IPBind x nm e) =
         liftM2 (IPBind x)
                 (return nm)
                 (addTickLHsExpr e)
-addTickIPBind (XCIPBind x) = return (XCIPBind x)
+addTickIPBind (XIPBind x) = return (XIPBind x)
 
 -- There is no location here, so we might need to use a context location??
 addTickSyntaxExpr :: SrcSpan -> SyntaxExpr GhcTc -> TM (SyntaxExpr GhcTc)

@@ -20,7 +20,11 @@ module RnNames (
         mkChildEnv,
         findChildren,
         dodgyMsg,
-        dodgyMsgInsert
+        dodgyMsgInsert,
+        findImportUsage,
+        getMinimalImports,
+        printMinimalImports,
+        ImportDeclUsage
     ) where
 
 #include "HsVersions.h"
@@ -559,7 +563,7 @@ extendGlobalRdrEnvRn avails new_fixities
 
         ; rdr_env2 <- foldlM add_gre rdr_env1 new_gres
 
-        ; let fix_env' = foldl extend_fix_env fix_env new_gres
+        ; let fix_env' = foldl' extend_fix_env fix_env new_gres
               gbl_env' = gbl_env { tcg_rdr_env = rdr_env2, tcg_fix_env = fix_env' }
 
         ; traceRn "extendGlobalRdrEnvRn 2" (pprGlobalRdrEnv True rdr_env2)
@@ -896,10 +900,11 @@ filterImports iface decl_spec (Just (want_hiding, L l import_items))
                            else (name1, a2, Just p1)
         combine x y = pprPanic "filterImports/combine" (ppr x $$ ppr y)
 
-    lookup_name :: RdrName -> IELookupM (Name, AvailInfo, Maybe Name)
-    lookup_name rdr | isQual rdr              = failLookupWith (QualImportError rdr)
-                    | Just succ <- mb_success = return succ
-                    | otherwise               = failLookupWith BadImport
+    lookup_name :: IE GhcPs -> RdrName -> IELookupM (Name, AvailInfo, Maybe Name)
+    lookup_name ie rdr
+       | isQual rdr              = failLookupWith (QualImportError rdr)
+       | Just succ <- mb_success = return succ
+       | otherwise               = failLookupWith (BadImport ie)
       where
         mb_success = lookupOccEnv imp_occ_env (rdrNameOcc rdr)
 
@@ -916,8 +921,8 @@ filterImports iface decl_spec (Just (want_hiding, L l import_items))
               addWarn (Reason Opt_WarnDodgyImports) (dodgyImportWarn n)
             emit_warning MissingImportList = whenWOptM Opt_WarnMissingImportList $
               addWarn (Reason Opt_WarnMissingImportList) (missingImportListItem ieRdr)
-            emit_warning BadImportW = whenWOptM Opt_WarnDodgyImports $
-              addWarn (Reason Opt_WarnDodgyImports) (lookup_err_msg BadImport)
+            emit_warning (BadImportW ie) = whenWOptM Opt_WarnDodgyImports $
+              addWarn (Reason Opt_WarnDodgyImports) (lookup_err_msg (BadImport ie))
 
             run_lookup :: IELookupM a -> TcRn (Maybe a)
             run_lookup m = case m of
@@ -925,7 +930,7 @@ filterImports iface decl_spec (Just (want_hiding, L l import_items))
               Succeeded a -> return (Just a)
 
             lookup_err_msg err = case err of
-              BadImport -> badImportItemErr iface decl_spec ieRdr all_avails
+              BadImport ie  -> badImportItemErr iface decl_spec ie all_avails
               IllegalImport -> illegalImportItemErr
               QualImportError rdr -> qualImportItemErr rdr
 
@@ -944,12 +949,12 @@ filterImports iface decl_spec (Just (want_hiding, L l import_items))
     lookup_ie ie = handle_bad_import $ do
       case ie of
         IEVar _ (L l n) -> do
-            (name, avail, _) <- lookup_name $ ieWrappedName n
+            (name, avail, _) <- lookup_name ie $ ieWrappedName n
             return ([(IEVar noExt (L l (replaceWrappedName n name)),
                                                   trimAvail avail name)], [])
 
         IEThingAll _ (L l tc) -> do
-            (name, avail, mb_parent) <- lookup_name $ ieWrappedName tc
+            (name, avail, mb_parent) <- lookup_name ie $ ieWrappedName tc
             let warns = case avail of
                           Avail {}                     -- e.g. f(..)
                             -> [DodgyImport $ ieWrappedName tc]
@@ -979,21 +984,25 @@ filterImports iface decl_spec (Just (want_hiding, L l import_items))
                        -- Here the 'C' can be a data constructor
                        --  *or* a type/class, or even both
             -> let tc = ieWrappedName tc'
-                   tc_name = lookup_name tc
-                   dc_name = lookup_name (setRdrNameSpace tc srcDataName)
+                   tc_name = lookup_name ie tc
+                   dc_name = lookup_name ie (setRdrNameSpace tc srcDataName)
                in
                case catIELookupM [ tc_name, dc_name ] of
-                 []    -> failLookupWith BadImport
+                 []    -> failLookupWith (BadImport ie)
                  names -> return ([mkIEThingAbs tc' l name | name <- names], [])
             | otherwise
-            -> do nameAvail <- lookup_name (ieWrappedName tc')
+            -> do nameAvail <- lookup_name ie (ieWrappedName tc')
                   return ([mkIEThingAbs tc' l nameAvail]
                          , [])
 
-        IEThingWith _ (L l rdr_tc) wc rdr_ns' rdr_fs ->
+        IEThingWith xt ltc@(L l rdr_tc) wc rdr_ns rdr_fs ->
           ASSERT2(null rdr_fs, ppr rdr_fs) do
-           (name, AvailTC _ ns subflds, mb_parent)
-                                         <- lookup_name (ieWrappedName rdr_tc)
+           (name, avail, mb_parent)
+               <- lookup_name (IEThingAbs noExt ltc) (ieWrappedName rdr_tc)
+
+           let (ns,subflds) = case avail of
+                                AvailTC _ ns' subflds' -> (ns',subflds')
+                                Avail _                -> panic "filterImports"
 
            -- Look up the children in the sub-names of the parent
            let subnames = case ns of   -- The tc is first in ns,
@@ -1001,10 +1010,15 @@ filterImports iface decl_spec (Just (want_hiding, L l import_items))
                                        -- See the AvailTC Invariant in Avail.hs
                             (n1:ns1) | n1 == name -> ns1
                                      | otherwise  -> ns
-               rdr_ns = map ieLWrappedName rdr_ns'
            case lookupChildren (map Left subnames ++ map Right subflds) rdr_ns of
-             Nothing                      -> failLookupWith BadImport
-             Just (childnames, childflds) ->
+
+             Failed rdrs -> failLookupWith (BadImport (IEThingWith xt ltc wc rdrs []))
+                                -- We are trying to import T( a,b,c,d ), and failed
+                                -- to find 'b' and 'd'.  So we make up an import item
+                                -- to report as failing, namely T( b, d ).
+                                -- c.f. Trac #15412
+
+             Succeeded (childnames, childflds) ->
                case mb_parent of
                  -- non-associated ty/cls
                  Nothing
@@ -1039,20 +1053,20 @@ filterImports iface decl_spec (Just (want_hiding, L l import_items))
              , AvailTC parent [n] [])
 
         handle_bad_import m = catchIELookup m $ \err -> case err of
-          BadImport | want_hiding -> return ([], [BadImportW])
-          _                       -> failLookupWith err
+          BadImport ie | want_hiding -> return ([], [BadImportW ie])
+          _                          -> failLookupWith err
 
 type IELookupM = MaybeErr IELookupError
 
 data IELookupWarning
-  = BadImportW
+  = BadImportW (IE GhcPs)
   | MissingImportList
   | DodgyImport RdrName
   -- NB. use the RdrName for reporting a "dodgy" import
 
 data IELookupError
   = QualImportError RdrName
-  | BadImport
+  | BadImport (IE GhcPs)
   | IllegalImport
 
 failLookupWith :: IELookupError -> IELookupM a
@@ -1115,8 +1129,9 @@ mkChildEnv gres = foldr add emptyNameEnv gres
 findChildren :: NameEnv [a] -> Name -> [a]
 findChildren env n = lookupNameEnv env n `orElse` []
 
-lookupChildren :: [Either Name FieldLabel] -> [Located RdrName]
-               -> Maybe ([Located Name], [Located FieldLabel])
+lookupChildren :: [Either Name FieldLabel] -> [LIEWrappedName RdrName]
+               -> MaybeErr [LIEWrappedName RdrName]   -- The ones for which the lookup failed
+                           ([Located Name], [Located FieldLabel])
 -- (lookupChildren all_kids rdr_items) maps each rdr_item to its
 -- corresponding Name all_kids, if the former exists
 -- The matching is done by FastString, not OccName, so that
@@ -1125,17 +1140,27 @@ lookupChildren :: [Either Name FieldLabel] -> [Located RdrName]
 -- the RdrName for AssocTy may have a (bogus) DataName namespace
 -- (Really the rdr_items should be FastStrings in the first place.)
 lookupChildren all_kids rdr_items
-  = do xs <- mapM doOne rdr_items
-       return (fmap concat (partitionEithers xs))
+  | null fails
+  = Succeeded (fmap concat (partitionEithers oks))
+       -- This 'fmap concat' trickily applies concat to the /second/ component
+       -- of the pair, whose type is ([Located Name], [[Located FieldLabel]])
+  | otherwise
+  = Failed fails
   where
-    doOne (L l r) = case (lookupFsEnv kid_env . occNameFS . rdrNameOcc) r of
-      Just [Left n]            -> Just (Left (L l n))
-      Just rs | all isRight rs -> Just (Right (map (L l) (rights rs)))
-      _                        -> Nothing
+    mb_xs = map doOne rdr_items
+    fails = [ bad_rdr | Failed bad_rdr <- mb_xs ]
+    oks   = [ ok      | Succeeded ok   <- mb_xs ]
+    oks :: [Either (Located Name) [Located FieldLabel]]
+
+    doOne item@(L l r)
+       = case (lookupFsEnv kid_env . occNameFS . rdrNameOcc . ieWrappedName) r of
+           Just [Left n]            -> Succeeded (Left (L l n))
+           Just rs | all isRight rs -> Succeeded (Right (map (L l) (rights rs)))
+           _                        -> Failed    item
 
     -- See Note [Children for duplicate record fields]
     kid_env = extendFsEnvList_C (++) emptyFsEnv
-                      [(either (occNameFS . nameOccName) flLabel x, [x]) | x <- all_kids]
+              [(either (occNameFS . nameOccName) flLabel x, [x]) | x <- all_kids]
 
 
 
@@ -1447,28 +1472,9 @@ decls, and simply trim their import lists.  NB that
     from it.  Instead we just trim to an empty import list
 -}
 
-printMinimalImports :: [ImportDeclUsage] -> RnM ()
--- See Note [Printing minimal imports]
-printMinimalImports imports_w_usage
-  = do { imports' <- mapM mk_minimal imports_w_usage
-       ; this_mod <- getModule
-       ; dflags   <- getDynFlags
-       ; liftIO $
-         do { h <- openFile (mkFilename dflags this_mod) WriteMode
-            ; printForUser dflags h neverQualify (vcat (map ppr imports')) }
-              -- The neverQualify is important.  We are printing Names
-              -- but they are in the context of an 'import' decl, and
-              -- we never qualify things inside there
-              -- E.g.   import Blag( f, b )
-              -- not    import Blag( Blag.f, Blag.g )!
-       }
+getMinimalImports :: [ImportDeclUsage] -> RnM [LImportDecl GhcRn]
+getMinimalImports = mapM mk_minimal
   where
-    mkFilename dflags this_mod
-      | Just d <- dumpDir dflags = d </> basefn
-      | otherwise                = basefn
-      where
-        basefn = moduleNameString (moduleName this_mod) ++ ".imports"
-
     mk_minimal (L l decl, used, unused)
       | null unused
       , Just (False, _) <- ideclHiding decl
@@ -1518,6 +1524,29 @@ printMinimalImports imports_w_usage
                     && all (`elem` fld_lbls) (map flLabel avail_flds)
 
           all_non_overloaded = all (not . flIsOverloaded)
+
+printMinimalImports :: [ImportDeclUsage] -> RnM ()
+-- See Note [Printing minimal imports]
+printMinimalImports imports_w_usage
+  = do { imports' <- getMinimalImports imports_w_usage
+       ; this_mod <- getModule
+       ; dflags   <- getDynFlags
+       ; liftIO $
+         do { h <- openFile (mkFilename dflags this_mod) WriteMode
+            ; printForUser dflags h neverQualify (vcat (map ppr imports')) }
+              -- The neverQualify is important.  We are printing Names
+              -- but they are in the context of an 'import' decl, and
+              -- we never qualify things inside there
+              -- E.g.   import Blag( f, b )
+              -- not    import Blag( Blag.f, Blag.g )!
+       }
+  where
+    mkFilename dflags this_mod
+      | Just d <- dumpDir dflags = d </> basefn
+      | otherwise                = basefn
+      where
+        basefn = moduleNameString (moduleName this_mod) ++ ".imports"
+
 
 to_ie_post_rn_var :: (HasOccName name) => Located name -> LIEWrappedName name
 to_ie_post_rn_var (L l n)

@@ -32,7 +32,7 @@ module DynFlags (
         dopt, dopt_set, dopt_unset,
         gopt, gopt_set, gopt_unset, setGeneralFlag', unSetGeneralFlag',
         wopt, wopt_set, wopt_unset,
-        wopt_fatal,
+        wopt_fatal, wopt_set_fatal, wopt_unset_fatal,
         xopt, xopt_set, xopt_unset,
         lang_set,
         useUnicodeSyntax,
@@ -557,6 +557,14 @@ data GeneralFlag
    | Opt_OptimalApplicativeDo
    | Opt_VersionMacros
    | Opt_WholeArchiveHsLibs
+   -- copy all libs into a single folder prior to linking binaries
+   -- this should elivate the excessive command line limit restrictions
+   -- on windows, by only requiring a single -L argument instead of
+   -- one for each dependency.  At the time of this writing, gcc
+   -- forwards all -L flags to the collect2 command without using a
+   -- response file and as such breaking apart.
+   | Opt_SingleLibFolder
+   | Opt_KeepCAFs
 
    -- output style opts
    | Opt_ErrorSpans -- Include full span info in error messages,
@@ -576,6 +584,7 @@ data GeneralFlag
    | Opt_UnclutterValidHoleFits
    | Opt_ShowTypeAppOfHoleFits
    | Opt_ShowTypeAppVarsOfHoleFits
+   | Opt_ShowDocsOfHoleFits
    | Opt_ShowTypeOfHoleFits
    | Opt_ShowProvOfHoleFits
    | Opt_ShowMatchesOfHoleFits
@@ -610,6 +619,7 @@ data GeneralFlag
    | Opt_ImplicitImportQualified
 
    -- keeping stuff
+   | Opt_KeepHscppFiles
    | Opt_KeepHiDiffs
    | Opt_KeepHcFiles
    | Opt_KeepSFiles
@@ -765,7 +775,6 @@ data WarningFlag =
    | Opt_WarnUnusedForalls
    | Opt_WarnWarningsDeprecations
    | Opt_WarnDeprecatedFlags
-   | Opt_WarnAMP -- Introduced in GHC 7.8, obsolete since 7.10
    | Opt_WarnMissingMonadFailInstances -- since 8.0
    | Opt_WarnSemigroup -- since 8.0
    | Opt_WarnDodgyExports
@@ -807,6 +816,7 @@ data WarningFlag =
    | Opt_WarnMissingExportList
    | Opt_WarnInaccessibleCode
    | Opt_WarnStarIsType                   -- Since 8.6
+   | Opt_WarnStarBinder                   -- Since 8.6
    | Opt_WarnImplicitKindVars             -- Since 8.6
    deriving (Eq, Show, Enum)
 
@@ -2108,6 +2118,7 @@ languageExtensions (Just Haskell98)
     = [LangExt.ImplicitPrelude,
        -- See Note [When is StarIsType enabled]
        LangExt.StarIsType,
+       LangExt.MonadFailDesugaring,
        LangExt.MonomorphismRestriction,
        LangExt.NPlusKPatterns,
        LangExt.DatatypeContexts,
@@ -2124,6 +2135,7 @@ languageExtensions (Just Haskell2010)
     = [LangExt.ImplicitPrelude,
        -- See Note [When is StarIsType enabled]
        LangExt.StarIsType,
+       LangExt.MonadFailDesugaring,
        LangExt.MonomorphismRestriction,
        LangExt.DatatypeContexts,
        LangExt.TraditionalRecordSyntax,
@@ -2640,7 +2652,7 @@ safeFlagCheck :: Bool -> DynFlags -> (DynFlags, [Located String])
 safeFlagCheck _ dflags | safeLanguageOn dflags = (dflagsUnset, warns)
   where
     -- Handle illegal flags under safe language.
-    (dflagsUnset, warns) = foldl check_method (dflags, []) unsafeFlags
+    (dflagsUnset, warns) = foldl' check_method (dflags, []) unsafeFlags
 
     check_method (df, warns) (str,loc,test,fix)
         | test df   = (fix df, warns ++ safeFailure (loc df) str)
@@ -2687,11 +2699,8 @@ allNonDeprecatedFlags = allFlagsDeps False
 allFlagsDeps :: Bool -> [String]
 allFlagsDeps keepDeprecated = [ '-':flagName flag
                               | (deprecated, flag) <- flagsAllDeps
-                              , ok (flagOptKind flag)
                               , keepDeprecated || not (isDeprecated deprecated)]
-  where ok (PrefixPred _ _) = False
-        ok _   = True
-        isDeprecated Deprecated = True
+  where isDeprecated Deprecated = True
         isDeprecated _ = False
 
 {-
@@ -2751,10 +2760,6 @@ add_dep_message (PassFlag f) message =
                                    PassFlag $ \s -> f s >> deprecate message
 add_dep_message (AnySuffix f) message =
                                   AnySuffix $ \s -> f s >> deprecate message
-add_dep_message (PrefixPred pred f) message =
-                            PrefixPred pred $ \s -> f s >> deprecate message
-add_dep_message (AnySuffixPred pred f) message =
-                         AnySuffixPred pred $ \s -> f s >> deprecate message
 
 ----------------------- The main flags themselves ------------------------------
 -- See Note [Updating flag description in the User's Guide]
@@ -2820,6 +2825,8 @@ dynamic_flags_deps = [
 #endif
   , make_ord_flag defGhcFlag "relative-dynlib-paths"
       (NoArg (setGeneralFlag Opt_RelativeDynlibPaths))
+  , make_ord_flag defGhcFlag "copy-libs-when-linking"
+      (NoArg (setGeneralFlag Opt_SingleLibFolder))
   , make_ord_flag defGhcFlag "pie"            (NoArg (setGeneralFlag Opt_PICExecutable))
   , make_ord_flag defGhcFlag "no-pie"         (NoArg (unSetGeneralFlag Opt_PICExecutable))
 
@@ -2949,6 +2956,10 @@ dynamic_flags_deps = [
         (NoArg (setGeneralFlag Opt_KeepHcFiles))
   , make_ord_flag defGhcFlag "keep-hc-files"
         (NoArg (setGeneralFlag Opt_KeepHcFiles))
+  , make_ord_flag defGhcFlag "keep-hscpp-file"
+        (NoArg (setGeneralFlag Opt_KeepHscppFiles))
+  , make_ord_flag defGhcFlag "keep-hscpp-files"
+        (NoArg (setGeneralFlag Opt_KeepHscppFiles))
   , make_ord_flag defGhcFlag "keep-s-file"
         (NoArg (setGeneralFlag Opt_KeepSFiles))
   , make_ord_flag defGhcFlag "keep-s-files"
@@ -3765,8 +3776,6 @@ wWarningFlagsDeps = [
 -- Please keep the list of flags below sorted alphabetically
   flagSpec "alternative-layout-rule-transitional"
                                       Opt_WarnAlternativeLayoutRuleTransitional,
-  depFlagSpec "amp"                      Opt_WarnAMP
-    "it has no effect",
   depFlagSpec "auto-orphans"             Opt_WarnAutoOrphans
     "it has no effect",
   flagSpec "cpp-undef"                   Opt_WarnCPPUndef,
@@ -3850,6 +3859,7 @@ wWarningFlagsDeps = [
   flagSpec "simplifiable-class-constraints" Opt_WarnSimplifiableClassConstraints,
   flagSpec "missing-home-modules"        Opt_WarnMissingHomeModules,
   flagSpec "unrecognised-warning-flags"  Opt_WarnUnrecognisedWarningFlags,
+  flagSpec "star-binder"                 Opt_WarnStarBinder,
   flagSpec "star-is-type"                Opt_WarnStarIsType,
   flagSpec "partial-fields"              Opt_WarnPartialFields ]
 
@@ -3994,7 +4004,8 @@ fFlagsDeps = [
   flagSpec "show-warning-groups"              Opt_ShowWarnGroups,
   flagSpec "hide-source-paths"                Opt_HideSourcePaths,
   flagSpec "show-loaded-modules"              Opt_ShowLoadedModules,
-  flagSpec "whole-archive-hs-libs"            Opt_WholeArchiveHsLibs
+  flagSpec "whole-archive-hs-libs"            Opt_WholeArchiveHsLibs,
+  flagSpec "keep-cafs"                        Opt_KeepCAFs
   ]
   ++ fHoleFlags
 
@@ -4019,6 +4030,7 @@ fHoleFlags = [
   flagSpec "show-type-of-hole-fits"           Opt_ShowTypeOfHoleFits,
   flagSpec "show-type-app-of-hole-fits"       Opt_ShowTypeAppOfHoleFits,
   flagSpec "show-type-app-vars-of-hole-fits"  Opt_ShowTypeAppVarsOfHoleFits,
+  flagSpec "show-docs-of-hole-fits"           Opt_ShowDocsOfHoleFits,
   flagSpec "unclutter-valid-hole-fits"        Opt_UnclutterValidHoleFits
   ]
 
@@ -4109,7 +4121,10 @@ xFlagsDeps = [
   flagSpec "AlternativeLayoutRuleTransitional"
                                               LangExt.AlternativeLayoutRuleTransitional,
   flagSpec "Arrows"                           LangExt.Arrows,
-  flagSpec "AutoDeriveTypeable"               LangExt.AutoDeriveTypeable,
+  depFlagSpecCond "AutoDeriveTypeable"        LangExt.AutoDeriveTypeable
+    id
+         ("Typeable instances are created automatically " ++
+                     "for all types since GHC 8.2."),
   flagSpec "BangPatterns"                     LangExt.BangPatterns,
   flagSpec "BinaryLiterals"                   LangExt.BinaryLiterals,
   flagSpec "CApiFFI"                          LangExt.CApiFFI,
@@ -4297,6 +4312,7 @@ validHoleFitsImpliedGFlags :: [(GeneralFlag, TurnOnFlag, GeneralFlag)]
 validHoleFitsImpliedGFlags
   = [ (Opt_UnclutterValidHoleFits, turnOff, Opt_ShowTypeAppOfHoleFits)
     , (Opt_UnclutterValidHoleFits, turnOff, Opt_ShowTypeAppVarsOfHoleFits)
+    , (Opt_UnclutterValidHoleFits, turnOff, Opt_ShowDocsOfHoleFits)
     , (Opt_ShowTypeAppVarsOfHoleFits, turnOff, Opt_ShowTypeAppOfHoleFits)
     , (Opt_UnclutterValidHoleFits, turnOff, Opt_ShowProvOfHoleFits) ]
 
@@ -4353,7 +4369,6 @@ impliedXFlags
     , (LangExt.TypeInType,       turnOn, LangExt.DataKinds)
     , (LangExt.TypeInType,       turnOn, LangExt.PolyKinds)
     , (LangExt.TypeInType,       turnOn, LangExt.KindSignatures)
-    , (LangExt.TypeInType,       turnOff, LangExt.StarIsType)
 
     -- AutoDeriveTypeable is not very useful without DeriveDataTypeable
     , (LangExt.AutoDeriveTypeable, turnOn, LangExt.DeriveDataTypeable)
@@ -4364,9 +4379,6 @@ impliedXFlags
     , (LangExt.TypeOperators, turnOn, LangExt.ExplicitNamespaces)
 
     , (LangExt.ImpredicativeTypes,  turnOn, LangExt.RankNTypes)
-
-    -- See Note [When is StarIsType enabled]
-    , (LangExt.TypeOperators, turnOff, LangExt.StarIsType)
 
         -- Record wild-cards implies field disambiguation
         -- Otherwise if you write (C {..}) you may well get
@@ -4395,12 +4407,10 @@ impliedXFlags
 -- programs expect '*' to be synonymous with 'Type', so by default StarIsType is
 -- enabled.
 --
--- However, programs that use TypeOperators might expect to repurpose '*' for
--- multiplication or another binary operation, so we make TypeOperators imply
--- NoStarIsType.
+-- Programs that use TypeOperators might expect to repurpose '*' for
+-- multiplication or another binary operation, but making TypeOperators imply
+-- NoStarIsType caused too much breakage on Hackage.
 --
--- It is still possible to have TypeOperators and StarIsType enabled at the same
--- time, although it's not recommended.
 
 -- Note [Documenting optimisation flags]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -4550,6 +4560,7 @@ standardWarnings -- see Note [Documenting warning flags]
         Opt_WarnTabs,
         Opt_WarnUnrecognisedWarningFlags,
         Opt_WarnSimplifiableClassConstraints,
+        Opt_WarnStarBinder,
         Opt_WarnInaccessibleCode
       ]
 

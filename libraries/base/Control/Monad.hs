@@ -131,7 +131,7 @@ guard           :: (Alternative f) => Bool -> f ()
 guard True      =  pure ()
 guard False     =  empty
 
--- | This generalizes the list-based 'filter' function.
+-- | This generalizes the list-based 'Data.List.filter' function.
 
 {-# INLINE filterM #-}
 filterM          :: (Applicative m) => (a -> m Bool) -> [a] -> m [a]
@@ -139,11 +139,12 @@ filterM p        = foldr (\ x -> liftA2 (\ flg -> if flg then (x:) else id) (p x
 
 infixr 1 <=<, >=>
 
--- | Left-to-right Kleisli composition of monads.
+-- | Left-to-right composition of Kleisli arrows.
 (>=>)       :: Monad m => (a -> m b) -> (b -> m c) -> (a -> m c)
 f >=> g     = \x -> f x >>= g
 
--- | Right-to-left Kleisli composition of monads. @('>=>')@, with the arguments flipped.
+-- | Right-to-left composition of Kleisli arrows. @('>=>')@, with the arguments
+-- flipped.
 --
 -- Note how this operator resembles function composition @('.')@:
 --
@@ -187,7 +188,7 @@ forever a   = let a' = a *> a' in a'
 
 -- | The 'mapAndUnzipM' function maps its first argument over a list, returning
 -- the result as a pair of lists. This function is mainly used with complicated
--- data structures or a state-transforming monad.
+-- data structures or a state monad.
 mapAndUnzipM      :: (Applicative m) => (a -> m (b,c)) -> [a] -> m ([b], [c])
 {-# INLINE mapAndUnzipM #-}
 mapAndUnzipM f xs =  unzip <$> traverse f xs
@@ -202,7 +203,7 @@ zipWithM_         :: (Applicative m) => (a -> b -> m c) -> [a] -> [b] -> m ()
 {-# INLINE zipWithM_ #-}
 zipWithM_ f xs ys =  sequenceA_ (zipWith f xs ys)
 
-{- | The 'foldM' function is analogous to 'foldl', except that its result is
+{- | The 'foldM' function is analogous to 'Data.Foldable.foldl', except that its result is
 encapsulated in a monad. Note that 'foldM' works from left-to-right over
 the list arguments. This could be an issue where @('>>')@ and the `folded
 function' are not commutative.

@@ -317,10 +317,11 @@ test('T7257',
                         # expected value: 1246287228 (i386/Linux)
                         # 2016-04-06: 989850664 (i386/Linux) no idea what happened
                         # 2017-03-25: 869850704 (x86/Linux, 64-bit machine) probably sizeExpr fix
-                       (wordsize(64), 1414893248, 5)]),
+                       (wordsize(64), 1297293264, 5)]),
                         # 2012-09-21: 1774893760 (amd64/Linux)
                         # 2015-11-03: 1654893248 (amd64/Linux)
                         # 2016-06-22: 1414893248 (amd64/Linux, sizeExpr fix)
+                        # 2018-06-22: 1297293264 (amd64/Linux, atomicModifyMutVar# replacement)
       stats_num_field('peak_megabytes_allocated',
                       [(wordsize(32), 217, 5),
                         # 2012-10-08: 217 (x86/Linux)
@@ -465,11 +466,12 @@ test('T9203',
                       # 2016-04-06     84345136 (i386/Debian) not sure
                       # 2017-03-24     77969268 (x86/Linux, 64-bit machine) probably join points
 
-                      , (wordsize(64), 84620888, 5) ]),
+                      , (wordsize(64), 98360576, 5) ]),
                       # was            95747304
                       # 2019-09-10     94547280 post-AMP cleanup
                       # 2015-10-28     95451192 emit Typeable at definition site
                       # 2016-12-19     84620888 Join points
+                      # 2018-07-30     98360576 it's unclear
       only_ways(['normal'])],
      compile_and_run,
      ['-O2'])
@@ -512,6 +514,13 @@ test('T13001',
      [stats_num_field('bytes allocated',
                       [ (wordsize(32),    46728, 20)
                       , (wordsize(64),    50600, 20) ]),
+      only_ways(['normal'])],
+     compile_and_run,
+     ['-O2'])
+
+test('T8763',
+     [stats_num_field('bytes allocated',
+                      [ (wordsize(64),    41056, 20) ]),
       only_ways(['normal'])],
      compile_and_run,
      ['-O2'])
@@ -562,7 +571,7 @@ test('T13623',
     ['-O2'])
 
 test('T14052',
-     [stats_num_field('bytes allocated',
+     [compiler_stats_num_field('bytes allocated',
                       [ (wordsize(64), 2346183840, 15) ])],
      ghci_script,
      ['T14052.script'])
@@ -593,3 +602,21 @@ test('T15226a',
      only_ways(['normal'])],
     compile_and_run,
     ['-O'])
+
+test('T15426',
+    [stats_num_field('bytes allocated',
+                    [ (wordsize(64), 41272, 20) ]),
+		    # 2018-08-10   41272  Change findIndices from INLINE to INLINABLE
+		    # initial  160041176
+     only_ways(['normal'])],
+    compile_and_run,
+    ['-O2'])
+
+test('T15578',
+    [stats_num_field('bytes allocated',
+                    [ (wordsize(64), 800041456, 5) ]),
+                    # 2018-09-07     800041456   Improvements from #15578
+                    # initial      42400041456
+     only_ways(['normal'])],
+    compile_and_run,
+    ['-O2'])

@@ -27,9 +27,9 @@ class TestConfig:
         self.only = set()
 
         # Accept new output which differs from the sample?
-        self.accept = 0
-        self.accept_platform = 0
-        self.accept_os = 0
+        self.accept = False
+        self.accept_platform = False
+        self.accept_os = False
 
         # File in which to save the summary
         self.summary_file = ''
@@ -42,9 +42,6 @@ class TestConfig:
         # overloading --verbose, as you might want to see the summary
         # with --verbose=0.
         self.no_print_summary = False
-
-        # File in which to save the times
-        self.times_file = ''
 
         # What platform are we running on?
         self.platform = ''
@@ -120,7 +117,7 @@ class TestConfig:
 
         # threads
         self.threads = 1
-        self.use_threads = 0
+        self.use_threads = False
 
         # Should we skip performance tests
         self.skip_perf_tests = False
@@ -171,7 +168,7 @@ def getTestRun():
 class TestOptions:
    def __init__(self):
        # skip this test?
-       self.skip = 0
+       self.skip = False
 
        # skip these ways
        self.omit_ways = []
@@ -196,7 +193,7 @@ class TestOptions:
        self.ignore_stderr = False
 
        # Backpack test
-       self.compile_backpack = 0
+       self.compile_backpack = False
 
        # We sometimes want to modify the compiler_always_flags, so
        # they are copied from config.compiler_always_flags when we
@@ -233,24 +230,21 @@ class TestOptions:
        self.alone = False
 
        # Does this test use a literate (.lhs) file?
-       self.literate = 0
+       self.literate = False
 
        # Does this test use a .c, .m or .mm file?
-       self.c_src      = 0
-       self.objc_src   = 0
-       self.objcpp_src = 0
+       self.c_src      = False
+       self.objc_src   = False
+       self.objcpp_src = False
 
        # Does this test use a .cmm file?
-       self.cmm_src    = 0
+       self.cmm_src    = False
 
        # Should we put .hi/.o files in a subdirectory?
        self.outputdir = None
 
        # Command to run before the test
        self.pre_cmd = None
-
-       # Command to run for extra cleaning
-       self.clean_cmd = None
 
        # Command wrapper: a function to apply to the command before running it
        self.cmd_wrapper = None

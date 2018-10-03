@@ -5,7 +5,8 @@
 Functions for working with the typechecker environment (setters, getters...).
 -}
 
-{-# LANGUAGE CPP, ExplicitForAll, FlexibleInstances #-}
+{-# LANGUAGE CPP, ExplicitForAll, FlexibleInstances, BangPatterns #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module TcRnMonad(
@@ -88,7 +89,7 @@ module TcRnMonad(
   mkErrInfo,
 
   -- * Type constraints
-  newTcEvBinds, newNoTcEvBinds,
+  newTcEvBinds, newNoTcEvBinds, cloneEvBindsVar,
   addTcEvBind,
   getTcEvTyCoVars, getTcEvBindsMap, setTcEvBindsMap,
   chooseUniqueOccTc,
@@ -432,7 +433,7 @@ updTopEnv upd = updEnv (\ env@(Env { env_top = top }) ->
                           env { env_top = upd top })
 
 getGblEnv :: TcRnIf gbl lcl gbl
-getGblEnv = do { env <- getEnv; return (env_gbl env) }
+getGblEnv = do { Env{..} <- getEnv; return env_gbl }
 
 updGblEnv :: (gbl -> gbl) -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
 updGblEnv upd = updEnv (\ env@(Env { env_gbl = gbl }) ->
@@ -442,7 +443,7 @@ setGblEnv :: gbl -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
 setGblEnv gbl_env = updEnv (\ env -> env { env_gbl = gbl_env })
 
 getLclEnv :: TcRnIf gbl lcl lcl
-getLclEnv = do { env <- getEnv; return (env_lcl env) }
+getLclEnv = do { Env{..} <- getEnv; return env_lcl }
 
 updLclEnv :: (lcl -> lcl) -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
 updLclEnv upd = updEnv (\ env@(Env { env_lcl = lcl }) ->
@@ -1371,8 +1372,20 @@ newNoTcEvBinds
   = do { tcvs_ref  <- newTcRef emptyVarSet
        ; uniq <- newUnique
        ; traceTc "newNoTcEvBinds" (text "unique =" <+> ppr uniq)
-       ; return (NoEvBindsVar { ebv_tcvs = tcvs_ref
+       ; return (CoEvBindsVar { ebv_tcvs = tcvs_ref
                               , ebv_uniq = uniq }) }
+
+cloneEvBindsVar :: EvBindsVar -> TcM EvBindsVar
+-- Clone the refs, so that any binding created when
+-- solving don't pollute the original
+cloneEvBindsVar ebv@(EvBindsVar {})
+  = do { binds_ref <- newTcRef emptyEvBindMap
+       ; tcvs_ref  <- newTcRef emptyVarSet
+       ; return (ebv { ebv_binds = binds_ref
+                     , ebv_tcvs = tcvs_ref }) }
+cloneEvBindsVar ebv@(CoEvBindsVar {})
+  = do { tcvs_ref  <- newTcRef emptyVarSet
+       ; return (ebv { ebv_tcvs = tcvs_ref }) }
 
 getTcEvTyCoVars :: EvBindsVar -> TcM TyCoVarSet
 getTcEvTyCoVars ev_binds_var
@@ -1381,13 +1394,13 @@ getTcEvTyCoVars ev_binds_var
 getTcEvBindsMap :: EvBindsVar -> TcM EvBindMap
 getTcEvBindsMap (EvBindsVar { ebv_binds = ev_ref })
   = readTcRef ev_ref
-getTcEvBindsMap (NoEvBindsVar {})
+getTcEvBindsMap (CoEvBindsVar {})
   = return emptyEvBindMap
 
 setTcEvBindsMap :: EvBindsVar -> EvBindMap -> TcM ()
 setTcEvBindsMap (EvBindsVar { ebv_binds = ev_ref }) binds
   = writeTcRef ev_ref binds
-setTcEvBindsMap v@(NoEvBindsVar {}) ev_binds
+setTcEvBindsMap v@(CoEvBindsVar {}) ev_binds
   | isEmptyEvBindMap ev_binds
   = return ()
   | otherwise
@@ -1400,8 +1413,8 @@ addTcEvBind (EvBindsVar { ebv_binds = ev_ref, ebv_uniq = u }) ev_bind
                                  ppr ev_bind
        ; bnds <- readTcRef ev_ref
        ; writeTcRef ev_ref (extendEvBinds bnds ev_bind) }
-addTcEvBind (NoEvBindsVar { ebv_uniq = u }) ev_bind
-  = pprPanic "addTcEvBind NoEvBindsVar" (ppr ev_bind $$ ppr u)
+addTcEvBind (CoEvBindsVar { ebv_uniq = u }) ev_bind
+  = pprPanic "addTcEvBind CoEvBindsVar" (ppr ev_bind $$ ppr u)
 
 chooseUniqueOccTc :: (OccSet -> OccName) -> TcM OccName
 chooseUniqueOccTc fn =
@@ -1762,7 +1775,7 @@ initIfaceTcRn :: IfG a -> TcRn a
 initIfaceTcRn thing_inside
   = do  { tcg_env <- getGblEnv
         ; dflags <- getDynFlags
-        ; let mod = tcg_semantic_mod tcg_env
+        ; let !mod = tcg_semantic_mod tcg_env
               -- When we are instantiating a signature, we DEFINITELY
               -- do not want to knot tie.
               is_instantiate = unitIdIsDefinite (thisPackage dflags) &&

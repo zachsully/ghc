@@ -7,7 +7,7 @@ module Packages (
         module PackageConfig,
 
         -- * Reading the package config, and processing cmdline args
-        PackageState(preloadPackages, explicitPackages, requirementContext),
+        PackageState(preloadPackages, explicitPackages, moduleToPkgConfAll, requirementContext),
         PackageConfigMap,
         emptyPackageState,
         initPackages,
@@ -50,7 +50,7 @@ module Packages (
 
         collectArchives,
         collectIncludeDirs, collectLibraryPaths, collectLinkOpts,
-        packageHsLibs,
+        packageHsLibs, getLibs,
 
         -- * Utils
         unwireUnitId,
@@ -417,7 +417,7 @@ searchPackageId dflags pid = filter ((pid ==) . sourcePackageId)
 extendPackageConfigMap
    :: PackageConfigMap -> [PackageConfig] -> PackageConfigMap
 extendPackageConfigMap (PackageConfigMap pkg_map closure) new_pkgs
-  = PackageConfigMap (foldl add pkg_map new_pkgs) closure
+  = PackageConfigMap (foldl' add pkg_map new_pkgs) closure
     -- We also add the expanded version of the packageConfigId, so that
     -- 'improveUnitId' can find it.
   where add pkg_map p = addToUDFM (addToUDFM pkg_map (expandedPackageConfigId p) p)
@@ -1519,7 +1519,7 @@ mkPackageState dflags dbs preload0 = do
   --
   let preload1 = Map.keys (Map.filter uv_explicit vis_map)
 
-  let pkgname_map = foldl add Map.empty pkgs2
+  let pkgname_map = foldl' add Map.empty pkgs2
         where add pn_map p
                 = Map.insert (packageName p) (componentId p) pn_map
 
@@ -1760,6 +1760,14 @@ collectArchives dflags pc =
                         , lib <- libs ]
   where searchPaths = nub . filter notNull . libraryDirsForWay dflags $ pc
         libs        = packageHsLibs dflags pc ++ extraLibraries pc
+
+getLibs :: DynFlags -> [PreloadUnitId] -> IO [(String,String)]
+getLibs dflags pkgs = do
+  ps <- getPreloadPackagesAnd dflags pkgs
+  fmap concat . forM ps $ \p -> do
+    let candidates = [ (l </> f, f) | l <- collectLibraryPaths dflags [p]
+                                    , f <- (\n -> "lib" ++ n ++ ".a") <$> packageHsLibs dflags p ]
+    filterM (doesFileExist . fst) candidates
 
 packageHsLibs :: DynFlags -> PackageConfig -> [String]
 packageHsLibs dflags p = map (mkDynName . addSuffix) (hsLibraries p)

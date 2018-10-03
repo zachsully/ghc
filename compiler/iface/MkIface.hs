@@ -119,11 +119,10 @@ import Data.IORef
 import System.Directory
 import System.FilePath
 import Plugins ( PluginRecompile(..), Plugin(..), LoadedPlugin(..))
-#if __GLASGOW_HASKELL__ < 840
+
 --Qualified import so we can define a Semigroup instance
 -- but it doesn't clash with Outputable.<>
 import qualified Data.Semigroup
-#endif
 
 {-
 ************************************************************************
@@ -192,7 +191,7 @@ mkIfaceTc hsc_env maybe_old_fingerprint safe_mode mod_details
                 map lpModule (plugins (hsc_dflags hsc_env))
           deps <- mkDependencies
                     (thisInstalledUnitId (hsc_dflags hsc_env))
-                    pluginModules tc_result
+                    (map mi_module pluginModules) tc_result
           let hpc_info = emptyHpcInfo other_hpc_info
           used_th <- readIORef tc_splice_used
           dep_files <- (readIORef dependent_files)
@@ -203,7 +202,8 @@ mkIfaceTc hsc_env maybe_old_fingerprint safe_mode mod_details
           -- but if you pass that in here, we'll decide it's the local
           -- module and does not need to be recorded as a dependency.
           -- See Note [Identity versus semantic module]
-          usages <- mkUsageInfo hsc_env this_mod (imp_mods imports) used_names dep_files merged
+          usages <- mkUsageInfo hsc_env this_mod (imp_mods imports) used_names
+                      dep_files merged pluginModules
 
           let (doc_hdr', doc_map, arg_map) = extractDocs tc_result
 
@@ -791,7 +791,8 @@ sortDependencies d
  = Deps { dep_mods   = sortBy (compare `on` (moduleNameFS.fst)) (dep_mods d),
           dep_pkgs   = sortBy (compare `on` fst) (dep_pkgs d),
           dep_orphs  = sortBy stableModuleCmp (dep_orphs d),
-          dep_finsts = sortBy stableModuleCmp (dep_finsts d) }
+          dep_finsts = sortBy stableModuleCmp (dep_finsts d),
+          dep_plgins = sortBy (compare `on` moduleNameFS) (dep_plgins d) }
 
 -- | Creates cached lookup for the 'mi_anns' field of ModIface
 -- Hackily, we use "module" as the OccName for any module-level annotations
@@ -1012,7 +1013,7 @@ mkOrphMap :: (decl -> IsOrphan) -- Extract orphan status from decl
                                 --      each sublist in canonical order
               [decl])           -- Orphan decls; in canonical order
 mkOrphMap get_key decls
-  = foldl go (emptyOccEnv, []) decls
+  = foldl' go (emptyOccEnv, []) decls
   where
     go (non_orphs, orphs) d
         | NotOrphan occ <- get_key d
@@ -1111,7 +1112,7 @@ instance Semigroup RecompileRequired where
 
 instance Monoid RecompileRequired where
   mempty = UpToDate
-#if __GLASGOW_HASKELL__ < 840
+#if __GLASGOW_HASKELL__ < 804
   mappend = (Data.Semigroup.<>)
 #endif
 
@@ -1390,6 +1391,7 @@ checkDependencies hsc_env summary iface
  = checkList (map dep_missing (ms_imps summary ++ ms_srcimps summary))
   where
    prev_dep_mods = dep_mods (mi_deps iface)
+   prev_dep_plgn = dep_plgins (mi_deps iface)
    prev_dep_pkgs = dep_pkgs (mi_deps iface)
 
    this_pkg = thisPackage (hsc_dflags hsc_env)
@@ -1400,7 +1402,7 @@ checkDependencies hsc_env summary iface
      case find_res of
         Found _ mod
           | pkg == this_pkg
-           -> if moduleName mod `notElem` map fst prev_dep_mods
+           -> if moduleName mod `notElem` map fst prev_dep_mods ++ prev_dep_plgn
                  then do traceHiDiffs $
                            text "imported module " <> quotes (ppr mod) <>
                            text " not among previous dependencies"
@@ -1644,7 +1646,7 @@ coAxBranchToIfaceBranch' tc (CoAxBranch { cab_tvs = tvs, cab_cvs = cvs
                   , ifaxbRHS     = tidyToIfaceType env1 rhs
                   , ifaxbIncomps = [] }
   where
-    (env1, tidy_tvs) = tidyTyCoVarBndrs emptyTidyEnv tvs
+    (env1, tidy_tvs) = tidyVarBndrs emptyTidyEnv tvs
     -- Don't re-bind in-scope tyvars
     -- See Note [CoAxBranch type variables] in CoAxiom
 
@@ -1708,7 +1710,7 @@ tyConToIfaceDecl env tycon
     -- an error.
     (tc_env1, tc_binders) = tidyTyConBinders env (tyConBinders tycon)
     tc_tyvars      = binderVars tc_binders
-    if_binders     = toIfaceTyVarBinders tc_binders
+    if_binders     = toIfaceTyCoVarBinders tc_binders
     if_res_kind    = tidyToIfaceType tc_env1 (tyConResKind tycon)
     if_syn_type ty = tidyToIfaceType tc_env1 ty
     if_res_var     = getOccFS `fmap` tyConFamilyResVar_maybe tycon
@@ -1749,7 +1751,7 @@ tyConToIfaceDecl env tycon
         = IfCon   { ifConName    = dataConName data_con,
                     ifConInfix   = dataConIsInfix data_con,
                     ifConWrapper = isJust (dataConWrapId_maybe data_con),
-                    ifConExTvs   = map toIfaceTvBndr ex_tvs',
+                    ifConExTCvs  = map toIfaceBndr ex_tvs',
                     ifConUserTvBinders = map toIfaceForAllBndr user_bndrs',
                     ifConEqSpec  = map (to_eq_spec . eqSpecPair) eq_spec,
                     ifConCtxt    = tidyToIfaceContext con_env2 theta,
@@ -1774,27 +1776,27 @@ tyConToIfaceDecl env tycon
           con_env1 = (fst tc_env1, mkVarEnv (zipEqual "ifaceConDecl" univ_tvs tc_tyvars))
                      -- A bit grimy, perhaps, but it's simple!
 
-          (con_env2, ex_tvs') = tidyTyCoVarBndrs con_env1 ex_tvs
-          user_bndrs' = map (tidyUserTyVarBinder con_env2) user_bndrs
+          (con_env2, ex_tvs') = tidyVarBndrs con_env1 ex_tvs
+          user_bndrs' = map (tidyUserTyCoVarBinder con_env2) user_bndrs
           to_eq_spec (tv,ty) = (tidyTyVar con_env2 tv, tidyToIfaceType con_env2 ty)
 
           -- By this point, we have tidied every universal and existential
-          -- tyvar. Because of the dcUserTyVarBinders invariant
+          -- tyvar. Because of the dcUserTyCoVarBinders invariant
           -- (see Note [DataCon user type variable binders]), *every*
           -- user-written tyvar must be contained in the substitution that
           -- tidying produced. Therefore, tidying the user-written tyvars is a
           -- simple matter of looking up each variable in the substitution,
-          -- which tidyTyVarOcc accomplishes.
-          tidyUserTyVarBinder :: TidyEnv -> TyVarBinder -> TyVarBinder
-          tidyUserTyVarBinder env (TvBndr tv vis) =
-            TvBndr (tidyTyVarOcc env tv) vis
+          -- which tidyTyCoVarOcc accomplishes.
+          tidyUserTyCoVarBinder :: TidyEnv -> TyCoVarBinder -> TyCoVarBinder
+          tidyUserTyCoVarBinder env (Bndr tv vis) =
+            Bndr (tidyTyCoVarOcc env tv) vis
 
 classToIfaceDecl :: TidyEnv -> Class -> (TidyEnv, IfaceDecl)
 classToIfaceDecl env clas
   = ( env1
     , IfaceClass { ifName   = getName tycon,
                    ifRoles  = tyConRoles (classTyCon clas),
-                   ifBinders = toIfaceTyVarBinders tc_binders,
+                   ifBinders = toIfaceTyCoVarBinders tc_binders,
                    ifBody   = body,
                    ifFDs    = map toIfaceFD clas_fds })
   where
@@ -1846,10 +1848,10 @@ tidyTyConBinder :: TidyEnv -> TyConBinder -> (TidyEnv, TyConBinder)
 -- If the type variable "binder" is in scope, don't re-bind it
 -- In a class decl, for example, the ATD binders mention
 -- (amd must mention) the class tyvars
-tidyTyConBinder env@(_, subst) tvb@(TvBndr tv vis)
+tidyTyConBinder env@(_, subst) tvb@(Bndr tv vis)
  = case lookupVarEnv subst tv of
-     Just tv' -> (env,  TvBndr tv' vis)
-     Nothing  -> tidyTyVarBinder env tvb
+     Just tv' -> (env,  Bndr tv' vis)
+     Nothing  -> tidyTyCoVarBinder env tvb
 
 tidyTyConBinders :: TidyEnv -> [TyConBinder] -> (TidyEnv, [TyConBinder])
 tidyTyConBinders = mapAccumL tidyTyConBinder

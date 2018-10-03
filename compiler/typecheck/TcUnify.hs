@@ -17,7 +17,7 @@ module TcUnify (
   buildImplicationFor,
 
   -- Various unifications
-  unifyType, unifyTheta, unifyKind,
+  unifyType, unifyKind,
   uType, promoteTcType,
   swapOverTyVars, canSolveByUnification,
 
@@ -558,7 +558,7 @@ tcSubTypeET _ _ (Infer inf_res) ty_expected
   = ASSERT2( not (ir_inst inf_res), ppr inf_res $$ ppr ty_expected )
       -- An (Infer inf_res) ExpSigmaType passed into tcSubTypeET never
       -- has the ir_inst field set.  Reason: in patterns (which is what
-      -- tcSubTypeET is used for) do not agressively instantiate
+      -- tcSubTypeET is used for) do not aggressively instantiate
     do { co <- fill_infer_result ty_expected inf_res
                -- Since ir_inst is false, we can skip fillInferResult
                -- and go straight to fill_infer_result
@@ -750,7 +750,7 @@ tc_sub_type_ds eq_orig inst_orig ctxt ty_actual ty_expected
     --    go ty_a (TyVarTy alpha)
     -- which, in the impredicative case unified  alpha := ty_a
     -- where th_a is a polytype.  Not only is this probably bogus (we
-    -- simply do not have decent story for imprdicative types), but it
+    -- simply do not have decent story for impredicative types), but it
     -- caused Trac #12616 because (also bizarrely) 'deriving' code had
     -- -XImpredicativeTypes on.  I deleted the entire case.
 
@@ -758,8 +758,9 @@ tc_sub_type_ds eq_orig inst_orig ctxt ty_actual ty_expected
       | not (isPredTy act_arg)
       , not (isPredTy exp_arg)
       = -- See Note [Co/contra-variance of subsumption checking]
-        do { res_wrap <- tc_sub_type_ds eq_orig inst_orig  ctxt act_res exp_res
-           ; arg_wrap <- tc_sub_tc_type eq_orig given_orig ctxt exp_arg act_arg
+        do { res_wrap <- tc_sub_type_ds eq_orig inst_orig  ctxt       act_res exp_res
+           ; arg_wrap <- tc_sub_tc_type eq_orig given_orig GenSigCtxt exp_arg act_arg
+                         -- GenSigCtxt: See Note [Setting the argument context]
            ; return (mkWpFun arg_wrap res_wrap exp_arg exp_res doc) }
                -- arg_wrap :: exp_arg ~> act_arg
                -- res_wrap :: act-res ~> exp_res
@@ -807,6 +808,33 @@ tc_sub_type_ds eq_orig inst_orig ctxt ty_actual ty_expected
 
      -- use versions without synonyms expanded
     unify = mkWpCastN <$> uType TypeLevel eq_orig ty_actual ty_expected
+
+{- Note [Settting the argument context]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider we are doing the ambiguity check for the (bogus)
+  f :: (forall a b. C b => a -> a) -> Int
+
+We'll call
+   tcSubType ((forall a b. C b => a->a) -> Int )
+             ((forall a b. C b => a->a) -> Int )
+
+with a UserTypeCtxt of (FunSigCtxt "f").  Then we'll do the co/contra thing
+on the argument type of the (->) -- and at that point we want to switch
+to a UserTypeCtxt of GenSigCtxt.  Why?
+
+* Error messages.  If we stick with FunSigCtxt we get errors like
+     * Could not deduce: C b
+       from the context: C b0
+        bound by the type signature for:
+            f :: forall a b. C b => a->a
+  But of course f does not have that type signature!
+  Example tests: T10508, T7220a, Simple14
+
+* Implications. We may decide to build an implication for the whole
+  ambiguity check, but we don't need one for each level within it,
+  and TcUnify.alwaysBuildImplication checks the UserTypeCtxt.
+  See Note [When to build an implication]
+-}
 
 -----------------
 -- needs both un-type-checked (for origins) and type-checked (for wrapping)
@@ -907,7 +935,7 @@ has the ir_inst flag.
     f :: forall {a}. a -> forall b. Num b => b -> b -> b
   This is surely confusing for users.
 
-  And worse, the monomorphism restriction won't properly. The MR is
+  And worse, the monomorphism restriction won't work properly. The MR is
   dealt with in simplifyInfer, and simplifyInfer has no way of
   instantiating. This could perhaps be worked around, but it may be
   hard to know even when instantiation should happen.
@@ -971,7 +999,7 @@ promoteTcType dest_lvl ty
                                           , uo_thing    = Nothing
                                           , uo_visible  = False }
            ; ki_co <- uType KindLevel kind_orig (typeKind ty) res_kind
-           ; let co = mkTcNomReflCo ty `mkTcCoherenceRightCo` ki_co
+           ; let co = mkTcGReflRightCo Nominal ty ki_co
            ; return (co, ty `mkCastTy` ki_co) }
 
 {- Note [Promoting a type]
@@ -1024,7 +1052,7 @@ to
         (forall a. a->a) -> alpha[l+1]
 and emit the constraint
         [W] alpha[l+1] ~ Int
-Now the poromoted type can fill the ref cell, while the emitted
+Now the promoted type can fill the ref cell, while the emitted
 equality can float or not, according to the usual rules.
 
 But that's not quite right!  We are exposing the arrow! We could
@@ -1037,7 +1065,7 @@ Here we abstract over the '->' inside the forall, in case that
 is subject to an equality constraint from a GADT match.
 
 Note that we kept the outer (->) because that's part of
-the polymorphic "shape".  And becauuse of impredicativity,
+the polymorphic "shape".  And because of impredicativity,
 GADT matches can't give equalities that affect polymorphic
 shape.
 
@@ -1115,7 +1143,7 @@ checkConstraints :: SkolemInfo
                  -> TcM (TcEvBinds, result)
 
 checkConstraints skol_info skol_tvs given thing_inside
-  = do { implication_needed <- implicationNeeded skol_tvs given
+  = do { implication_needed <- implicationNeeded skol_info skol_tvs given
 
        ; if implication_needed
          then do { (tclvl, wanted, result) <- pushLevelAndCaptureConstraints thing_inside
@@ -1141,29 +1169,25 @@ checkTvConstraints skol_info m_telescope thing_inside
 
        ; if isEmptyWC wanted
          then return ()
-         else do { tc_lcl_env <- getLclEnv
-                 ; ev_binds   <- newNoTcEvBinds
+         else do { ev_binds <- newNoTcEvBinds
+                 ; implic   <- newImplication
                  ; emitImplication $
-                   newImplication { ic_tclvl     = tclvl
-                                  , ic_skols     = skol_tvs
-                                  , ic_no_eqs    = True
-                                  , ic_telescope = m_telescope
-                                  , ic_wanted    = wanted
-                                  , ic_binds     = ev_binds
-                                  , ic_info      = skol_info
-                                  , ic_env       = tc_lcl_env } }
+                   implic { ic_tclvl     = tclvl
+                          , ic_skols     = skol_tvs
+                          , ic_no_eqs    = True
+                          , ic_telescope = m_telescope
+                          , ic_wanted    = wanted
+                          , ic_binds     = ev_binds
+                          , ic_info      = skol_info } }
        ; return (skol_tvs, result) }
 
 
-implicationNeeded :: [TcTyVar] -> [EvVar] -> TcM Bool
--- With the solver producing unlifted equalities, we need
--- to have an EvBindsVar for them when they might be deferred to
--- runtime. Otherwise, they end up as top-level unlifted bindings,
--- which are verboten. See also Note [Deferred errors for coercion holes]
--- in TcErrors.  cf Trac #14149 for an example of what goes wrong.
-implicationNeeded skol_tvs given
+implicationNeeded :: SkolemInfo -> [TcTyVar] -> [EvVar] -> TcM Bool
+-- See Note [When to build an implication]
+implicationNeeded skol_info skol_tvs given
   | null skol_tvs
   , null given
+  , not (alwaysBuildImplication skol_info)
   = -- Empty skolems and givens
     do { tc_lvl <- getTcLevel
        ; if not (isTopTcLevel tc_lvl)  -- No implication needed if we are
@@ -1178,6 +1202,23 @@ implicationNeeded skol_tvs given
   | otherwise     -- Non-empty skolems or givens
   = return True   -- Definitely need an implication
 
+alwaysBuildImplication :: SkolemInfo -> Bool
+-- See Note [When to build an implication]
+alwaysBuildImplication _ = False
+
+{-  Commmented out for now while I figure out about error messages.
+    See Trac #14185
+
+alwaysBuildImplication (SigSkol ctxt _ _)
+  = case ctxt of
+      FunSigCtxt {} -> True  -- RHS of a binding with a signature
+      _             -> False
+alwaysBuildImplication (RuleSkol {})      = True
+alwaysBuildImplication (InstSkol {})      = True
+alwaysBuildImplication (FamInstSkol {})   = True
+alwaysBuildImplication _                  = False
+-}
+
 buildImplicationFor :: TcLevel -> SkolemInfo -> [TcTyVar]
                    -> [EvVar] -> WantedConstraints
                    -> TcM (Bag Implication, TcEvBinds)
@@ -1190,22 +1231,52 @@ buildImplicationFor tclvl skol_info skol_tvs given wanted
   = return (emptyBag, emptyTcEvBinds)
 
   | otherwise
-  = ASSERT2( all (isSkolemTyVar <||> isSigTyVar) skol_tvs, ppr skol_tvs )
-      -- Why allow SigTvs? Because implicitly declared kind variables in
-      -- non-CUSK type declarations are SigTvs, and we need to bring them
+  = ASSERT2( all (isSkolemTyVar <||> isTyVarTyVar) skol_tvs, ppr skol_tvs )
+      -- Why allow TyVarTvs? Because implicitly declared kind variables in
+      -- non-CUSK type declarations are TyVarTvs, and we need to bring them
       -- into scope as a skolem in an implication. This is OK, though,
-      -- because SigTvs will always remain tyvars, even after unification.
+      -- because TyVarTvs will always remain tyvars, even after unification.
     do { ev_binds_var <- newTcEvBinds
-       ; env <- getLclEnv
-       ; let implic = newImplication { ic_tclvl  = tclvl
-                                     , ic_skols  = skol_tvs
-                                     , ic_given  = given
-                                     , ic_wanted = wanted
-                                     , ic_binds  = ev_binds_var
-                                     , ic_env    = env
-                                     , ic_info   = skol_info }
+       ; implic <- newImplication
+       ; let implic' = implic { ic_tclvl  = tclvl
+                              , ic_skols  = skol_tvs
+                              , ic_given  = given
+                              , ic_wanted = wanted
+                              , ic_binds  = ev_binds_var
+                              , ic_info   = skol_info }
 
-       ; return (unitBag implic, TcEvBinds ev_binds_var) }
+       ; return (unitBag implic', TcEvBinds ev_binds_var) }
+
+{- Note [When to build an implication]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Suppose we have some 'skolems' and some 'givens', and we are
+considering whether to wrap the constraints in their scope into an
+implication.  We must /always/ so if either 'skolems' or 'givens' are
+non-empty.  But what if both are empty?  You might think we could
+always drop the implication.  Other things being equal, the fewer
+implications the better.  Less clutter and overhead.  But we must
+take care:
+
+* If we have an unsolved [W] g :: a ~# b, and -fdefer-type-errors,
+  we'll make a /term-level/ evidence binding for 'g = error "blah"'.
+  We must have an EvBindsVar those bindings!, otherwise they end up as
+  top-level unlifted bindings, which are verboten. This only matters
+  at top level, so we check for that
+  See also Note [Deferred errors for coercion holes] in TcErrors.
+  cf Trac #14149 for an example of what goes wrong.
+
+* If you have
+     f :: Int;  f = f_blah
+     g :: Bool; g = g_blah
+  If we don't build an implication for f or g (no tyvars, no givens),
+  the constraints for f_blah and g_blah are solved together.  And that
+  can yield /very/ confusing error messages, because we can get
+      [W] C Int b1    -- from f_blah
+      [W] C Int b2    -- from g_blan
+  and fundpes can yield [D] b1 ~ b2, even though the two functions have
+  literally nothing to do with each other.  Trac #14185 is an example.
+  Building an implication keeps them separage.
+-}
 
 {-
 ************************************************************************
@@ -1237,18 +1308,6 @@ unifyKind thing ty1 ty2 = traceTc "ukind" (ppr ty1 $$ ppr ty2 $$ ppr thing) >>
                               , uo_visible = True } -- also always from a visible context
 
 ---------------
-unifyPred :: PredType -> PredType -> TcM TcCoercionN
--- Actual and expected types
-unifyPred = unifyType Nothing
-
----------------
-unifyTheta :: TcThetaType -> TcThetaType -> TcM [TcCoercionN]
--- Actual and expected types
-unifyTheta theta1 theta2
-  = do  { checkTc (equalLength theta1 theta2)
-                  (vcat [text "Contexts differ in length",
-                         nest 2 $ parens $ text "Use RelaxedPolyRec to allow this"])
-        ; zipWithM unifyPred theta1 theta2 }
 
 {-
 %************************************************************************
@@ -1265,7 +1324,7 @@ uType, uType_defer
   -> CtOrigin
   -> TcType    -- ty1 is the *actual* type
   -> TcType    -- ty2 is the *expected* type
-  -> TcM Coercion
+  -> TcM CoercionN
 
 --------------
 -- It is always safe to defer unification to the main constraint solver
@@ -1300,9 +1359,20 @@ uType t_or_k origin orig_ty1 orig_ty2
             else traceTc "u_tys yields coercion:" (ppr co)
        ; return co }
   where
-    go :: TcType -> TcType -> TcM Coercion
+    go :: TcType -> TcType -> TcM CoercionN
         -- The arguments to 'go' are always semantically identical
         -- to orig_ty{1,2} except for looking through type synonyms
+
+     -- Unwrap casts before looking for variables. This way, we can easily
+     -- recognize (t |> co) ~ (t |> co), which is nice. Previously, we
+     -- didn't do it this way, and then the unification above was deferred.
+    go (CastTy t1 co1) t2
+      = do { co_tys <- uType t_or_k origin t1 t2
+           ; return (mkCoherenceLeftCo Nominal t1 co1 co_tys) }
+
+    go t1 (CastTy t2 co2)
+      = do { co_tys <- uType t_or_k origin t1 t2
+           ; return (mkCoherenceRightCo Nominal t2 co2 co_tys) }
 
         -- Variables; go for uVar
         -- Note that we pass in *original* (before synonym expansion),
@@ -1324,15 +1394,7 @@ uType t_or_k origin orig_ty1 orig_ty2
       -- See Note [Expanding synonyms during unification]
     go ty1@(TyConApp tc1 []) (TyConApp tc2 [])
       | tc1 == tc2
-      = return $ mkReflCo Nominal ty1
-
-    go (CastTy t1 co1) t2
-      = do { co_tys <- go t1 t2
-           ; return (mkCoherenceLeftCo co_tys co1) }
-
-    go t1 (CastTy t2 co2)
-      = do { co_tys <- go t1 t2
-           ; return (mkCoherenceRightCo co_tys co2) }
+      = return $ mkNomReflCo ty1
 
         -- See Note [Expanding synonyms during unification]
         --
@@ -1571,19 +1633,25 @@ uUnfilledVar2 origin t_or_k swapped tv1 ty2
       | canSolveByUnification cur_lvl tv1 ty2
       , Just ty2' <- metaTyVarUpdateOK dflags tv1 ty2
       = do { co_k <- uType KindLevel kind_origin (typeKind ty2') (tyVarKind tv1)
+           ; traceTc "uUnfilledVar2 ok" $
+             vcat [ ppr tv1 <+> dcolon <+> ppr (tyVarKind tv1)
+                  , ppr ty2 <+> dcolon <+> ppr (typeKind  ty2)
+                  , ppr (isTcReflCo co_k), ppr co_k ]
+
            ; if isTcReflCo co_k  -- only proceed if the kinds matched.
 
              then do { writeMetaTyVar tv1 ty2'
                      ; return (mkTcNomReflCo ty2') }
-             else defer } -- this cannot be solved now.
-                          -- See Note [Equalities with incompatible kinds]
-                          -- in TcCanonical
+
+             else defer } -- This cannot be solved now.  See TcCanonical
+                          -- Note [Equalities with incompatible kinds]
 
       | otherwise
-      = defer
+      = do { traceTc "uUnfilledVar2 not ok" (ppr tv1 $$ ppr ty2)
                -- Occurs check or an untouchable: just defer
                -- NB: occurs check isn't necessarily fatal:
                --     eg tv1 occured in type family parameter
+            ; defer }
 
     ty1 = mkTyVarTy tv1
     kind_origin = KindEqOrigin ty1 (Just ty2) origin (Just t_or_k)
@@ -1624,7 +1692,7 @@ lhsPriority tv
       SkolemTv {} -> 0
       MetaTv { mtv_info = info } -> case info of
                                      FlatSkolTv -> 1
-                                     SigTv      -> 2
+                                     TyVarTv    -> 2
                                      TauTv      -> 3
                                      FlatMetaTv -> 4
 {- Note [TyVar/TyVar orientation]
@@ -1649,11 +1717,11 @@ So we look for a positive reason to swap, using a three-step test:
         outer one.  So nothing can be deeper than a FlatMetaTv
 
 
-  - SigTv/TauTv:  if we have  sig_tv ~ tau_tv, put tau_tv
-                  on the left because there are fewer
-                  restrictions on updating TauTvs
+  - TyVarTv/TauTv: if we have  tyv_tv ~ tau_tv, put tau_tv
+                   on the left because there are fewer
+                   restrictions on updating TauTvs
 
-  - SigTv/TauTv:  put on the left eitehr
+  - TyVarTv/TauTv:  put on the left either
      a) Because it's touchable and can be unified, or
      b) Even if it's not touchable, TcSimplify.floatEqualities
         looks for meta tyvars on the left
@@ -1685,7 +1753,7 @@ Wanteds and Givens, but either way, deepest wins!  Simple.
   If we orient the Given a[2] on the left, we'll rewrite the Wanted to
   (beta[1] ~ b[1]), and that can float out of the implication.
   Otherwise it can't.  By putting the deepest variable on the left
-  we maximise our changes of elminating skolem capture.
+  we maximise our changes of eliminating skolem capture.
 
   See also TcSMonad Note [Let-bound skolems] for another reason
   to orient with the deepest skolem on the left.
@@ -1748,7 +1816,7 @@ where fsk is a flatten-skolem (FlatSkolTv). Suppose we have
 then we'll reduce the second constraint to
      [G] a ~ fsk
 and then replace all uses of 'a' with fsk.  That's bad because
-in error messages intead of saying 'a' we'll say (F [a]).  In all
+in error messages instead of saying 'a' we'll say (F [a]).  In all
 places, including those where the programmer wrote 'a' in the first
 place.  Very confusing!  See Trac #7862.
 
@@ -1772,7 +1840,7 @@ Note [Eliminate younger unification variables]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Given a choice of unifying
      alpha := beta   or   beta := alpha
-we try, if possible, to elimiate the "younger" one, as determined
+we try, if possible, to eliminate the "younger" one, as determined
 by `ltUnique`.  Reason: the younger one is less likely to appear free in
 an existing inert constraint, and hence we are less likely to be forced
 into kicking out and rewriting inert constraints.
@@ -1794,8 +1862,8 @@ canSolveByUnification :: TcLevel -> TcTyVar -> TcType -> Bool
 canSolveByUnification tclvl tv xi
   | isTouchableMetaTyVar tclvl tv
   = case metaTyVarInfo tv of
-      SigTv -> is_tyvar xi
-      _     -> True
+      TyVarTv -> is_tyvar xi
+      _       -> True
 
   | otherwise    -- Untouchable
   = False
@@ -1806,8 +1874,8 @@ canSolveByUnification tclvl tv xi
           Just tv -> case tcTyVarDetails tv of
                        MetaTv { mtv_info = info }
                                    -> case info of
-                                        SigTv -> True
-                                        _     -> False
+                                        TyVarTv -> True
+                                        _       -> False
                        SkolemTv {} -> True
                        RuntimeUnk  -> True
 
@@ -1988,7 +2056,7 @@ matchExpectedFunKind hs_ty = go
 Suppose we are considering unifying
    (alpha :: *)  ~  Int -> (beta :: alpha -> alpha)
 This may be an error (what is that alpha doing inside beta's kind?),
-but we must not make the mistake of actuallyy unifying or we'll
+but we must not make the mistake of actually unifying or we'll
 build an infinite data structure.  So when looking for occurrences
 of alpha in the rhs, we must look in the kinds of type variables
 that occur there.
@@ -2128,7 +2196,7 @@ preCheck dflags ty_fam_ok tv ty
     fast_check (AppTy fun arg) = fast_check fun >> fast_check arg
     fast_check (CastTy ty co)  = fast_check ty  >> fast_check_co co
     fast_check (CoercionTy co) = fast_check_co co
-    fast_check (ForAllTy (TvBndr tv' _) ty)
+    fast_check (ForAllTy (Bndr tv' _) ty)
        | not impredicative_ok = OC_Bad
        | tv == tv'            = ok
        | otherwise = do { fast_check_occ (tyVarKind tv')
@@ -2157,7 +2225,7 @@ preCheck dflags ty_fam_ok tv ty
 canUnifyWithPolyType :: DynFlags -> TcTyVarDetails -> Bool
 canUnifyWithPolyType dflags details
   = case details of
-      MetaTv { mtv_info = SigTv }    -> False
-      MetaTv { mtv_info = TauTv }    -> xopt LangExt.ImpredicativeTypes dflags
-      _other                         -> True
+      MetaTv { mtv_info = TyVarTv }    -> False
+      MetaTv { mtv_info = TauTv }      -> xopt LangExt.ImpredicativeTypes dflags
+      _other                           -> True
           -- We can have non-meta tyvars in given constraints

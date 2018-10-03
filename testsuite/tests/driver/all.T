@@ -234,6 +234,8 @@ test('T10220', normal, run_command,
 
 test('T10182', [], run_command, ['$MAKE -s --no-print-directory T10182'])
 
+test('T10869', [], run_command, ['$MAKE -s --no-print-directory T10869'])
+
 test('T365',
      [pre_cmd('touch test_preprocessor.txt'), unless(opsys('mingw32'), skip)],
      compile_fail, [''])
@@ -264,6 +266,8 @@ test('T12192', normal, run_command, ['mkdir foo && (cd foo && {compiler} -v0 ../
 
 test('T10923', [], run_command, ['$MAKE -s --no-print-directory T10923'])
 
+test('T12625', normal, compile_fail, ['-I'])
+
 test('T12752pass', normal, compile, ['-DSHOULD_PASS=1 -Wcpp-undef'])
 
 test('T12955', normal, run_command, ['$MAKE -s --no-print-directory T12955'])
@@ -278,3 +282,5 @@ test('T13604a', [], run_command, ['$MAKE -s --no-print-directory T13604a'])
 test('inline-check', omit_ways(['hpc', 'profasm'])
                    , compile
 		   , ['-dinline-check foo -O -ddebug-output'])
+
+test('T15396', normal, compile_and_run, ['-package ghc'])

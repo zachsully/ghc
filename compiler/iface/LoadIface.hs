@@ -16,7 +16,7 @@ module LoadIface (
         -- RnM/TcM functions
         loadModuleInterface, loadModuleInterfaces,
         loadSrcInterface, loadSrcInterface_maybe,
-        loadInterfaceForName, loadInterfaceForModule,
+        loadInterfaceForName, loadInterfaceForNameMaybe, loadInterfaceForModule,
 
         -- IfM functions
         loadInterface,
@@ -312,6 +312,15 @@ loadInterfaceForName doc name
             ; MASSERT2( not (nameIsLocalOrFrom this_mod name), ppr name <+> parens doc ) }
       ; ASSERT2( isExternalName name, ppr name )
         initIfaceTcRn $ loadSysInterface doc (nameModule name) }
+
+-- | Only loads the interface for external non-local names.
+loadInterfaceForNameMaybe :: SDoc -> Name -> TcRn (Maybe ModIface)
+loadInterfaceForNameMaybe doc name
+  = do { this_mod <- getModule
+       ; if nameIsLocalOrFrom this_mod name || not (isExternalName name)
+         then return Nothing
+         else Just <$> (initIfaceTcRn $ loadSysInterface doc (nameModule name))
+       }
 
 -- | Loads the interface for a given Module.
 loadInterfaceForModule :: SDoc -> Module -> TcRn ModIface
@@ -1038,6 +1047,15 @@ ifaceStats eps
                 Printing interfaces
 *                                                                      *
 ************************************************************************
+
+Note [Name qualification with --show-iface]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In order to disambiguate between identifiers from different modules, we qualify
+all names that don't originate in the current module. In order to keep visual
+noise as low as possible, we keep local names unqualified.
+
+For some background on this choice see trac #15269.
 -}
 
 -- | Read binary interface, and print it out
@@ -1048,8 +1066,15 @@ showIface hsc_env filename = do
    iface <- initTcRnIf 's' hsc_env () () $
        readBinIface IgnoreHiWay TraceBinIFaceReading filename
    let dflags = hsc_dflags hsc_env
+       -- See Note [Name qualification with --show-iface]
+       qualifyImportedNames mod _
+           | mod == mi_module iface = NameUnqual
+           | otherwise              = NameNotInScope1
+       print_unqual = QueryQualify qualifyImportedNames
+                                   neverQualifyModules
+                                   neverQualifyPackages
    putLogMsg dflags NoReason SevDump noSrcSpan
-      (defaultDumpStyle dflags) (pprModIface iface)
+      (mkDumpStyle dflags print_unqual) (pprModIface iface)
 
 -- Show a ModIface but don't display details; suitable for ModIfaces stored in
 -- the EPT.

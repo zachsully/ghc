@@ -20,7 +20,7 @@ module HsTypes (
         HsType(..), NewHsTypeX(..), LHsType, HsKind, LHsKind,
         HsTyVarBndr(..), LHsTyVarBndr,
         LHsQTyVars(..), HsQTvsRn(..),
-        HsImplicitBndrs(..), HsIBRn(..),
+        HsImplicitBndrs(..),
         HsWildCardBndrs(..),
         LHsSigType, LHsSigWcType, LHsWcType,
         HsTupleSort(..),
@@ -91,6 +91,7 @@ import FastString
 import Maybes( isJust )
 
 import Data.Data hiding ( Fixity, Prefix, Infix )
+import Data.List ( foldl' )
 import Data.Maybe ( fromMaybe )
 
 {-
@@ -217,6 +218,49 @@ Note carefully:
 * After type checking is done, we report what types the wildcards
   got unified with.
 
+Note [Ordering of implicit variables]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Since the advent of -XTypeApplications, GHC makes promises about the ordering
+of implicit variable quantification. Specifically, we offer that implicitly
+quantified variables (such as those in const :: a -> b -> a, without a `forall`)
+will occur in left-to-right order of first occurrence. Here are a few examples:
+
+  const :: a -> b -> a       -- forall a b. ...
+  f :: Eq a => b -> a -> a   -- forall a b. ...  contexts are included
+
+  type a <-< b = b -> a
+  g :: a <-< b               -- forall a b. ...  type synonyms matter
+
+  class Functor f where
+    fmap :: (a -> b) -> f a -> f b   -- forall f a b. ...
+    -- The f is quantified by the class, so only a and b are considered in fmap
+
+This simple story is complicated by the possibility of dependency: all variables
+must come after any variables mentioned in their kinds.
+
+  typeRep :: Typeable a => TypeRep (a :: k)   -- forall k a. ...
+
+The k comes first because a depends on k, even though the k appears later than
+the a in the code. Thus, GHC does a *stable topological sort* on the variables.
+By "stable", we mean that any two variables who do not depend on each other
+preserve their existing left-to-right ordering.
+
+Implicitly bound variables are collected by the extract- family of functions
+(extractHsTysRdrTyVars, extractHsTyVarBndrsKVs, etc.) in RnTypes.
+These functions thus promise to keep left-to-right ordering.
+Look for pointers to this note to see the places where the action happens.
+
+Note that we also maintain this ordering in kind signatures. Even though
+there's no visible kind application (yet), having implicit variables be
+quantified in left-to-right order in kind signatures is nice since:
+
+* It's consistent with the treatment for type signatures.
+* It can affect how types are displayed with -fprint-explicit-kinds (see
+  #15568 for an example), which is a situation where knowing the order in
+  which implicit variables are quantified can be useful.
+* In the event that visible kind application is implemented, the order in
+  which we would expect implicit variables to be ordered in kinds will have
+  already been established.
 -}
 
 -- | Located Haskell Context
@@ -301,21 +345,19 @@ isEmptyLHsQTvs _                = False
 
 -- | Haskell Implicit Binders
 data HsImplicitBndrs pass thing   -- See Note [HsType binders]
-  = HsIB { hsib_ext  :: XHsIB pass thing
+  = HsIB { hsib_ext  :: XHsIB pass thing -- after renamer: [Name]
+                                         -- Implicitly-bound kind & type vars
+                                         -- Order is important; see
+                                         -- Note [Ordering of implicit variables]
+                                         -- in RnTypes
+
          , hsib_body :: thing            -- Main payload (type or list of types)
     }
   | XHsImplicitBndrs (XXHsImplicitBndrs pass thing)
 
-data HsIBRn
-  = HsIBRn { hsib_vars :: [Name] -- Implicitly-bound kind & type vars
-           , hsib_closed :: Bool -- Taking the hsib_vars into account,
-                                 -- is the payload closed? Used in
-                                 -- TcHsType.decideKindGeneralisationPlan
-    } deriving Data
-
 type instance XHsIB              GhcPs _ = NoExt
-type instance XHsIB              GhcRn _ = HsIBRn
-type instance XHsIB              GhcTc _ = HsIBRn
+type instance XHsIB              GhcRn _ = [Name]
+type instance XHsIB              GhcTc _ = [Name]
 
 type instance XXHsImplicitBndrs  (GhcPass _) _ = NoExt
 
@@ -396,9 +438,7 @@ mkHsWildCardBndrs x = HsWC { hswc_body = x
 -- Add empty binders.  This is a bit suspicious; what if
 -- the wrapped thing had free type variables?
 mkEmptyImplicitBndrs :: thing -> HsImplicitBndrs GhcRn thing
-mkEmptyImplicitBndrs x = HsIB { hsib_ext = HsIBRn
-                                  { hsib_vars   = []
-                                  , hsib_closed = False }
+mkEmptyImplicitBndrs x = HsIB { hsib_ext = []
                               , hsib_body = x }
 
 mkEmptyWildCardBndrs :: thing -> HsWildCardBndrs GhcRn thing
@@ -548,18 +588,6 @@ data HsType pass
 
       -- For details on above see note [Api annotations] in ApiAnnotation
 
-  | HsEqTy              (XEqTy pass)
-                        (LHsType pass)   -- ty1 ~ ty2
-                        (LHsType pass)   -- Always allowed even without
-                                         -- TypeOperators, and has special
-                                         -- kinding rule
-      -- ^
-      -- > ty1 ~ ty2
-      --
-      -- - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnTilde'
-
-      -- For details on above see note [Api annotations] in ApiAnnotation
-
   | HsStarTy            (XStarTy pass)
                         Bool             -- Is this the Unicode variant?
                                          -- Note [HsStarTy]
@@ -665,7 +693,6 @@ type instance XSumTy           (GhcPass _) = NoExt
 type instance XOpTy            (GhcPass _) = NoExt
 type instance XParTy           (GhcPass _) = NoExt
 type instance XIParamTy        (GhcPass _) = NoExt
-type instance XEqTy            (GhcPass _) = NoExt
 type instance XStarTy          (GhcPass _) = NoExt
 type instance XKindSig         (GhcPass _) = NoExt
 
@@ -908,7 +935,7 @@ hsWcScopedTvs :: LHsSigWcType GhcRn -> [Name]
 -- because they scope in the same way
 hsWcScopedTvs sig_ty
   | HsWC { hswc_ext = nwcs, hswc_body = sig_ty1 }  <- sig_ty
-  , HsIB { hsib_ext = HsIBRn { hsib_vars = vars}
+  , HsIB { hsib_ext = vars
          , hsib_body = sig_ty2 } <- sig_ty1
   = case sig_ty2 of
       L _ (HsForAllTy { hst_bndrs = tvs }) -> vars ++ nwcs ++
@@ -922,7 +949,7 @@ hsWcScopedTvs (XHsWildCardBndrs _) = panic "hsWcScopedTvs"
 hsScopedTvs :: LHsSigType GhcRn -> [Name]
 -- Same as hsWcScopedTvs, but for a LHsSigType
 hsScopedTvs sig_ty
-  | HsIB { hsib_ext = HsIBRn { hsib_vars = vars }
+  | HsIB { hsib_ext = vars
          , hsib_body = sig_ty2 } <- sig_ty
   , L _ (HsForAllTy { hst_bndrs = tvs }) <- sig_ty2
   = vars ++ map hsLTyVarName tvs
@@ -1020,7 +1047,7 @@ mkHsAppTy t1 t2
 
 mkHsAppTys :: LHsType (GhcPass p) -> [LHsType (GhcPass p)]
            -> LHsType (GhcPass p)
-mkHsAppTys = foldl mkHsAppTy
+mkHsAppTys = foldl' mkHsAppTy
 
 {-
 ************************************************************************
@@ -1112,7 +1139,7 @@ splitLHsQualTy body              = (noLoc [], body)
 splitLHsInstDeclTy :: LHsSigType GhcRn
                    -> ([Name], LHsContext GhcRn, LHsType GhcRn)
 -- Split up an instance decl type, returning the pieces
-splitLHsInstDeclTy (HsIB { hsib_ext = HsIBRn { hsib_vars = itkvs }
+splitLHsInstDeclTy (HsIB { hsib_ext = itkvs
                          , hsib_body = inst_ty })
   | (tvs, cxt, body_ty) <- splitLHsSigmaTy inst_ty
   = (itkvs ++ map hsLTyVarName tvs, cxt, body_ty)
@@ -1149,19 +1176,19 @@ type LFieldOcc pass = Located (FieldOcc pass)
 -- Represents an *occurrence* of an unambiguous field.  We store
 -- both the 'RdrName' the user originally wrote, and after the
 -- renamer, the selector function.
-data FieldOcc pass = FieldOcc { extFieldOcc     :: XFieldOcc pass
+data FieldOcc pass = FieldOcc { extFieldOcc     :: XCFieldOcc pass
                               , rdrNameFieldOcc :: Located RdrName
                                  -- ^ See Note [Located RdrNames] in HsExpr
                               }
 
   | XFieldOcc
       (XXFieldOcc pass)
-deriving instance (p ~ GhcPass pass, Eq (XFieldOcc p)) => Eq  (FieldOcc p)
-deriving instance (p ~ GhcPass pass, Ord (XFieldOcc p)) => Ord (FieldOcc p)
+deriving instance (p ~ GhcPass pass, Eq (XCFieldOcc p)) => Eq  (FieldOcc p)
+deriving instance (p ~ GhcPass pass, Ord (XCFieldOcc p)) => Ord (FieldOcc p)
 
-type instance XFieldOcc GhcPs = NoExt
-type instance XFieldOcc GhcRn = Name
-type instance XFieldOcc GhcTc = Id
+type instance XCFieldOcc GhcPs = NoExt
+type instance XCFieldOcc GhcRn = Name
+type instance XCFieldOcc GhcTc = Id
 
 type instance XXFieldOcc (GhcPass _) = NoExt
 
@@ -1395,9 +1422,6 @@ ppr_mono_ty (HsExplicitTupleTy _ tys) = quote $ parens (interpp'SP tys)
 ppr_mono_ty (HsTyLit _ t)       = ppr_tylit t
 ppr_mono_ty (HsWildCardTy {})   = char '_'
 
-ppr_mono_ty (HsEqTy _ ty1 ty2)
-  = ppr_mono_lty ty1 <+> char '~' <+> ppr_mono_lty ty2
-
 ppr_mono_ty (HsStarTy _ isUni)  = char (if isUni then '★' else '*')
 
 ppr_mono_ty (HsAppTy _ fun_ty arg_ty)
@@ -1441,8 +1465,8 @@ ppr_tylit (HsStrTy _ s) = text (show s)
 hsTypeNeedsParens :: PprPrec -> HsType pass -> Bool
 hsTypeNeedsParens p = go
   where
-    go (HsForAllTy{})        = False
-    go (HsQualTy{})          = False
+    go (HsForAllTy{})        = p >= funPrec
+    go (HsQualTy{})          = p >= funPrec
     go (HsBangTy{})          = p > topPrec
     go (HsRecTy{})           = False
     go (HsTyVar{})           = False
@@ -1457,7 +1481,6 @@ hsTypeNeedsParens p = go
     go (HsExplicitTupleTy{}) = False
     go (HsTyLit{})           = False
     go (HsWildCardTy{})      = False
-    go (HsEqTy{})            = p >= opPrec
     go (HsStarTy{})          = False
     go (HsAppTy{})           = p >= appPrec
     go (HsOpTy{})            = p >= opPrec

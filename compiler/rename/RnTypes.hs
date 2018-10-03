@@ -127,7 +127,8 @@ rn_hs_sig_wc_type always_bind_free_tvs ctxt
        ; rnImplicitBndrs bind_free_tvs tv_rdrs $ \ vars ->
     do { (wcs, hs_ty', fvs1) <- rnWcBody ctxt nwc_rdrs hs_ty
        ; let sig_ty' = HsWC { hswc_ext = wcs, hswc_body = ib_ty' }
-             ib_ty'  = mk_implicit_bndrs vars hs_ty' fvs1
+             ib_ty'  = HsIB { hsib_ext = vars
+                            , hsib_body = hs_ty' }
        ; (res, fvs2) <- thing_inside sig_ty'
        ; return (res, fvs1 `plusFV` fvs2) } }
 rn_hs_sig_wc_type _ _ (HsWC _ (XHsImplicitBndrs _)) _
@@ -300,7 +301,9 @@ rnHsSigType ctx (HsIB { hsib_body = hs_ty })
        ; vars <- extractFilteredRdrTyVarsDups hs_ty
        ; rnImplicitBndrs (not (isLHsForAllTy hs_ty)) vars $ \ vars ->
     do { (body', fvs) <- rnLHsType ctx hs_ty
-       ; return ( mk_implicit_bndrs vars body' fvs, fvs ) } }
+       ; return ( HsIB { hsib_ext = vars
+                       , hsib_body = body' }
+                , fvs ) } }
 rnHsSigType _ (XHsImplicitBndrs _) = panic "rnHsSigType"
 
 rnImplicitBndrs :: Bool    -- True <=> bring into scope any free type variables
@@ -340,6 +343,8 @@ rnImplicitBndrs bind_free_tvs
          implicit_kind_vars_msg kvs
 
        ; loc <- getSrcSpanM
+          -- NB: kinds before tvs, as mandated by
+          -- Note [Ordering of implicit variables]
        ; vars <- mapM (newLocalBndrRn . L loc . unLoc) (kvs ++ real_tvs)
 
        ; traceRn "checkMixedVars2" $
@@ -364,18 +369,6 @@ rnLHsInstType :: SDoc -> LHsSigType GhcPs -> RnM (LHsSigType GhcRn, FreeVars)
 -- The 'doc_str' is "an instance declaration".
 -- Do not try to decompose the inst_ty in case it is malformed
 rnLHsInstType doc inst_ty = rnHsSigType (GenericCtx doc) inst_ty
-
-mk_implicit_bndrs :: [Name]  -- implicitly bound
-                  -> a           -- payload
-                  -> FreeVars    -- FreeVars of payload
-                  -> HsImplicitBndrs GhcRn a
-mk_implicit_bndrs vars body fvs
-  = HsIB { hsib_ext = HsIBRn
-           { hsib_vars = vars
-           , hsib_closed = nameSetAll (not . isTyVarName) (vars `delFVs` fvs) }
-         , hsib_body = body }
-
-
 
 {- ******************************************************
 *                                                       *
@@ -629,12 +622,6 @@ rnHsTyKi env t@(HsIParamTy _ n ty)
        ; (ty', fvs) <- rnLHsTyKi env ty
        ; return (HsIParamTy noExt n ty', fvs) }
 
-rnHsTyKi env t@(HsEqTy _ ty1 ty2)
-  = do { checkPolyKinds env t
-       ; (ty1', fvs1) <- rnLHsTyKi env ty1
-       ; (ty2', fvs2) <- rnLHsTyKi env ty2
-       ; return (HsEqTy noExt ty1' ty2', fvs1 `plusFV` fvs2) }
-
 rnHsTyKi _ (HsStarTy _ isUni)
   = return (HsStarTy noExt isUni, emptyFVs)
 
@@ -850,7 +837,10 @@ bindHsQTyVars doc mb_in_doc mb_assoc body_kv_occs hsq_bndrs thing_inside
              -- all these various things are doing
              bndrs, kv_occs, implicit_kvs :: [Located RdrName]
              bndrs        = map hsLTyVarLocName hs_tv_bndrs
-             kv_occs      = nubL (body_kv_occs ++ bndr_kv_occs)
+             kv_occs      = nubL (bndr_kv_occs ++ body_kv_occs)
+                                 -- Make sure to list the binder kvs before the
+                                 -- body kvs, as mandated by
+                                 -- Note [Ordering of implicit variables]
              implicit_kvs = filter_occs rdr_env bndrs kv_occs
                                  -- Deleting bndrs: See Note [Kind-variable ordering]
              -- dep_bndrs is the subset of bndrs that are dependent
@@ -1064,7 +1054,6 @@ collectAnonWildCards lty = go lty
       HsOpTy _ ty1 _ ty2             -> go ty1 `mappend` go ty2
       HsParTy _ ty                   -> go ty
       HsIParamTy _ _ ty              -> go ty
-      HsEqTy _ ty1 ty2               -> go ty1 `mappend` go ty2
       HsKindSig _ ty kind            -> go ty `mappend` go kind
       HsDocTy _ ty _                 -> go ty
       HsBangTy _ _ ty                -> go ty
@@ -1533,7 +1522,10 @@ In general we want to walk over a type, and find
   * The free kind variables of any kind signatures in the type
 
 Hence we return a pair (kind-vars, type vars)
-See also Note [HsBSig binder lists] in HsTypes
+(See Note [HsBSig binder lists] in HsTypes.)
+Moreover, we preserve the left-to-right order of the first occurrence of each
+variable, while preserving dependency order.
+(See Note [Ordering of implicit variables].)
 
 Most clients of this code just want to know the kind/type vars, without
 duplicates. The function rmDupsInRdrTyVars removes duplicates. That function
@@ -1562,9 +1554,57 @@ var, then this would prevent it from being implicitly quantified (see
 rnImplicitBndrs). In the `foo` example above, that would have the consequence
 of the k in Proxy k being reported as out of scope.
 
+Note [Ordering of implicit variables]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Since the advent of -XTypeApplications, GHC makes promises about the ordering
+of implicit variable quantification. Specifically, we offer that implicitly
+quantified variables (such as those in const :: a -> b -> a, without a `forall`)
+will occur in left-to-right order of first occurrence. Here are a few examples:
+
+  const :: a -> b -> a       -- forall a b. ...
+  f :: Eq a => b -> a -> a   -- forall a b. ...  contexts are included
+
+  type a <-< b = b -> a
+  g :: a <-< b               -- forall a b. ...  type synonyms matter
+
+  class Functor f where
+    fmap :: (a -> b) -> f a -> f b   -- forall f a b. ...
+    -- The f is quantified by the class, so only a and b are considered in fmap
+
+This simple story is complicated by the possibility of dependency: all variables
+must come after any variables mentioned in their kinds.
+
+  typeRep :: Typeable a => TypeRep (a :: k)   -- forall k a. ...
+
+The k comes first because a depends on k, even though the k appears later than
+the a in the code. Thus, GHC does a *stable topological sort* on the variables.
+By "stable", we mean that any two variables who do not depend on each other
+preserve their existing left-to-right ordering.
+
+Implicitly bound variables are collected by any function which returns a
+FreeKiTyVars, FreeKiTyVarsWithDups, or FreeKiTyVarsNoDups, which notably
+includes the `extract-` family of functions (extractHsTysRdrTyVars,
+extractHsTyVarBndrsKVs, etc.).
+These functions thus promise to keep left-to-right ordering.
+Look for pointers to this note to see the places where the action happens.
+
+Note that we also maintain this ordering in kind signatures. Even though
+there's no visible kind application (yet), having implicit variables be
+quantified in left-to-right order in kind signatures is nice since:
+
+* It's consistent with the treatment for type signatures.
+* It can affect how types are displayed with -fprint-explicit-kinds (see
+  #15568 for an example), which is a situation where knowing the order in
+  which implicit variables are quantified can be useful.
+* In the event that visible kind application is implemented, the order in
+  which we would expect implicit variables to be ordered in kinds will have
+  already been established.
 -}
 
 -- See Note [Kind and type-variable binders]
+-- These lists are guaranteed to preserve left-to-right ordering of
+-- the types the variables were extracted from. See also
+-- Note [Ordering of implicit variables].
 data FreeKiTyVars = FKTV { fktv_kis    :: [Located RdrName]
                          , fktv_tys    :: [Located RdrName] }
 
@@ -1625,8 +1665,10 @@ extractHsTyRdrTyVarsDups ty
 -- | Extracts the free kind variables (but not the type variables) of an
 -- 'HsType'. Does not return any wildcards.
 -- When the same name occurs multiple times in the type, only the first
--- occurrence is returned.
--- See Note [Kind and type-variable binders]
+-- occurrence is returned, and the left-to-right order of variables is
+-- preserved.
+-- See Note [Kind and type-variable binders] and
+-- Note [Ordering of implicit variables].
 extractHsTyRdrTyVarsKindVars :: LHsType GhcPs -> RnM [Located RdrName]
 extractHsTyRdrTyVarsKindVars ty
   = freeKiTyVarsKindVars <$> extractHsTyRdrTyVars ty
@@ -1647,7 +1689,9 @@ extractHsTysRdrTyVarsDups tys
   = extract_ltys TypeLevel tys emptyFKTV
 
 extractHsTyVarBndrsKVs :: [LHsTyVarBndr GhcPs] -> RnM [Located RdrName]
--- Returns the free kind variables of any explictly-kinded binders
+-- Returns the free kind variables of any explictly-kinded binders, returning
+-- variable occurrences in left-to-right order.
+-- See Note [Ordering of implicit variables].
 -- NB: Does /not/ delete the binders themselves.
 --     However duplicates are removed
 --     E.g. given  [k1, a:k1, b:k2]
@@ -1668,6 +1712,9 @@ rmDupsInRdrTyVars (FKTV kis tys)
     tys' = nubL (filterOut (`elemRdr` kis') tys)
 
 extractRdrKindSigVars :: LFamilyResultSig GhcPs -> RnM [Located RdrName]
+-- Returns the free kind variables in a type family result signature, returning
+-- variable occurrences in left-to-right order.
+-- See Note [Ordering of implicit variables].
 extractRdrKindSigVars (L _ resultSig)
     | KindSig _ k                          <- resultSig = kindRdrNameFromSig k
     | TyVarSig _ (L _ (KindedTyVar _ _ k)) <- resultSig = kindRdrNameFromSig k
@@ -1688,6 +1735,8 @@ extractDataDefnKindVars :: HsDataDefn GhcPs -> RnM [Located RdrName]
 --         data D = D
 --         instance forall k (a::k). C @k @* a D where ...
 --
+-- This returns variable occurrences in left-to-right order.
+-- See Note [Ordering of implicit variables].
 extractDataDefnKindVars (HsDataDefn { dd_ctxt = ctxt, dd_kindSig = ksig
                                     , dd_cons = cons })
   = (nubL . freeKiTyVarsKindVars) <$>
@@ -1745,8 +1794,6 @@ extract_lty t_or_k (L _ ty) acc
       HsFunTy _ ty1 ty2           -> extract_lty t_or_k ty1 =<<
                                      extract_lty t_or_k ty2 acc
       HsIParamTy _ _ ty           -> extract_lty t_or_k ty acc
-      HsEqTy _ ty1 ty2            -> extract_lty t_or_k ty1 =<<
-                                     extract_lty t_or_k ty2 acc
       HsOpTy _ ty1 tv ty2         -> extract_tv t_or_k tv =<<
                                      extract_lty t_or_k ty1 =<<
                                      extract_lty t_or_k ty2 acc
@@ -1813,7 +1860,9 @@ extract_hs_tv_bndrs tv_bndrs
               (filterOut (`elemRdr` tv_bndr_rdrs) body_tvs ++ acc_tvs) }
 
 extract_hs_tv_bndrs_kvs :: [LHsTyVarBndr GhcPs] -> RnM [Located RdrName]
--- Returns the free kind variables of any explictly-kinded binders
+-- Returns the free kind variables of any explictly-kinded binders, returning
+-- variable occurrences in left-to-right order.
+-- See Note [Ordering of implicit variables].
 -- NB: Does /not/ delete the binders themselves.
 --     Duplicates are /not/ removed
 --     E.g. given  [k1, a:k1, b:k2]
@@ -1831,7 +1880,13 @@ extract_tv t_or_k ltv@(L _ tv) acc@(FKTV kvs tvs)
   | isTypeLevel t_or_k  = return (FKTV kvs (ltv : tvs))
   | otherwise           = return (FKTV (ltv : kvs) tvs)
 
--- just used in this module; seemed convenient here
+-- Deletes duplicates in a list of Located things.
+--
+-- Importantly, this function is stable with respect to the original ordering
+-- of things in the list. This is important, as it is a property that GHC
+-- relies on to maintain the left-to-right ordering of implicitly quantified
+-- type variables.
+-- See Note [Ordering of implicit variables].
 nubL :: Eq a => [Located a] -> [Located a]
 nubL = nubBy eqLocated
 

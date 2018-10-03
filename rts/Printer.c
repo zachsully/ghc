@@ -13,6 +13,7 @@
 #include "rts/Bytecodes.h"  /* for InstrPtr */
 
 #include "sm/Storage.h"
+#include "sm/GCThread.h"
 #include "Hash.h"
 #include "Printer.h"
 #include "RtsUtils.h"
@@ -22,6 +23,8 @@
 #endif
 
 #include <string.h>
+
+void findPtr(P_ p, int follow);
 
 #if defined(DEBUG)
 
@@ -774,8 +777,6 @@ extern void DEBUG_LoadSymbols( const char *name STG_UNUSED )
 
 #endif /* USING_LIBBFD */
 
-void findPtr(P_ p, int);                /* keep gcc -Wall happy */
-
 int searched = 0;
 
 static int
@@ -825,17 +826,29 @@ findPtr(P_ p, int follow)
   int i = 0;
   searched = 0;
 
+#if 0
+  // We can't search the nursery, because we don't know which blocks contain
+  // valid data, because the bd->free pointers in the nursery are only reset
+  // just before a block is used.
   for (n = 0; n < n_capabilities; n++) {
       bd = nurseries[i].blocks;
       i = findPtrBlocks(p,bd,arr,arr_size,i);
       if (i >= arr_size) return;
   }
+#endif
 
   for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
       bd = generations[g].blocks;
       i = findPtrBlocks(p,bd,arr,arr_size,i);
       bd = generations[g].large_objects;
       i = findPtrBlocks(p,bd,arr,arr_size,i);
+      if (i >= arr_size) return;
+      for (n = 0; n < n_capabilities; n++) {
+          i = findPtrBlocks(p, gc_threads[n]->gens[g].part_list,
+                            arr, arr_size, i);
+          i = findPtrBlocks(p, gc_threads[n]->gens[g].todo_bd,
+                            arr, arr_size, i);
+      }
       if (i >= arr_size) return;
   }
   if (follow && i == 1) {
@@ -863,7 +876,12 @@ void printObj( StgClosure *obj )
     debugBelch("obj 0x%p (enable -DDEBUG for more info) " , obj );
 }
 
-
+void findPtr(P_ p, int follow)
+{
+    // we're printing the arguments just to silence the unused parameter warning
+    debugBelch("recompile your program with -debug in order to run ");
+    debugBelch("findPtr(0x%p, %d)\n", p, follow);
+}
 #endif /* DEBUG */
 
 /* -----------------------------------------------------------------------------

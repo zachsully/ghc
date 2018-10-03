@@ -135,9 +135,13 @@ test('T2615',
 
 # omit dyn and profiling ways, because we don't build dyn_l or p_l
 # variants of the RTS by default
-test('traceEvent', [ omit_ways(['dyn'] + prof_ways),
+test('traceEvent', [ omit_ways(['dyn', 'ghci'] + prof_ways),
                      extra_run_opts('+RTS -ls -RTS') ],
                    compile_and_run, ['-eventlog'])
+
+test('traceBinaryEvent', [ omit_ways(['dyn', 'ghci'] + prof_ways),
+                           extra_run_opts('+RTS -ls -RTS') ],
+                         compile_and_run, ['-eventlog'])
 
 test('T4059', [], run_command, ['$MAKE -s --no-print-directory T4059'])
 
@@ -175,14 +179,14 @@ def checkDynAsm(actual_file, normaliser):
     actual_str = normaliser(actual_raw)
     actual = actual_str.split()
     if actual == ['initArray1', 'initArray2', 'success']:
-        return 1
+        return True
     elif opsys('darwin') and actual == ['modInitFunc1', 'modInitFunc2', 'success']:
-        return 1
+        return True
     elif opsys('mingw32') and actual == ['ctors1', 'ctors2', 'success']:
-        return 1
+        return True
     else:
         if_verbose(1, 'T5435_dyn_asm failed with %s, see all.T for details' % actual)
-        return 0
+        return False
 
 # T5435_v_asm got split into two tests because depending
 # on the linker, .init_array and .ctors sections are loaded
@@ -387,6 +391,9 @@ test('T12497', [ unless(opsys('mingw32'), skip)
                ],
                run_command, ['$MAKE -s --no-print-directory T12497'])
 
+test('T13617', [ unless(opsys('mingw32'), skip)],
+               run_command, ['$MAKE -s --no-print-directory T13617'])
+
 # This test sometimes produces out of sequence samples in the profasm way, but
 # not reliably, so we just skip it. See ticket #15065.
 # Test is being skipped on darwin due to it's flakiness.
@@ -424,3 +431,25 @@ test('nursery-chunks1',
   ],
   compile_and_run,
   [''])
+
+# Test for the "Evaluated a CAF that was GC'd" assertion in the debug
+# runtime, by dynamically loading code that re-evaluates the CAF.
+# Also tests the -rdynamic and -fwhole-archive-hs-libs flags for constructing
+# binaries that support runtime dynamic loading.
+test('keep-cafs-fail',
+  [ extra_files(['KeepCafsBase.hs', 'KeepCafs1.hs',
+                 'KeepCafs2.hs', 'KeepCafsMain.hs']),
+    filter_stdout_lines('Evaluated a CAF|exit.*'),
+    ignore_stderr, # on OS X the shell emits an "Abort trap" message to stderr
+  ],
+  run_command,
+  ['$MAKE -s --no-print-directory KeepCafsFail'])
+
+# Test the -fkeep-cafs flag
+test('keep-cafs',
+  [ extra_files(['KeepCafsBase.hs', 'KeepCafs1.hs',
+                 'KeepCafs2.hs', 'KeepCafsMain.hs'])
+  ],
+  run_command,
+  ['$MAKE -s --no-print-directory KeepCafs'])
+

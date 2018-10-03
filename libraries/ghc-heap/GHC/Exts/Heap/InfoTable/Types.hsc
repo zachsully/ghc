@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveGeneric #-}
 module GHC.Exts.Heap.InfoTable.Types
     ( StgInfoTable(..)
     , EntryFunPtr
@@ -7,6 +8,8 @@ module GHC.Exts.Heap.InfoTable.Types
 
 #include "Rts.h"
 
+import Prelude -- See note [Why do we import Prelude here?]
+import GHC.Generics
 import GHC.Exts.Heap.ClosureTypes
 import Foreign
 
@@ -34,4 +37,4 @@ data StgInfoTable = StgInfoTable {
    tipe   :: ClosureType,
    srtlen :: HalfWord,
    code   :: Maybe ItblCodes -- Just <=> ghciTablesNextToCode
-  } deriving (Show)
+  } deriving (Show, Generic)

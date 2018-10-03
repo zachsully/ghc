@@ -337,7 +337,7 @@ test('tc260', normal, compile, [''])
 test('tc261', normal, compile, [''])
 test('tc262', normal, compile, [''])
 test('tc263', [extra_files(['Tc263_Help.hs'])], multimod_compile, ['tc263', '-v0'])
-test('tc265', compile_timeout_multiplier(0.01), compile, [''])
+test('tc265', normal, compile, [''])
 test('tc266', [extra_files(['Tc266.hs', 'Tc266a.hs', 'Tc266.hs-boot'])], run_command, ['$MAKE -s --no-print-directory tc266'])
 test('Tc267', [extra_files(['Tc267a.hs', 'Tc267b.hs', 'Tc267a.hs-boot', 'Tc267b.hs-boot'])], run_command, ['$MAKE -s --no-print-directory Tc267'])
 test('tc268', normal, compile, [''])
@@ -398,6 +398,7 @@ test('abstract_refinement_hole_fits', normal, compile, ['-fdefer-type-errors -fn
 test('free_monad_hole_fits', normal, compile, ['-fdefer-type-errors -fno-max-valid-hole-fits -fno-max-refinement-hole-fits -frefinement-level-hole-fits=2 -funclutter-valid-hole-fits'])
 test('constraint_hole_fits', normal, compile, ['-fdefer-type-errors -fno-max-valid-hole-fits -fno-max-refinement-hole-fits -frefinement-level-hole-fits=2 -funclutter-valid-hole-fits'])
 test('type_in_type_hole_fits', normal, compile, ['-fdefer-type-errors -fno-max-valid-hole-fits'])
+test('T15370', normal, compile, ['-fdefer-type-errors -fno-max-valid-hole-fits -funclutter-valid-hole-fits'])
 test('T7408', normal, compile, [''])
 test('UnboxStrictPrimitiveFields', normal, compile, [''])
 test('T7541', normal, compile, [''])
@@ -619,15 +620,16 @@ test('SplitWD', normal, compile, [''])
 #       (2) Build the program twice: once with -dynamic, and then
 #           with -prof using -osuf to set a different object file suffix.
 test('T14441', omit_ways(['profasm']), compile, [''])
-test('T15050', [expect_broken(15050)], compile, [''])
+test('T15050', normal, compile, [''])
 test('T14735', normal, compile, [''])
 test('T15180', normal, compile, [''])
 test('T15232', normal, compile, [''])
 test('T13833', normal, compile, [''])
+test('T14185', expect_broken(14185), compile, [''])
 
-def onlyHsParLocs(x): 
-    """ 
-    We only want to check that all the parentheses are present with the correct location, 
+def onlyHsParLocs(x):
+    """
+    We only want to check that all the parentheses are present with the correct location,
     not compare the entire typechecked AST.
     Located (HsPar GhcTc) are pretty printed with the form
     ({ <location info>
@@ -635,8 +637,17 @@ def onlyHsParLocs(x):
     This function tries to extract all such location infos from the typechecked AST.
     """
     ls = x.split("\n")
-    filteredLines = (loc.strip() for (loc,hspar) in zip(ls,ls[1:]) 
+    filteredLines = (loc.strip() for (loc,hspar) in zip(ls,ls[1:])
                       if hspar.strip().startswith("(HsPar")
                         and not "<no location info>" in loc)
     return '\n'.join(filteredLines)
 test('T15242', normalise_errmsg_fun(onlyHsParLocs), compile, [''])
+test('T15431', normal, compile, [''])
+test('T15431a', normal, compile, [''])
+test('T15428', normal, compile, [''])
+test('T15412', normal, compile, [''])
+test('T15141', normal, compile, [''])
+test('T15473', normal, compile_fail, [''])
+test('T15499', normal, compile, [''])
+test('T15586', normal, compile, [''])
+test('T15368', normal, compile, ['-fdefer-type-errors'])

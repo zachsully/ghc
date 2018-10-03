@@ -71,7 +71,7 @@ module TcRnTypes(
         Xi, Ct(..), Cts, emptyCts, andCts, andManyCts, pprCts,
         singleCt, listToCts, ctsElts, consCts, snocCts, extendCtsList,
         isEmptyCts, isCTyEqCan, isCFunEqCan,
-        isPendingScDict, superClassesMightHelp,
+        isPendingScDict, superClassesMightHelp, getPendingWantedScs,
         isCDictCan_Maybe, isCFunEqCan_maybe,
         isCNonCanonical, isWantedCt, isDerivedCt,
         isGivenCt, isHoleCt, isOutOfScopeCt, isExprHoleCt, isTypeHoleCt,
@@ -93,7 +93,7 @@ module TcRnTypes(
         isDroppableCt, insolubleImplic,
         arisesFromGivens,
 
-        Implication(..), newImplication,
+        Implication(..), newImplication, implicLclEnv, implicDynFlags,
         ImplicStatus(..), isInsolubleStatus, isSolvedStatus,
         SubGoalDepth, initialSubGoalDepth, maxSubGoalDepth,
         bumpSubGoalDepth, subGoalDepthExceeded,
@@ -385,9 +385,15 @@ instance ContainsModule DsGblEnv where
 data DsLclEnv = DsLclEnv {
         dsl_meta    :: DsMetaEnv,        -- Template Haskell bindings
         dsl_loc     :: RealSrcSpan,      -- To put in pattern-matching error msgs
-        dsl_dicts   :: Bag EvVar,        -- Constraints from GADT pattern-matching
-        dsl_tm_cs   :: Bag SimpleEq,
-        dsl_pm_iter :: IORef Int         -- no iterations for pmcheck
+
+        -- See Note [Note [Type and Term Equality Propagation] in Check.hs
+        -- These two fields are augmented as we walk inwards,
+        -- through each patttern match in turn
+        dsl_dicts   :: Bag EvVar,     -- Constraints from GADT pattern-matching
+        dsl_tm_cs   :: Bag SimpleEq,  -- Constraints form term-level pattern matching
+
+        dsl_pm_iter :: IORef Int  -- Number of iterations for pmcheck so far
+                                  -- We fail if this gets too big
      }
 
 -- Inside [| |] brackets, the desugarer looks
@@ -1360,7 +1366,7 @@ data ImportAvails
 
 mkModDeps :: [(ModuleName, IsBootInterface)]
           -> ModuleNameEnv (ModuleName, IsBootInterface)
-mkModDeps deps = foldl add emptyUFM deps
+mkModDeps deps = foldl' add emptyUFM deps
                where
                  add env elt@(m,_) = addToUFM env m elt
 
@@ -1494,7 +1500,7 @@ data TcIdSigInst
   = TISI { sig_inst_sig :: TcIdSigInfo
 
          , sig_inst_skols :: [(Name, TcTyVar)]
-               -- Instantiated type and kind variables, SigTvs
+               -- Instantiated type and kind variables, TyVarTvs
                -- The Name is the Name that the renamer chose;
                --   but the TcTyVar may come from instantiating
                --   the type and hence have a different unique.
@@ -1557,7 +1563,7 @@ data TcPatSynInfo
         patsig_name           :: Name,
         patsig_implicit_bndrs :: [TyVarBinder], -- Implicitly-bound kind vars (Inferred) and
                                                 -- implicitly-bound type vars (Specified)
-          -- See Note [The pattern-synonym signature splitting rule] in TcSigs
+          -- See Note [The pattern-synonym signature splitting rule] in TcPatSyn
         patsig_univ_bndrs     :: [TyVar],       -- Bound by explicit user forall
         patsig_req            :: TcThetaType,
         patsig_ex_bndrs       :: [TyVar],       -- Bound by explicit user forall
@@ -2214,15 +2220,30 @@ setPendingScDict ct@(CDictCan { cc_pend_sc = False })
                     = ct { cc_pend_sc = True }
 setPendingScDict ct = ct
 
-superClassesMightHelp :: Ct -> Bool
+superClassesMightHelp :: WantedConstraints -> Bool
 -- ^ True if taking superclasses of givens, or of wanteds (to perhaps
 -- expose more equalities or functional dependencies) might help to
 -- solve this constraint.  See Note [When superclasses help]
-superClassesMightHelp ct
-  = isWantedCt ct && not (is_ip ct)
+superClassesMightHelp (WC { wc_simple = simples, wc_impl = implics })
+  = anyBag might_help_ct simples || anyBag might_help_implic implics
   where
+    might_help_implic ic
+       | IC_Unsolved <- ic_status ic = superClassesMightHelp (ic_wanted ic)
+       | otherwise                   = False
+
+    might_help_ct ct = isWantedCt ct && not (is_ip ct)
+
     is_ip (CDictCan { cc_class = cls }) = isIPClass cls
     is_ip _                             = False
+
+getPendingWantedScs :: Cts -> ([Ct], Cts)
+getPendingWantedScs simples
+  = mapAccumBagL get [] simples
+  where
+    get acc ct | Just ct' <- isPendingScDict ct
+               = (ct':acc, ct')
+               | otherwise
+               = (acc,     ct)
 
 {- Note [When superclasses help]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2233,6 +2254,11 @@ for which expansion of superclasses (e.g. from given constraints)
 might actually help. The function superClassesMightHelp tells if
 doing this superclass expansion might help solve this constraint.
 Note that
+
+  * We look inside implications; maybe it'll help to expand the Givens
+    at level 2 to help solve an unsolved Wanted buried inside an
+    implication.  E.g.
+        forall a. Ord a => forall b. [W] Eq a
 
   * Superclasses help only for Wanted constraints.  Derived constraints
     are not really "unsolved" and we certainly don't want them to
@@ -2489,9 +2515,18 @@ data Implication
       ic_no_eqs :: Bool,         -- True  <=> ic_givens have no equalities, for sure
                                  -- False <=> ic_givens might have equalities
 
-      ic_env   :: TcLclEnv,      -- Gives the source location and error context
-                                 -- for the implication, and hence for all the
-                                 -- given evidence variables
+      ic_env   :: Env TcGblEnv TcLclEnv,
+                                 -- Records the Env at the time of creation.
+                                 --
+                                 -- This is primarly needed for the enclosed
+                                 -- TcLclEnv, which gives the source location
+                                 -- and error context for the implication, and
+                                 -- hence for all the given evidence variables.
+                                 --
+                                 -- The enclosed DynFlags also influences error
+                                 -- reporting. See Note [Avoid
+                                 -- -Winaccessible-code when deriving] in
+                                 -- TcInstDcls.
 
       ic_wanted :: WantedConstraints,  -- The wanteds
                                        -- See Invariang (WantedInf) in TcType
@@ -2511,23 +2546,40 @@ data Implication
       ic_status   :: ImplicStatus
     }
 
-newImplication :: Implication
+-- | Create a new 'Implication' with as many sensible defaults for its fields
+-- as possible. Note that the 'ic_tclvl', 'ic_binds', and 'ic_info' fields do
+-- /not/ have sensible defaults, so they are initialized with lazy thunks that
+-- will 'panic' if forced, so one should take care to initialize these fields
+-- after creation.
+--
+-- This is monadic purely to look up the 'Env', which is used to initialize
+-- 'ic_env'.
+newImplication :: TcM Implication
 newImplication
-  = Implic { -- These fields must be initialisad
-             ic_tclvl = panic "newImplic:tclvl"
-           , ic_binds = panic "newImplic:binds"
-           , ic_info  = panic "newImplic:info"
-           , ic_env   = panic "newImplic:env"
+  = do env <- getEnv
+       pure $ Implic { -- These fields must be initialised
+                       ic_tclvl      = panic "newImplic:tclvl"
+                     , ic_binds      = panic "newImplic:binds"
+                     , ic_info       = panic "newImplic:info"
 
-             -- The rest have sensible default values
-           , ic_skols      = []
-           , ic_telescope  = Nothing
-           , ic_given      = []
-           , ic_wanted     = emptyWC
-           , ic_no_eqs     = False
-           , ic_status     = IC_Unsolved
-           , ic_need_inner = emptyVarSet
-           , ic_need_outer = emptyVarSet }
+                       -- The rest have sensible default values
+                     , ic_env        = env
+                     , ic_skols      = []
+                     , ic_telescope  = Nothing
+                     , ic_given      = []
+                     , ic_wanted     = emptyWC
+                     , ic_no_eqs     = False
+                     , ic_status     = IC_Unsolved
+                     , ic_need_inner = emptyVarSet
+                     , ic_need_outer = emptyVarSet }
+
+-- | Retrieve the enclosed 'TcLclEnv' from an 'Implication'.
+implicLclEnv :: Implication -> TcLclEnv
+implicLclEnv = env_lcl . ic_env
+
+-- | Retrieve the enclosed 'DynFlags' from an 'Implication'.
+implicDynFlags :: Implication -> DynFlags
+implicDynFlags = hsc_dflags . env_top . ic_env
 
 data ImplicStatus
   = IC_Solved     -- All wanteds in the tree are solved, all the way down
@@ -2546,7 +2598,7 @@ instance Outputable Implication where
               , ic_given = given, ic_no_eqs = no_eqs
               , ic_wanted = wanted, ic_status = status
               , ic_binds = binds
---              , ic_need_inner = need_in, ic_need_outer = need_out
+              , ic_need_inner = need_in, ic_need_outer = need_out
               , ic_info = info })
    = hang (text "Implic" <+> lbrace)
         2 (sep [ text "TcLevel =" <+> ppr tclvl
@@ -2556,8 +2608,8 @@ instance Outputable Implication where
                , hang (text "Given =")  2 (pprEvVars given)
                , hang (text "Wanted =") 2 (ppr wanted)
                , text "Binds =" <+> ppr binds
---               , text "Needed inner =" <+> ppr need_in
---               , text "Needed outer =" <+> ppr need_out
+               , whenPprDebug (text "Needed inner =" <+> ppr need_in)
+               , whenPprDebug (text "Needed outer =" <+> ppr need_out)
                , pprSkolInfo info ] <+> rbrace)
 
 instance Outputable ImplicStatus where
@@ -2891,7 +2943,9 @@ ctFlavourRole (CTyEqCan { cc_ev = ev, cc_eq_rel = eq_rel })
 ctFlavourRole (CFunEqCan { cc_ev = ev })
   = (ctEvFlavour ev, NomEq)
 ctFlavourRole (CHoleCan { cc_ev = ev })
-  = (ctEvFlavour ev, NomEq)
+  = (ctEvFlavour ev, NomEq)  -- NomEq: CHoleCans can be rewritten by
+                             -- by nominal equalities but empahatically
+                             -- not by representational equalities
 ctFlavourRole ct
   = ctEvFlavourRole (ctEvidence ct)
 

@@ -23,6 +23,7 @@ module TcType (
   TcType, TcSigmaType, TcRhoType, TcTauType, TcPredType, TcThetaType,
   TcTyVar, TcTyVarSet, TcDTyVarSet, TcTyCoVarSet, TcDTyCoVarSet,
   TcKind, TcCoVar, TcTyCoVar, TcTyVarBinder, TcTyCon,
+  KnotTied,
 
   ExpType(..), InferResult(..), ExpSigmaType, ExpRhoType, mkCheckExpType,
 
@@ -39,27 +40,26 @@ module TcType (
   TcTyVarDetails(..), pprTcTyVarDetails, vanillaSkolemTv, superSkolemTv,
   MetaDetails(Flexi, Indirect), MetaInfo(..),
   isImmutableTyVar, isSkolemTyVar, isMetaTyVar,  isMetaTyVarTy, isTyVarTy,
-  isSigTyVar, isOverlappableTyVar,  isTyConableTyVar,
+  tcIsTcTyVar, isTyVarTyVar, isOverlappableTyVar,  isTyConableTyVar,
   isFskTyVar, isFmvTyVar, isFlattenTyVar,
   isAmbiguousTyVar, metaTyVarRef, metaTyVarInfo,
   isFlexi, isIndirect, isRuntimeUnkSkol,
   metaTyVarTcLevel, setMetaTyVarTcLevel, metaTyVarTcLevel_maybe,
   isTouchableMetaTyVar,
   isFloatedTouchableMetaTyVar,
-  findDupSigTvs, mkTyVarNamePairs,
+  findDupTyVarTvs, mkTyVarNamePairs,
 
   --------------------------------
   -- Builders
   mkPhiTy, mkInfSigmaTy, mkSpecSigmaTy, mkSigmaTy,
-  mkNakedTyConApp, mkNakedAppTys, mkNakedAppTy,
-  mkNakedCastTy,
+  mkNakedAppTy, mkNakedAppTys, mkNakedCastTy, nakedSubstTy,
 
   --------------------------------
   -- Splitters
   -- These are important because they do not look through newtypes
   getTyVar,
   tcSplitForAllTy_maybe,
-  tcSplitForAllTys, tcSplitPiTys, tcSplitPiTy_maybe, tcSplitForAllTyVarBndrs,
+  tcSplitForAllTys, tcSplitPiTys, tcSplitPiTy_maybe, tcSplitForAllVarBndrs,
   tcSplitPhiTy, tcSplitPredFunTy_maybe,
   tcSplitFunTy_maybe, tcSplitFunTys, tcFunArgTy, tcFunResultTy, tcFunResultTyN,
   tcSplitFunTysN,
@@ -131,13 +131,14 @@ module TcType (
 
   --------------------------------
   -- Rexported from Type
-  Type, PredType, ThetaType, TyBinder, ArgFlag(..),
+  Type, PredType, ThetaType, TyCoBinder, ArgFlag(..),
 
-  mkForAllTy, mkForAllTys, mkInvForAllTys, mkSpecForAllTys, mkInvForAllTy,
+  mkForAllTy, mkForAllTys, mkTyCoInvForAllTys, mkSpecForAllTys, mkTyCoInvForAllTy,
+  mkInvForAllTy, mkInvForAllTys,
   mkFunTy, mkFunTys,
   mkTyConApp, mkAppTy, mkAppTys,
-  mkTyConTy, mkTyVarTy,
-  mkTyVarTys,
+  mkTyConTy, mkTyVarTy, mkTyVarTys,
+  mkTyCoVarTy, mkTyCoVarTys,
 
   isClassPred, isEqPred, isNomEqPred, isIPPred,
   mkClassPred,
@@ -179,7 +180,7 @@ module TcType (
   pprKind, pprParendKind, pprSigmaType,
   pprType, pprParendType, pprTypeApp, pprTyThingCategory, tyThingCategory,
   pprTheta, pprParendTheta, pprThetaArrowTy, pprClassPred,
-  pprTvBndr, pprTvBndrs,
+  pprTCvBndr, pprTCvBndrs,
 
   TypeSize, sizeType, sizeTypes, toposortTyVars,
 
@@ -226,6 +227,7 @@ import ErrUtils( Validity(..), MsgDoc, isValid )
 import qualified GHC.LanguageExtensions as LangExt
 
 import Data.List  ( mapAccumL )
+import Data.Functor.Identity( Identity(..) )
 import Data.IORef
 import Data.List.NonEmpty( NonEmpty(..) )
 import qualified Data.Semigroup as Semi
@@ -337,8 +339,8 @@ type TcTyCoVar = Var    -- Either a TcTyVar or a CoVar
         -- a cannot occur inside a MutTyVar in T; that is,
         -- T is "flattened" before quantifying over a
 
-type TcTyVarBinder = TyVarBinder
-type TcTyCon       = TyCon   -- these can be the TcTyCon constructor
+type TcTyVarBinder   = TyVarBinder
+type TcTyCon         = TyCon   -- these can be the TcTyCon constructor
 
 -- These types do not have boxy type variables in them
 type TcPredType     = PredType
@@ -351,7 +353,6 @@ type TcTyVarSet     = TyVarSet
 type TcTyCoVarSet   = TyCoVarSet
 type TcDTyVarSet    = DTyVarSet
 type TcDTyCoVarSet  = DTyCoVarSet
-
 
 {- *********************************************************************
 *                                                                      *
@@ -453,31 +454,23 @@ why Var.hs shouldn't actually have the definition, but it "belongs" here.
 
 Note [Signature skolems]
 ~~~~~~~~~~~~~~~~~~~~~~~~
-A SigTv is a specialised variant of TauTv, with the following invarints:
+A TyVarTv is a specialised variant of TauTv, with the following invarints:
 
-    * A SigTv can be unified only with a TyVar,
+    * A TyVarTv can be unified only with a TyVar,
       not with any other type
 
-    * Its MetaDetails, if filled in, will always be another SigTv
+    * Its MetaDetails, if filled in, will always be another TyVarTv
       or a SkolemTv
 
-SigTvs are only distinguished to improve error messages.
+TyVarTvs are only distinguished to improve error messages.
 Consider this
 
-  f :: forall a. [a] -> Int
-  f (x::b : xs) = 3
-
-Here 'b' is a lexically scoped type variable, but it turns out to be
-the same as the skolem 'a'.  So we make them both SigTvs, which can unify
-with each other.
-
-Similarly consider
   data T (a:k1) = MkT (S a)
   data S (b:k2) = MkS (T b)
-When doing kind inference on {S,T} we don't want *skolems* for k1,k2,
-because they end up unifying; we want those SigTvs again.
 
-SigTvs are used *only* for pattern type signatures.
+When doing kind inference on {S,T} we don't want *skolems* for k1,k2,
+because they end up unifying; we want those TyVarTvs again.
+
 
 Note [TyVars and TcTyVars during type checking]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -536,7 +529,7 @@ data MetaInfo
                    -- A TauTv is always filled in with a tau-type, which
                    -- never contains any ForAlls.
 
-   | SigTv         -- A variant of TauTv, except that it should not be
+   | TyVarTv       -- A variant of TauTv, except that it should not be
                    --   unified with a type, only with a type variable
                    -- See Note [Signature skolems]
 
@@ -564,7 +557,7 @@ pprTcTyVarDetails (MetaTv { mtv_info = info, mtv_tclvl = tclvl })
   where
     pp_info = case info of
                 TauTv      -> text "tau"
-                SigTv      -> text "sig"
+                TyVarTv    -> text "tyv"
                 FlatMetaTv -> text "fmv"
                 FlatSkolTv -> text "fsk"
 
@@ -608,7 +601,9 @@ data UserTypeCtxt
                         --      f x :: t = ....
   | ForSigCtxt Name     -- Foreign import or export signature
   | DefaultDeclCtxt     -- Types in a default declaration
-  | InstDeclCtxt        -- An instance declaration
+  | InstDeclCtxt Bool   -- An instance declaration
+                        --    True:  stand-alone deriving
+                        --    False: vanilla instance declaration
   | SpecInstCtxt        -- SPECIALISE instance pragma
   | ThBrackCtxt         -- Template Haskell type brackets [t| ... |]
   | GenSigCtxt          -- Higher-rank or impredicative situations
@@ -654,7 +649,8 @@ pprUserTypeCtxt PatSigCtxt        = text "a pattern type signature"
 pprUserTypeCtxt ResSigCtxt        = text "a result type signature"
 pprUserTypeCtxt (ForSigCtxt n)    = text "the foreign declaration for" <+> quotes (ppr n)
 pprUserTypeCtxt DefaultDeclCtxt   = text "a type in a `default' declaration"
-pprUserTypeCtxt InstDeclCtxt      = text "an instance declaration"
+pprUserTypeCtxt (InstDeclCtxt False) = text "an instance declaration"
+pprUserTypeCtxt (InstDeclCtxt True)  = text "a stand-alone deriving instance declaration"
 pprUserTypeCtxt SpecInstCtxt      = text "a SPECIALISE instance pragma"
 pprUserTypeCtxt GenSigCtxt        = text "a type expected by the context"
 pprUserTypeCtxt GhciCtxt          = text "a type in a GHCi command"
@@ -713,7 +709,7 @@ Note [TcLevel and untouchable type variables]
 
 * A unification variable is *touchable* if its level number
   is EQUAL TO that of its immediate parent implication,
-  and it is a TauTv or SigTv (but /not/ FlatMetaTv or FlatSkolTv
+  and it is a TauTv or TyVarTv (but /not/ FlatMetaTv or FlatSkolTv
 
 Note [WantedInv]
 ~~~~~~~~~~~~~~~~
@@ -852,7 +848,7 @@ promoteSkolemsX tclvl = mapAccumL (promoteSkolemX tclvl)
 ************************************************************************
 -}
 
--- | Finds outermost type-family applications occuring in a type,
+-- | Finds outermost type-family applications occurring in a type,
 -- after expanding synonyms.  In the list (F, tys) that is returned
 -- we guarantee that tys matches F's arity.  For example, given
 --    type family F a :: * -> *    (arity 1)
@@ -869,17 +865,17 @@ tcTyFamInsts ty
   | Just exp_ty <- tcView ty      = tcTyFamInsts exp_ty
 tcTyFamInsts (TyVarTy _)          = []
 tcTyFamInsts (TyConApp tc tys)
-  | isTypeFamilyTyCon tc          = [(tc, take (tyConArity tc) tys)]
-  | otherwise                     = concat (map tcTyFamInsts tys)
-tcTyFamInsts (LitTy {})           = []
-tcTyFamInsts (ForAllTy bndr ty)   = tcTyFamInsts (binderKind bndr)
-                                    ++ tcTyFamInsts ty
-tcTyFamInsts (FunTy ty1 ty2)      = tcTyFamInsts ty1 ++ tcTyFamInsts ty2
+  | isTypeFamilyTyCon tc        = [(tc, take (tyConArity tc) tys)]
+  | otherwise                   = concat (map tcTyFamInsts tys)
+tcTyFamInsts (LitTy {})         = []
+tcTyFamInsts (ForAllTy bndr ty) = tcTyFamInsts (binderType bndr)
+                                  ++ tcTyFamInsts ty
+tcTyFamInsts (FunTy ty1 ty2)    = tcTyFamInsts ty1 ++ tcTyFamInsts ty2
 tcTyFamInsts (FunTildeTy ty1 ty2) = tcTyFamInsts ty1 ++ tcTyFamInsts ty2
-tcTyFamInsts (AppTy ty1 ty2)      = tcTyFamInsts ty1 ++ tcTyFamInsts ty2
-tcTyFamInsts (CastTy ty _)        = tcTyFamInsts ty
-tcTyFamInsts (CoercionTy _)       = []  -- don't count tyfams in coercions,
-                                        -- as they never get normalized, anyway
+tcTyFamInsts (AppTy ty1 ty2)    = tcTyFamInsts ty1 ++ tcTyFamInsts ty2
+tcTyFamInsts (CastTy ty _)      = tcTyFamInsts ty
+tcTyFamInsts (CoercionTy _)     = []  -- don't count tyfams in coercions,
+                                      -- as they never get normalized, anyway
 
 isTyFamFree :: Type -> Bool
 -- ^ Check that a type does not contain any type family applications.
@@ -934,11 +930,15 @@ exactTyCoVarsOfType ty
     go (AppTy fun arg)      = go fun `unionVarSet` go arg
     go (FunTy arg res)      = go arg `unionVarSet` go res
     go (FunTildeTy arg res) = go arg `unionVarSet` go res
-    go (ForAllTy bndr ty)   = delBinderVar (go ty) bndr `unionVarSet` go (binderKind bndr)
+    go (ForAllTy bndr ty)   = delBinderVar (go ty) bndr `unionVarSet` go (binderType bndr)
     go (CastTy ty co)       = go ty `unionVarSet` goCo co
     go (CoercionTy co)      = goCo co
 
-    goCo (Refl _ ty)        = go ty
+    goMCo MRefl    = emptyVarSet
+    goMCo (MCo co) = goCo co
+
+    goCo (Refl ty)            = go ty
+    goCo (GRefl _ ty mco)     = go ty `unionVarSet` goMCo mco
     goCo (TyConAppCo _ _ args)= goCos args
     goCo (AppCo co arg)     = goCo co `unionVarSet` goCo arg
     goCo (ForAllCo tv k_co co)
@@ -954,7 +954,6 @@ exactTyCoVarsOfType ty
     goCo (NthCo _ _ co)      = goCo co
     goCo (LRCo _ co)         = goCo co
     goCo (InstCo co arg)     = goCo co `unionVarSet` goCo arg
-    goCo (CoherenceCo c1 c2) = goCo c1 `unionVarSet` goCo c2
     goCo (KindCo co)         = goCo co
     goCo (SubCo co)          = goCo co
     goCo (AxiomRuleCo _ c)   = goCos c
@@ -1139,7 +1138,7 @@ split_dvs bound dvs ty
   = go dvs ty
   where
     go dv (AppTy t1 t2)    = go (go dv t1) t2
-    go dv (TyConApp _ tys) = foldl go dv tys
+    go dv (TyConApp _ tys) = foldl' go dv tys
     go dv (FunTy arg res)  = go (go dv arg) res
     go dv (FunTildeTy arg res) = go (go dv arg) res
     go dv (LitTy {})       = dv
@@ -1154,7 +1153,7 @@ split_dvs bound dvs ty
                       kill_bound (tyCoVarsOfTypeDSet (tyVarKind tv))
            , dv_tvs = tvs `extendDVarSet` tv }
 
-    go dv (ForAllTy (TvBndr tv _) ty)
+    go dv (ForAllTy (Bndr tv _) ty)
       = DV { dv_kvs = kvs `unionDVarSet`
                       kill_bound (tyCoVarsOfTypeDSet (tyVarKind tv))
            , dv_tvs = tvs }
@@ -1170,7 +1169,7 @@ split_dvs bound dvs ty
 
 -- | Like 'splitDepVarsOfType', but over a list of types
 candidateQTyVarsOfTypes :: [Type] -> CandidatesQTvs
-candidateQTyVarsOfTypes = foldl (split_dvs emptyVarSet) mempty
+candidateQTyVarsOfTypes = foldl' (split_dvs emptyVarSet) mempty
 
 {-
 ************************************************************************
@@ -1215,12 +1214,12 @@ isTyConableTyVar, isSkolemTyVar, isOverlappableTyVar,
 isTyConableTyVar tv
         -- True of a meta-type variable that can be filled in
         -- with a type constructor application; in particular,
-        -- not a SigTv
+        -- not a TyVarTv
   | isTyVar tv -- See Note [Coercion variables in free variable lists]
   = ASSERT2( tcIsTcTyVar tv, ppr tv )
     case tcTyVarDetails tv of
-        MetaTv { mtv_info = SigTv } -> False
-        _                           -> True
+        MetaTv { mtv_info = TyVarTv } -> False
+        _                             -> True
   | otherwise = True
 
 isFmvTyVar tv
@@ -1316,11 +1315,11 @@ setMetaTyVarTcLevel tv tclvl
       details@(MetaTv {}) -> setTcTyVarDetails tv (details { mtv_tclvl = tclvl })
       _ -> pprPanic "metaTyVarTcLevel" (ppr tv)
 
-isSigTyVar :: Var -> Bool
-isSigTyVar tv
+isTyVarTyVar :: Var -> Bool
+isTyVarTyVar tv
   = case tcTyVarDetails tv of
-        MetaTv { mtv_info = SigTv } -> True
-        _                           -> False
+        MetaTv { mtv_info = TyVarTv } -> True
+        _                             -> False
 
 isFlexi, isIndirect :: MetaDetails -> Bool
 isFlexi Flexi = True
@@ -1339,10 +1338,10 @@ mkTyVarNamePairs :: [TyVar] -> [(Name,TyVar)]
 -- Just pair each TyVar with its own name
 mkTyVarNamePairs tvs = [(tyVarName tv, tv) | tv <- tvs]
 
-findDupSigTvs :: [(Name,TcTyVar)] -> [(Name,Name)]
+findDupTyVarTvs :: [(Name,TcTyVar)] -> [(Name,Name)]
 -- If we have [...(x1,tv)...(x2,tv)...]
 -- return (x1,x2) in the result list
-findDupSigTvs prs
+findDupTyVarTvs prs
   = concatMap mk_result_prs $
     findDupsEq eq_snd prs
   where
@@ -1357,18 +1356,18 @@ findDupSigTvs prs
 ************************************************************************
 -}
 
-mkSigmaTy :: [TyVarBinder] -> [PredType] -> Type -> Type
+mkSigmaTy :: [TyCoVarBinder] -> [PredType] -> Type -> Type
 mkSigmaTy bndrs theta tau = mkForAllTys bndrs (mkPhiTy theta tau)
 
 -- | Make a sigma ty where all type variables are 'Inferred'. That is,
 -- they cannot be used with visible type application.
-mkInfSigmaTy :: [TyVar] -> [PredType] -> Type -> Type
-mkInfSigmaTy tyvars theta ty = mkSigmaTy (mkTyVarBinders Inferred tyvars) theta ty
+mkInfSigmaTy :: [TyCoVar] -> [PredType] -> Type -> Type
+mkInfSigmaTy tyvars theta ty = mkSigmaTy (mkTyCoVarBinders Inferred tyvars) theta ty
 
 -- | Make a sigma ty where all type variables are "specified". That is,
 -- they can be used with visible type application
 mkSpecSigmaTy :: [TyVar] -> [PredType] -> Type -> Type
-mkSpecSigmaTy tyvars preds ty = mkSigmaTy (mkTyVarBinders Specified tyvars) preds ty
+mkSpecSigmaTy tyvars preds ty = mkSigmaTy (mkTyCoVarBinders Specified tyvars) preds ty
 
 mkPhiTy :: [PredType] -> Type -> Type
 mkPhiTy = mkFunTys
@@ -1391,23 +1390,76 @@ getDFunTyLitKey :: TyLit -> OccName
 getDFunTyLitKey (NumTyLit n) = mkOccName Name.varName (show n)
 getDFunTyLitKey (StrTyLit n) = mkOccName Name.varName (show n)  -- hm
 
----------------
-mkNakedTyConApp :: TyCon -> [Type] -> Type
--- Builds a TyConApp
---   * without being strict in TyCon,
---   * without satisfying the invariants of TyConApp
--- A subsequent zonking will establish the invariants
--- See Note [Type-checking inside the knot] in TcHsType
-mkNakedTyConApp tc tys = TyConApp tc tys
+{- *********************************************************************
+*                                                                      *
+           Maintaining the well-kinded type invariant
+*                                                                      *
+********************************************************************* -}
 
+{- Note [The well-kinded type invariant]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+See also Note [The tcType invariant] in TcHsType.
+
+During type inference, we maintain this invariant
+
+   (INV-TK): it is legal to call 'typeKind' on any Type ty,
+             /without/ zonking ty
+
+For example, suppose
+    kappa is a unification variable
+    We have already unified kappa := Type
+      yielding    co :: Refl (Type -> Type)
+    a :: kappa
+then consider the type
+    (a Int)
+If we call typeKind on that, we'll crash, because the (un-zonked)
+kind of 'a' is just kappa, not an arrow kind.  If we zonk first
+we'd be fine, but that is too tiresome, so instead we maintain
+(INV-TK).  So we do not form (a Int); instead we form
+    (a |> co) Int
+and typeKind has no problem with that.
+
+Bottom line: we want to keep that 'co' /even though it is Refl/.
+
+Immediate consequence: during type inference we cannot use the "smart
+contructors" for types, particularly
+   mkAppTy, mkCastTy
+because they all eliminate Refl casts.  Solution: during type
+inference use the mkNakedX type formers, which do no Refl-elimination.
+E.g. mkNakedCastTy uses an actual CastTy, without optimising for
+Refl.  (NB: mkNakedCastTy is only called in two places: in tcInferApps
+and in checkExpectedResultKind.)
+
+Where does this show up in practice: apparently mainly in
+TcHsType.tcInferApps.  Suppose we are kind-checking the type (a Int),
+where (a :: kappa).  Then in tcInferApps we'll run out of binders on
+a's kind, so we'll call matchExpectedFunKind, and unify
+   kappa := kappa1 -> kappa2,  with evidence co :: kappa ~ (kappa1 ~ kappa2)
+That evidence is actually Refl, but we must not discard the cast to
+form the result type
+   ((a::kappa) (Int::*))
+because that does not satisfy the invariant, and crashes TypeKind.  This
+caused Trac #14174 and #14520.
+
+Notes:
+
+* The Refls will be removed later, when we zonk the type.
+
+* This /also/ applies to substitution.  We must use nakedSubstTy,
+  not substTy, because the latter uses smart constructors that do
+  Refl-elimination.
+
+-}
+
+---------------
 mkNakedAppTys :: Type -> [Type] -> Type
--- See Note [Type-checking inside the knot] in TcHsType
+-- See Note [The well-kinded type invariant]
 mkNakedAppTys ty1                []   = ty1
-mkNakedAppTys (TyConApp tc tys1) tys2 = mkNakedTyConApp tc (tys1 ++ tys2)
-mkNakedAppTys ty1                tys2 = foldl AppTy ty1 tys2
+mkNakedAppTys (TyConApp tc tys1) tys2 = mkTyConApp tc (tys1 ++ tys2)
+mkNakedAppTys ty1                tys2 = foldl' AppTy ty1 tys2
 
 mkNakedAppTy :: Type -> Type -> Type
--- See Note [Type-checking inside the knot] in TcHsType
+-- See Note [The well-kinded type invariant]
 mkNakedAppTy ty1 ty2 = mkNakedAppTys ty1 [ty2]
 
 mkNakedCastTy :: Type -> Coercion -> Type
@@ -1421,33 +1473,22 @@ mkNakedCastTy :: Type -> Coercion -> Type
 -- In fact the calls to mkNakedCastTy ar pretty few and far between.
 mkNakedCastTy ty co = CastTy ty co
 
-{- Note [The well-kinded type invariant]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-During type inference, we maintain the invariant that
+nakedSubstTy :: HasCallStack => TCvSubst -> TcType  -> TcType
+nakedSubstTy subst ty
+  | isEmptyTCvSubst subst = ty
+  | otherwise             = runIdentity                   $
+                            checkValidSubst subst [ty] [] $
+                            mapType nakedSubstMapper subst ty
+  -- Interesting idea: use StrictIdentity to avoid space leaks
 
-   INVARIANT: every type is well-kinded /without/ zonking
-
-and in particular that typeKind does not fail (as it can for
-ill-kinded types).
-
-Now suppose we are kind-checking the type (a Int), where (a :: kappa).
-Then in tcInferApps we'll run out of binders on a's kind, so
-we'll call matchExpectedFunKind, and unify
-   kappa := kappa1 -> kappa2,  with evidence co :: kappa ~ (kappa1 ~ kappa2)
-That evidence is actually Refl, but we must not discard the cast to
-form the result type
-   ((a::kappa) (Int::*))
-bacause that does not satisfy the invariant, and crashes TypeKind.  This
-caused Trac #14174 and #14520.
-
-Solution: make mkNakedCastTy use an actual CastTy, without optimising
-for Refl. Now everything is well-kinded.  The CastTy will be removed
-later, when we zonk.  Still, it's distressingly delicate.
-
-NB: mkNakedCastTy is only called in two places:
-    in tcInferApps and in checkExpectedResultKind.
-    See Note [The tcType invariant] in TcHsType.
--}
+nakedSubstMapper :: TyCoMapper TCvSubst Identity
+nakedSubstMapper
+  = TyCoMapper { tcm_smart      = False
+               , tcm_tyvar      = \subst tv -> return (substTyVar subst tv)
+               , tcm_covar      = \subst cv -> return (substCoVar subst cv)
+               , tcm_hole       = \_ hole   -> return (HoleCo hole)
+               , tcm_tycobinder = \subst tv _ -> return (substVarBndr subst tv)
+               , tcm_tycon    = return }
 
 {-
 ************************************************************************
@@ -1466,25 +1507,31 @@ variables.  It's up to you to make sure this doesn't matter.
 -- | Splits a forall type into a list of 'TyBinder's and the inner type.
 -- Always succeeds, even if it returns an empty list.
 tcSplitPiTys :: Type -> ([TyBinder], Type)
-tcSplitPiTys = splitPiTys
+tcSplitPiTys ty = ASSERT( all isTyBinder (fst sty) ) sty
+  where sty = splitPiTys ty
 
 -- | Splits a type into a TyBinder and a body, if possible. Panics otherwise
 tcSplitPiTy_maybe :: Type -> Maybe (TyBinder, Type)
-tcSplitPiTy_maybe = splitPiTy_maybe
+tcSplitPiTy_maybe ty = ASSERT( isMaybeTyBinder sty ) sty
+  where sty = splitPiTy_maybe ty
+        isMaybeTyBinder (Just (t,_)) = isTyBinder t
+        isMaybeTyBinder _ = True
 
 tcSplitForAllTy_maybe :: Type -> Maybe (TyVarBinder, Type)
 tcSplitForAllTy_maybe ty | Just ty' <- tcView ty = tcSplitForAllTy_maybe ty'
-tcSplitForAllTy_maybe (ForAllTy tv ty) = Just (tv, ty)
+tcSplitForAllTy_maybe (ForAllTy tv ty) = ASSERT( isTyVarBinder tv ) Just (tv, ty)
 tcSplitForAllTy_maybe _                = Nothing
 
 -- | Like 'tcSplitPiTys', but splits off only named binders, returning
 -- just the tycovars.
 tcSplitForAllTys :: Type -> ([TyVar], Type)
-tcSplitForAllTys = splitForAllTys
+tcSplitForAllTys ty = ASSERT( all isTyVar (fst sty) ) sty
+  where sty = splitForAllTys ty
 
 -- | Like 'tcSplitForAllTys', but splits off only named binders.
-tcSplitForAllTyVarBndrs :: Type -> ([TyVarBinder], Type)
-tcSplitForAllTyVarBndrs = splitForAllTyVarBndrs
+tcSplitForAllVarBndrs :: Type -> ([TyVarBinder], Type)
+tcSplitForAllVarBndrs ty = ASSERT( all isTyVarBinder (fst sty)) sty
+  where sty = splitForAllVarBndrs ty
 
 -- | Is this a ForAllTy with a named binder?
 tcIsForAllTy :: Type -> Bool
@@ -1630,7 +1677,7 @@ tcSplitFunTy_maybe _                                    = Nothing
         --
         --      g = f () ()
 
-tcSplitFunTysN :: Arity                      -- N: Number of desired args
+tcSplitFunTysN :: Arity                      -- n: Number of desired args
                -> TcRhoType
                -> Either Arity               -- Number of missing arrows
                         ([TcSigmaType],      -- Arg types (always N types)
@@ -1820,9 +1867,9 @@ tc_eq_type view_fun orig_ty1 orig_ty2 = go True orig_env orig_ty1 orig_ty2
     go vis _   (LitTy lit1)        (LitTy lit2)
       = check vis $ lit1 == lit2
 
-    go vis env (ForAllTy (TvBndr tv1 vis1) ty1)
-               (ForAllTy (TvBndr tv2 vis2) ty2)
-      = go (isVisibleArgFlag vis1) env (tyVarKind tv1) (tyVarKind tv2)
+    go vis env (ForAllTy (Bndr tv1 vis1) ty1)
+               (ForAllTy (Bndr tv2 vis2) ty2)
+      = go (isVisibleArgFlag vis1) env (varType tv1) (varType tv2)
           <!> go vis (rnBndr2 env tv1 tv2) ty1 ty2
           <!> check vis (vis1 == vis2)
     -- Make sure we handle all FunTy cases since falling through to the
@@ -2038,7 +2085,7 @@ mkMinimalBySCs :: forall a. (a -> PredType) -> [a] -> [a]
 --   - can be deduced from another by superclasses,
 --
 --   - are a reflexive equality (e.g  * ~ *)
---     (see Note [Remove redundant provided dicts] in PatSyn)
+--     (see Note [Remove redundant provided dicts] in TcPatSyn)
 --
 -- The result is a subset of the input.
 -- The 'a' is just paired up with the PredType;
@@ -2060,7 +2107,8 @@ mkMinimalBySCs get_pred xs = go preds_with_scs []
        -- order as the input, which is generally saner
    go (work_item@(p,_,_) : work_list) min_preds
      | EqPred _ t1 t2 <- classifyPredType p
-     , t1 `tcEqType` t2   -- See Note [Discard reflexive equalities]
+     , t1 `tcEqType` t2   -- See TcPatSyn
+                          -- Note [Remove redundant provided dicts]
      = go work_list min_preds
      | p `in_cloud` work_list || p `in_cloud` min_preds
      = go work_list min_preds
@@ -2105,6 +2153,40 @@ isImprovementPred ty
       IrredPred {}       -> True -- Might have equalities after reduction?
       ForAllPred {}      -> False
 
+-- | Is the equality
+--        a ~r ...a....
+-- definitely insoluble or not?
+--      a ~r Maybe a      -- Definitely insoluble
+--      a ~N ...(F a)...  -- Not definitely insoluble
+--                        -- Perhaps (F a) reduces to Int
+--      a ~R ...(N a)...  -- Not definitely insoluble
+--                        -- Perhaps newtype N a = MkN Int
+-- See Note [Occurs check error] in
+-- TcCanonical for the motivation for this function.
+isInsolubleOccursCheck :: EqRel -> TcTyVar -> TcType -> Bool
+isInsolubleOccursCheck eq_rel tv ty
+  = go ty
+  where
+    go ty | Just ty' <- tcView ty = go ty'
+    go (TyVarTy tv') = tv == tv' || go (tyVarKind tv')
+    go (LitTy {})    = False
+    go (AppTy t1 t2) = case eq_rel of  -- See Note [AppTy and ReprEq]
+                         NomEq  -> go t1 || go t2
+                         ReprEq -> go t1
+    go (FunTy t1 t2) = go t1 || go t2
+    go (ForAllTy (Bndr tv' _) inner_ty)
+      | tv' == tv = False
+      | otherwise = go (varType tv') || go inner_ty
+    go (CastTy ty _)  = go ty   -- ToDo: what about the coercion
+    go (CoercionTy _) = False   -- ToDo: what about the coercion
+    go (TyConApp tc tys)
+      | isGenerativeTyCon tc role = any go tys
+      | otherwise                 = any go (drop (tyConArity tc) tys)
+         -- (a ~ F b a), where F has arity 1,
+         -- has an insoluble occurs check
+
+    role = eqRelRole eq_rel
+
 {- Note [Expanding superclasses]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 When we expand superclasses, we use the following algorithm:
@@ -2133,6 +2215,19 @@ Notice that
    case for tuples.  Something better would be cool.
 
 See also TcTyDecls.checkClassCycles.
+
+Note [Quantifying over equality constraints]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Should we quantify over an equality constraint (s ~ t)?  In general, we don't.
+Doing so may simply postpone a type error from the function definition site to
+its call site.  (At worst, imagine (Int ~ Bool)).
+
+However, consider this
+         forall a. (F [a] ~ Int) => blah
+Should we quantify over the (F [a] ~ Int)?  Perhaps yes, because at the call
+site we will know 'a', and perhaps we have instance  F [Bool] = Int.
+So we *do* quantify over a type-family equality where the arguments mention
+the quantified variables.
 
 Note [Inheriting implicit parameters]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2176,7 +2271,7 @@ the quantified variables.
 
 ************************************************************************
 *                                                                      *
-\subsection{Predicates}
+      Classifying types
 *                                                                      *
 ************************************************************************
 -}
@@ -2279,40 +2374,6 @@ isTyVarHead _  (FunTy {})      = False
 isTyVarHead _  (FunTildeTy {}) = False
 isTyVarHead _  (CoercionTy {}) = False
 
--- | Is the equality
---        a ~r ...a....
--- definitely insoluble or not?
---      a ~r Maybe a      -- Definitely insoluble
---      a ~N ...(F a)...  -- Not definitely insoluble
---                        -- Perhaps (F a) reduces to Int
---      a ~R ...(N a)...  -- Not definitely insoluble
---                        -- Perhaps newtype N a = MkN Int
--- See Note [Occurs check error] in
--- TcCanonical for the motivation for this function.
-isInsolubleOccursCheck :: EqRel -> TcTyVar -> TcType -> Bool
-isInsolubleOccursCheck eq_rel tv ty
-  = go ty
-  where
-    go ty | Just ty' <- tcView ty = go ty'
-    go (TyVarTy tv') = tv == tv' || go (tyVarKind tv')
-    go (LitTy {})    = False
-    go (AppTy t1 t2) = case eq_rel of  -- See Note [AppTy and ReprEq]
-                         NomEq  -> go t1 || go t2
-                         ReprEq -> go t1
-    go (FunTy t1 t2) = go t1 || go t2
-    go (FunTildeTy t1 t2) = go t1 || go t2
-    go (ForAllTy (TvBndr tv' _) inner_ty)
-      | tv' == tv = False
-      | otherwise = go (tyVarKind tv') || go inner_ty
-    go (CastTy ty _)  = go ty   -- ToDo: what about the coercion
-    go (CoercionTy _) = False   -- ToDo: what about the coercion
-    go (TyConApp tc tys)
-      | isGenerativeTyCon tc role = any go tys
-      | otherwise                 = any go (drop (tyConArity tc) tys)
-         -- (a ~ F b a), where F has arity 1,
-         -- has an insoluble occurs check
-
-    role = eqRelRole eq_rel
 
 {- Note [AppTy and ReprEq]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2673,7 +2734,7 @@ sizeType = go
     go (FunTy arg res)           = go arg + go res + 1
     go (FunTildeTy arg res)      = go arg + go res + 1
     go (AppTy fun arg)           = go fun + go arg
-    go (ForAllTy (TvBndr tv vis) ty)
+    go (ForAllTy (Bndr tv vis) ty)
         | isVisibleArgFlag vis   = go (tyVarKind tv) + go ty + 1
         | otherwise              = go ty + 1
     go (CastTy ty _)             = go ty

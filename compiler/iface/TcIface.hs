@@ -75,7 +75,6 @@ import ListSetOps
 import GHC.Fingerprint
 import qualified BooleanFormula as BF
 
-import Data.List
 import Control.Monad
 import qualified Data.Map as Map
 
@@ -670,7 +669,7 @@ tc_iface_decl _ _ (IfaceData {ifName = tc_name,
       = do { ax <- tcIfaceCoAxiom ax_name
            ; let fam_tc  = coAxiomTyCon ax
                  ax_unbr = toUnbranchedAxiom ax
-           ; lhs_tys <- tcIfaceTcArgs arg_tys
+           ; lhs_tys <- tcIfaceAppArgs arg_tys
            ; return (DataFamInstTyCon ax_unbr fam_tc lhs_tys) }
 
 tc_iface_decl _ _ (IfaceSynonym {ifName = tc_name,
@@ -862,10 +861,10 @@ tc_ax_branch prev_branches
                             , ifaxbLHS = lhs, ifaxbRHS = rhs
                             , ifaxbRoles = roles, ifaxbIncomps = incomps })
   = bindIfaceTyConBinders_AT
-      (map (\b -> TvBndr b (NamedTCB Inferred)) tv_bndrs) $ \ tvs ->
+      (map (\b -> Bndr (IfaceTvBndr b) (NamedTCB Inferred)) tv_bndrs) $ \ tvs ->
          -- The _AT variant is needed here; see Note [CoAxBranch type variables] in CoAxiom
     bindIfaceIds cv_bndrs $ \ cvs -> do
-    { tc_lhs <- tcIfaceTcArgs lhs
+    { tc_lhs <- tcIfaceAppArgs lhs
     ; tc_rhs <- tcIfaceType rhs
     ; let br = CoAxBranch { cab_loc     = noSrcSpan
                           , cab_tvs     = binderVars tvs
@@ -892,7 +891,7 @@ tcIfaceDataCons tycon_name tycon tc_tybinders if_cons
     tag_map = mkTyConTagMap tycon
 
     tc_con_decl (IfCon { ifConInfix = is_infix,
-                         ifConExTvs = ex_bndrs,
+                         ifConExTCvs = ex_bndrs,
                          ifConUserTvBinders = user_bndrs,
                          ifConName = dc_name,
                          ifConCtxt = ctxt, ifConEqSpec = spec,
@@ -901,7 +900,7 @@ tcIfaceDataCons tycon_name tycon tc_tybinders if_cons
                          ifConSrcStricts = if_src_stricts})
      = -- Universally-quantified tyvars are shared with
        -- parent TyCon, and are already in scope
-       bindIfaceTyVars ex_bndrs    $ \ ex_tvs -> do
+       bindIfaceBndrs ex_bndrs    $ \ ex_tvs -> do
         { traceIf (text "Start interface-file tc_con_decl" <+> ppr dc_name)
 
           -- By this point, we have bound every universal and existential
@@ -910,8 +909,12 @@ tcIfaceDataCons tycon_name tycon tc_tybinders if_cons
           -- ifConUserTvBinders has a matching counterpart somewhere in the
           -- bound universals/existentials. As a result, calling tcIfaceTyVar
           -- below is always guaranteed to succeed.
-        ; user_tv_bndrs <- mapM (\(TvBndr (name, _) vis) ->
-                                    TvBndr <$> tcIfaceTyVar name <*> pure vis)
+        ; user_tv_bndrs <- mapM (\(Bndr bd vis) ->
+                                   case bd of
+                                     IfaceIdBndr (name, _) ->
+                                       Bndr <$> tcIfaceLclId name <*> pure vis
+                                     IfaceTvBndr (name, _) ->
+                                       Bndr <$> tcIfaceTyVar name <*> pure vis)
                                 user_bndrs
 
         -- Read the context and argument types, but lazily for two reasons
@@ -937,7 +940,7 @@ tcIfaceDataCons tycon_name tycon tc_tybinders if_cons
 
         -- Remember, tycon is the representation tycon
         ; let orig_res_ty = mkFamilyTyConApp tycon
-                                (substTyVars (mkTvSubstPrs (map eqSpecPair eq_spec))
+                              (substTyCoVars (mkTvSubstPrs (map eqSpecPair eq_spec))
                                              (binderVars tc_tybinders))
 
         ; prom_rep_name <- newTyConRepName dc_name
@@ -1074,7 +1077,7 @@ tcIfaceRule (IfaceRule {ifRuleName = name, ifActivation = act, ifRuleBndrs = bnd
         -- to write them out in coreRuleToIfaceRule
     ifTopFreeName :: IfaceExpr -> Maybe Name
     ifTopFreeName (IfaceType (IfaceTyConApp tc _ )) = Just (ifaceTyConName tc)
-    ifTopFreeName (IfaceType (IfaceTupleTy s _ ts)) = Just (tupleTyConName s (length (tcArgsIfaceTypes ts)))
+    ifTopFreeName (IfaceType (IfaceTupleTy s _ ts)) = Just (tupleTyConName s (length (appArgsIfaceTypes ts)))
     ifTopFreeName (IfaceApp f _)                    = ifTopFreeName f
     ifTopFreeName (IfaceExt n)                      = Just n
     ifTopFreeName _                                 = Nothing
@@ -1132,24 +1135,27 @@ tcIfaceType = go
   where
     go (IfaceTyVar n)         = TyVarTy <$> tcIfaceTyVar n
     go (IfaceFreeTyVar n)     = pprPanic "tcIfaceType:IfaceFreeTyVar" (ppr n)
-    go (IfaceAppTy t1 t2)     = AppTy <$> go t1 <*> go t2
     go (IfaceLitTy l)         = LitTy <$> tcIfaceTyLit l
     go (IfaceFunTy t1 t2)     = FunTy <$> go t1 <*> go t2
     go (IfaceDFunTy t1 t2)    = FunTy <$> go t1 <*> go t2
     go (IfaceTupleTy s i tks) = tcIfaceTupleTy s i tks
+    go (IfaceAppTy t ts)
+      = do { t'  <- go t
+           ; ts' <- traverse go (appArgsIfaceTypes ts)
+           ; pure (foldl' AppTy t' ts') }
     go (IfaceTyConApp tc tks)
       = do { tc' <- tcIfaceTyCon tc
-           ; tks' <- mapM go (tcArgsIfaceTypes tks)
+           ; tks' <- mapM go (appArgsIfaceTypes tks)
            ; return (mkTyConApp tc' tks') }
     go (IfaceForAllTy bndr t)
       = bindIfaceForAllBndr bndr $ \ tv' vis ->
-        ForAllTy (TvBndr tv' vis) <$> go t
+        ForAllTy (Bndr tv' vis) <$> go t
     go (IfaceCastTy ty co)   = CastTy <$> go ty <*> tcIfaceCo co
     go (IfaceCoercionTy co)  = CoercionTy <$> tcIfaceCo co
 
-tcIfaceTupleTy :: TupleSort -> IsPromoted -> IfaceTcArgs -> IfL Type
+tcIfaceTupleTy :: TupleSort -> IsPromoted -> IfaceAppArgs -> IfL Type
 tcIfaceTupleTy sort is_promoted args
- = do { args' <- tcIfaceTcArgs args
+ = do { args' <- tcIfaceAppArgs args
       ; let arity = length args'
       ; base_tc <- tcTupleTyCon True sort arity
       ; case is_promoted of
@@ -1176,8 +1182,8 @@ tcTupleTyCon in_type sort arity
                      | otherwise = arity
                       -- in expressions, we only have term args
 
-tcIfaceTcArgs :: IfaceTcArgs -> IfL [Type]
-tcIfaceTcArgs = mapM tcIfaceType . tcArgsIfaceTypes
+tcIfaceAppArgs :: IfaceAppArgs -> IfL [Type]
+tcIfaceAppArgs = mapM tcIfaceType . appArgsIfaceTypes
 
 -----------------------------------------
 tcIfaceCtxt :: IfaceContext -> IfL ThetaType
@@ -1199,13 +1205,17 @@ tcIfaceTyLit (IfaceStrTyLit n) = return (StrTyLit n)
 tcIfaceCo :: IfaceCoercion -> IfL Coercion
 tcIfaceCo = go
   where
-    go (IfaceReflCo r t)         = Refl r <$> tcIfaceType t
+    go_mco IfaceMRefl    = pure MRefl
+    go_mco (IfaceMCo co) = MCo <$> (go co)
+
+    go (IfaceReflCo t)           = Refl <$> tcIfaceType t
+    go (IfaceGReflCo r t mco)    = GRefl r <$> tcIfaceType t <*> go_mco mco
     go (IfaceFunCo r c1 c2)      = mkFunCo r <$> go c1 <*> go c2
     go (IfaceTyConAppCo r tc cs)
       = TyConAppCo r <$> tcIfaceTyCon tc <*> mapM go cs
     go (IfaceAppCo c1 c2)        = AppCo <$> go c1 <*> go c2
     go (IfaceForAllCo tv k c)  = do { k' <- go k
-                                      ; bindIfaceTyVar tv $ \ tv' ->
+                                      ; bindIfaceBndr tv $ \ tv' ->
                                         ForAllCo tv' k' <$> go c }
     go (IfaceCoVarCo n)          = CoVarCo <$> go_var n
     go (IfaceAxiomInstCo n i cs) = AxiomInstCo <$> tcIfaceCoAxiom n <*> pure i <*> mapM go cs
@@ -1219,8 +1229,6 @@ tcIfaceCo = go
     go (IfaceNthCo d c)          = do { c' <- go c
                                       ; return $ mkNthCo (nthCoRole d c') d c' }
     go (IfaceLRCo lr c)          = LRCo lr  <$> go c
-    go (IfaceCoherenceCo c1 c2)  = CoherenceCo <$> go c1
-                                               <*> go c2
     go (IfaceKindCo c)           = KindCo   <$> go c
     go (IfaceSubCo c)            = SubCo    <$> go c
     go (IfaceAxiomRuleCo ax cos) = AxiomRuleCo <$> tcIfaceCoAxiomRule ax
@@ -1741,23 +1749,18 @@ bindIfaceBndrs (b:bs) thing_inside
     thing_inside (b':bs')
 
 -----------------------
-bindIfaceForAllBndrs :: [IfaceForAllBndr] -> ([TyVarBinder] -> IfL a) -> IfL a
+bindIfaceForAllBndrs :: [IfaceForAllBndr] -> ([TyCoVarBinder] -> IfL a) -> IfL a
 bindIfaceForAllBndrs [] thing_inside = thing_inside []
 bindIfaceForAllBndrs (bndr:bndrs) thing_inside
   = bindIfaceForAllBndr bndr $ \tv vis ->
     bindIfaceForAllBndrs bndrs $ \bndrs' ->
-    thing_inside (mkTyVarBinder vis tv : bndrs')
+    thing_inside (mkTyCoVarBinder vis tv : bndrs')
 
-bindIfaceForAllBndr :: IfaceForAllBndr -> (TyVar -> ArgFlag -> IfL a) -> IfL a
-bindIfaceForAllBndr (TvBndr tv vis) thing_inside
+bindIfaceForAllBndr :: IfaceForAllBndr -> (TyCoVar -> ArgFlag -> IfL a) -> IfL a
+bindIfaceForAllBndr (Bndr (IfaceTvBndr tv) vis) thing_inside
   = bindIfaceTyVar tv $ \tv' -> thing_inside tv' vis
-
-bindIfaceTyVars :: [IfaceTvBndr] -> ([TyVar] -> IfL a) -> IfL a
-bindIfaceTyVars [] thing_inside = thing_inside []
-bindIfaceTyVars (tv:tvs) thing_inside
-  = bindIfaceTyVar tv   $ \tv' ->
-    bindIfaceTyVars tvs $ \tvs' ->
-    thing_inside (tv' : tvs')
+bindIfaceForAllBndr (Bndr (IfaceIdBndr tv) vis) thing_inside
+  = bindIfaceId tv $ \tv' -> thing_inside tv' vis
 
 bindIfaceTyVar :: IfaceTvBndr -> (TyVar -> IfL a) -> IfL a
 bindIfaceTyVar (occ,kind) thing_inside
@@ -1774,8 +1777,8 @@ bindIfaceTyConBinders :: [IfaceTyConBinder]
                       -> ([TyConBinder] -> IfL a) -> IfL a
 bindIfaceTyConBinders [] thing_inside = thing_inside []
 bindIfaceTyConBinders (b:bs) thing_inside
-  = bindIfaceTyConBinderX bindIfaceTyVar b $ \ b'  ->
-    bindIfaceTyConBinders bs               $ \ bs' ->
+  = bindIfaceTyConBinderX bindIfaceBndr b $ \ b'  ->
+    bindIfaceTyConBinders bs              $ \ bs' ->
     thing_inside (b':bs')
 
 bindIfaceTyConBinders_AT :: [IfaceTyConBinder]
@@ -1792,14 +1795,14 @@ bindIfaceTyConBinders_AT (b : bs) thing_inside
     thing_inside (b':bs')
   where
     bind_tv tv thing
-      = do { mb_tv <- lookupIfaceTyVar tv
+      = do { mb_tv <- lookupIfaceVar tv
            ; case mb_tv of
                Just b' -> thing b'
-               Nothing -> bindIfaceTyVar tv thing }
+               Nothing -> bindIfaceBndr tv thing }
 
-bindIfaceTyConBinderX :: (IfaceTvBndr -> (TyVar -> IfL a) -> IfL a)
+bindIfaceTyConBinderX :: (IfaceBndr -> (TyCoVar -> IfL a) -> IfL a)
                       -> IfaceTyConBinder
                       -> (TyConBinder -> IfL a) -> IfL a
-bindIfaceTyConBinderX bind_tv (TvBndr tv vis) thing_inside
+bindIfaceTyConBinderX bind_tv (Bndr tv vis) thing_inside
   = bind_tv tv $ \tv' ->
-    thing_inside (TvBndr tv' vis)
+    thing_inside (Bndr tv' vis)

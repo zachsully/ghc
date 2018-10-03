@@ -113,7 +113,7 @@ test('T5168',
      ['$MAKE -s --no-print-directory T5168'])
 
 test('T5329', normal, compile, [''])
-test('T5303', normal, compile, [''])   # Coercion-optimiation test
+test('T5303', normal, compile, [''])   # Coercion-optimisation test
 test('T5342', normal, compile, [''])   # Lint error with -prof
 test('T5359a', normal, compile, [''])  # Lint error with -O (OccurAnal)
 test('T5359b', normal, compile, [''])  # Lint error with -O (OccurAnal)
@@ -148,7 +148,6 @@ test('T7785', only_ways(['optasm']), compile, ['-ddump-rules'])
 test('T7702',
      [extra_files(['T7702plugin']),
       pre_cmd('$MAKE -s --no-print-directory -C T7702plugin package.T7702 TOP={top}'),
-      clean_cmd('$MAKE -s --no-print-directory -C T7702plugin clean.T7702'),
       # we say 18mb peak allocated +/- 70% because other compiler flags have
       # a large effect on allocation which is hard to separate from the
       # allocation done by the plugin... but a regression allocates > 90mb
@@ -197,6 +196,9 @@ test('T8848a', only_ways(['optasm']), compile, ['-ddump-rules'])
 test('T8331', only_ways(['optasm']), compile, ['-ddump-rules'])
 test('T6056', only_ways(['optasm']), multimod_compile, ['T6056', '-v0 -ddump-rule-firings'])
 test('T9400', only_ways(['optasm']), compile, ['-O0 -ddump-simpl -dsuppress-uniques'])
+test('T9441a', [only_ways(['optasm']), check_errmsg(r'f1 = f2') ], compile, ['-ddump-simpl'])
+test('T9441b', [only_ways(['optasm']), check_errmsg(r'Rec {') ], compile, ['-ddump-simpl'])
+test('T9441c', [only_ways(['optasm']), check_errmsg(r'Rec {') ], compile, ['-ddump-simpl'])
 test('T9583', only_ways(['optasm']), compile, [''])
 test('T9565', only_ways(['optasm']), compile, [''])
 test('T5821', only_ways(['optasm']), compile, [''])
@@ -316,3 +318,12 @@ test('T15005', normal, compile, ['-O'])
 # we omit profiling because it affects the optimiser and makes the test fail
 test('T15056', [extra_files(['T15056a.hs']), omit_ways(['profasm'])], multimod_compile, ['T15056', '-O -v0 -ddump-rule-firings'])
 test('T15186', normal, multimod_compile, ['T15186', '-v0'])
+test('T15517', normal, compile, ['-O0'])
+test('T15517a', normal, compile, ['-O0'])
+test('T15453', normal, compile, ['-dcore-lint -O1'])
+test('T15445', normal, multimod_compile, ['T15445', '-v0 -O -ddump-rule-firings'])
+test('T15631',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T15631'])
+test('T15673', normal, compile, ['-O'])

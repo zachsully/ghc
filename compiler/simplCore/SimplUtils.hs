@@ -1511,9 +1511,12 @@ tryEtaExpandRhs :: SimplMode -> OutId -> OutExpr
 --   (a) rhs' has manifest arity
 --   (b) if is_bot is True then rhs' applied to n args is guaranteed bottom
 tryEtaExpandRhs mode bndr rhs
-  | isJoinId bndr
-  = return (manifestArity rhs, False, rhs)
-    -- Note [Do not eta-expand join points]
+  | Just join_arity <- isJoinId_maybe bndr
+  = do { let (join_bndrs, join_body) = collectNBinders join_arity rhs
+       ; return (count isId join_bndrs, exprIsBottom join_body, rhs) }
+         -- Note [Do not eta-expand join points]
+         -- But do return the correct arity and bottom-ness, because
+         -- these are used to set the bndr's IdInfo (Trac #15517)
 
   | otherwise
   = do { (new_arity, is_bot, new_rhs) <- try_expand
@@ -2146,7 +2149,12 @@ mkCase2 dflags scrut bndr alts_ty alts
   , gopt Opt_CaseFolding dflags
   , Just (scrut', tx_con, mk_orig) <- caseRules dflags scrut
   = do { bndr' <- newId (fsLit "lwild") (exprType scrut')
-       ; alts' <- mapM  (tx_alt tx_con mk_orig bndr') alts
+
+       ; alts' <- mapMaybeM (tx_alt tx_con mk_orig bndr') alts
+                  -- mapMaybeM: discard unreachable alternatives
+                  -- See Note [Unreachable caseRules alternatives]
+                  -- in PrelRules
+
        ; mkCase3 dflags scrut' bndr' alts_ty $
          add_default (re_sort alts')
        }
@@ -2170,19 +2178,14 @@ mkCase2 dflags scrut bndr alts_ty alts
     -- to construct an expression equivalent to the original one, for use
     -- in the DEFAULT case
 
+    tx_alt :: (AltCon -> Maybe AltCon) -> (Id -> CoreExpr) -> Id
+           -> CoreAlt -> SimplM (Maybe CoreAlt)
     tx_alt tx_con mk_orig new_bndr (con, bs, rhs)
-      | DataAlt dc <- con', not (isNullaryRepDataCon dc)
-      = -- For non-nullary data cons we must invent some fake binders
-        -- See Note [caseRules for dataToTag] in PrelRules
-        do { us <- getUniquesM
-           ; let (ex_tvs, arg_ids) = dataConRepInstPat us dc
-                                         (tyConAppArgs (idType new_bndr))
-           ; return (con', ex_tvs ++ arg_ids, rhs') }
-      | otherwise
-      = return (con', [], rhs')
+      = case tx_con con of
+          Nothing   -> return Nothing
+          Just con' -> do { bs' <- mk_new_bndrs new_bndr con'
+                          ; return (Just (con', bs', rhs')) }
       where
-        con' = tx_con con
-
         rhs' | isDeadBinder bndr = rhs
              | otherwise         = bindNonRec bndr orig_val rhs
 
@@ -2191,6 +2194,15 @@ mkCase2 dflags scrut bndr alts_ty alts
                       LitAlt l   -> Lit l
                       DataAlt dc -> mkConApp2 dc (tyConAppArgs (idType bndr)) bs
 
+    mk_new_bndrs new_bndr (DataAlt dc)
+      | not (isNullaryRepDataCon dc)
+      = -- For non-nullary data cons we must invent some fake binders
+        -- See Note [caseRules for dataToTag] in PrelRules
+        do { us <- getUniquesM
+           ; let (ex_tvs, arg_ids) = dataConRepInstPat us dc
+                                        (tyConAppArgs (idType new_bndr))
+           ; return (ex_tvs ++ arg_ids) }
+    mk_new_bndrs _ _ = return []
 
     re_sort :: [CoreAlt] -> [CoreAlt]  -- Re-sort the alternatives to
     re_sort alts = sortBy cmpAlt alts  -- preserve the #case_invariants#

@@ -423,7 +423,10 @@ genCCall target dest_regs args
                         return (unitOL (CALL (Left (litToImm (CmmLabel lbl))) n_argRegs_used False))
 
                 ForeignTarget expr _
-                 -> do  (dyn_c, [dyn_r]) <- arg_to_int_vregs expr
+                 -> do  (dyn_c, dyn_rs) <- arg_to_int_vregs expr
+                        let dyn_r = case dyn_rs of
+                                      [dyn_r'] -> dyn_r'
+                                      _ -> panic "SPARC.CodeGen.genCCall: arg_to_int"
                         return (dyn_c `snocOL` CALL (Right dyn_r) n_argRegs_used False)
 
                 PrimTarget mop
@@ -433,7 +436,10 @@ genCCall target dest_regs args
                                         return (unitOL (CALL (Left (litToImm (CmmLabel lbl))) n_argRegs_used False))
 
                                 Right mopExpr -> do
-                                        (dyn_c, [dyn_r]) <- arg_to_int_vregs mopExpr
+                                        (dyn_c, dyn_rs) <- arg_to_int_vregs mopExpr
+                                        let dyn_r = case dyn_rs of
+                                                      [dyn_r'] -> dyn_r'
+                                                      _ -> panic "SPARC.CodeGen.genCCall: arg_to_int"
                                         return (dyn_c `snocOL` CALL (Right dyn_r) n_argRegs_used False)
 
                         return lblOrMopExpr
@@ -627,6 +633,10 @@ outOfLineMachOp_table mop
         MO_F32_Cosh   -> fsLit "coshf"
         MO_F32_Tanh   -> fsLit "tanhf"
 
+        MO_F32_Asinh  -> fsLit "asinhf"
+        MO_F32_Acosh  -> fsLit "acoshf"
+        MO_F32_Atanh  -> fsLit "atanhf"
+
         MO_F64_Exp    -> fsLit "exp"
         MO_F64_Log    -> fsLit "log"
         MO_F64_Sqrt   -> fsLit "sqrt"
@@ -644,6 +654,10 @@ outOfLineMachOp_table mop
         MO_F64_Sinh   -> fsLit "sinh"
         MO_F64_Cosh   -> fsLit "cosh"
         MO_F64_Tanh   -> fsLit "tanh"
+
+        MO_F64_Asinh  -> fsLit "asinh"
+        MO_F64_Acosh  -> fsLit "acosh"
+        MO_F64_Atanh  -> fsLit "atanh"
 
         MO_UF_Conv w -> fsLit $ word2FloatLabel w
 

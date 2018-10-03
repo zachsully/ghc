@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, NamedFieldPuns, NondecreasingIndentation #-}
+{-# LANGUAGE CPP, NamedFieldPuns, NondecreasingIndentation, BangPatterns #-}
 {-# OPTIONS_GHC -fno-cse #-}
 -- -fno-cse is needed for GLOBAL_VAR's to behave properly
 
@@ -263,7 +263,7 @@ compileOne' m_tc_result mHscMessage
        -- imports a _stub.h file that we created here.
        current_dir = takeDirectory basename
        old_paths   = includePaths dflags1
-       prevailing_dflags = hsc_dflags hsc_env0
+       !prevailing_dflags = hsc_dflags hsc_env0
        dflags =
           dflags1 { includePaths = addQuoteInclude old_paths [current_dir]
                   , log_action = log_action prevailing_dflags }
@@ -762,6 +762,7 @@ getOutputFilename stop_phase output basename dflags next_phase maybe_location
           odir       = objectDir dflags
           osuf       = objectSuf dflags
           keep_hc    = gopt Opt_KeepHcFiles dflags
+          keep_hscpp = gopt Opt_KeepHscppFiles dflags
           keep_s     = gopt Opt_KeepSFiles dflags
           keep_bc    = gopt Opt_KeepLlvmFiles dflags
 
@@ -778,6 +779,7 @@ getOutputFilename stop_phase output basename dflags next_phase maybe_location
                        As _    | keep_s     -> True
                        LlvmOpt | keep_bc    -> True
                        HCc     | keep_hc    -> True
+                       HsPp _  | keep_hscpp -> True   -- See Trac #10869
                        _other               -> False
 
           suffix = myPhaseInputExt next_phase
@@ -1743,6 +1745,16 @@ linkBinary' staticLink dflags o_files dep_packages = do
                             else l
               in ["-L" ++ l] ++ ["-Xlinker", "-rpath", "-Xlinker", libpath]
          | otherwise = ["-L" ++ l]
+
+    pkg_lib_path_opts <-
+      if gopt Opt_SingleLibFolder dflags
+      then do
+        libs <- getLibs dflags dep_packages
+        tmpDir <- newTempDir dflags
+        sequence_ [ copyFile lib (tmpDir </> basename)
+                  | (lib, basename) <- libs]
+        return [ "-L" ++ tmpDir ]
+      else pure pkg_lib_path_opts
 
     let
       dead_strip

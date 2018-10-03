@@ -283,7 +283,14 @@ improveClsFD clas_tvs fd
                   -> []
 
                   | otherwise
-                  -> [(meta_tvs, fdeqs)]
+                  -> -- pprTrace "iproveClsFD" (vcat
+                     --  [ text "is_tvs =" <+> ppr qtvs
+                     --  , text "tys_inst =" <+> ppr tys_inst
+                     --  , text "tys_actual =" <+> ppr tys_actual
+                     --  , text "ltys1 =" <+> ppr ltys1
+                     --  , text "ltys2 =" <+> ppr ltys2
+                     --  , text "subst =" <+> ppr subst ]) $
+                     [(meta_tvs, fdeqs)]
                         -- We could avoid this substTy stuff by producing the eqn
                         -- (qtvs, ls1++rs1, ls2++rs2)
                         -- which will re-do the ls1/ls2 unification when the equation is
@@ -534,7 +541,7 @@ oclose preds fixed_tvs
   | null tv_fds = fixed_tvs -- Fast escape hatch for common case.
   | otherwise   = fixVarSet extend fixed_tvs
   where
-    extend fixed_tvs = foldl add fixed_tvs tv_fds
+    extend fixed_tvs = foldl' add fixed_tvs tv_fds
        where
           add fixed_tvs (ls,rs)
             | ls `subVarSet` fixed_tvs = fixed_tvs `unionVarSet` closeOverKinds rs

@@ -19,8 +19,7 @@ import GhcPrelude
 
 import {-# SOURCE #-} TcMatches ( tcGRHSsPat, tcMatchesFun )
 import {-# SOURCE #-} TcExpr  ( tcMonoExpr )
-import {-# SOURCE #-} TcPatSyn ( tcInferPatSynDecl, tcCheckPatSynDecl
-                               , tcPatSynBuilderBind )
+import {-# SOURCE #-} TcPatSyn ( tcPatSynDecl, tcPatSynBuilderBind )
 import CoreSyn (Tickish (..))
 import CostCentre (mkUserCC, CCFlavour(DeclCC))
 import DynFlags
@@ -361,7 +360,7 @@ tcLocalBinds (HsIPBinds x (IPBinds _ ip_binds)) thing_inside
             ; let d = toDict ipClass p ty `fmap` expr'
             ; return (ip_id, (IPBind noExt (Right ip_id) d)) }
     tc_ip_bind _ (IPBind _ (Right {}) _) = panic "tc_ip_bind"
-    tc_ip_bind _ (XCIPBind _) = panic "tc_ip_bind"
+    tc_ip_bind _ (XIPBind _) = panic "tc_ip_bind"
 
     -- Coerces a `t` into a dictionry for `IP "x" t`.
     -- co : t -> IP "x" t
@@ -526,16 +525,10 @@ tc_single :: forall thing.
 tc_single _top_lvl sig_fn _prag_fn
           (L _ (PatSynBind _ psb@PSB{ psb_id = L _ name }))
           _ thing_inside
-  = do { (aux_binds, tcg_env) <- tc_pat_syn_decl
+  = do { (aux_binds, tcg_env) <- tcPatSynDecl psb (sig_fn name)
        ; thing <- setGblEnv tcg_env thing_inside
        ; return (aux_binds, thing)
        }
-  where
-    tc_pat_syn_decl :: TcM (LHsBinds GhcTcId, TcGblEnv)
-    tc_pat_syn_decl = case sig_fn name of
-        Nothing                 -> tcInferPatSynDecl psb
-        Just (TcPatSynSig tpsi) -> tcCheckPatSynDecl psb tpsi
-        Just                 _  -> panic "tc_single"
 
 tc_single top_lvl sig_fn prag_fn lbind closed thing_inside
   = do { (binds1, ids) <- tcPolyBinds sig_fn prag_fn
@@ -948,12 +941,12 @@ chooseInferredQuantifiers inferred_theta tau_tvs qtvs
                                       , sig_inst_theta = annotated_theta
                                       , sig_inst_skols = annotated_tvs }))
   = -- Choose quantifiers for a partial type signature
-    do { psig_qtv_prs <- zonkSigTyVarPairs annotated_tvs
+    do { psig_qtv_prs <- zonkTyVarTyVarPairs annotated_tvs
 
             -- Check whether the quantified variables of the
             -- partial signature have been unified together
             -- See Note [Quantified variables in partial type signatures]
-       ; mapM_ report_dup_sig_tv_err  (findDupSigTvs psig_qtv_prs)
+       ; mapM_ report_dup_tyvar_tv_err  (findDupTyVarTvs psig_qtv_prs)
 
             -- Check whether a quantified variable of the partial type
             -- signature is not actually quantified.  How can that happen?
@@ -976,7 +969,7 @@ chooseInferredQuantifiers inferred_theta tau_tvs qtvs
 
        ; return (final_qtvs, my_theta) }
   where
-    report_dup_sig_tv_err (n1,n2)
+    report_dup_tyvar_tv_err (n1,n2)
       | PartialSig { psig_name = fn_name, psig_hs_ty = hs_ty } <- sig
       = addErrTc (hang (text "Couldn't match" <+> quotes (ppr n1)
                         <+> text "with" <+> quotes (ppr n2))
@@ -984,7 +977,7 @@ chooseInferredQuantifiers inferred_theta tau_tvs qtvs
                            2 (ppr fn_name <+> dcolon <+> ppr hs_ty)))
 
       | otherwise -- Can't happen; by now we know it's a partial sig
-      = pprPanic "report_sig_tv_err" (ppr sig)
+      = pprPanic "report_tyvar_tv_err" (ppr sig)
 
     report_mono_sig_tv_err n
       | PartialSig { psig_name = fn_name, psig_hs_ty = hs_ty } <- sig
@@ -992,7 +985,7 @@ chooseInferredQuantifiers inferred_theta tau_tvs qtvs
                      2 (hang (text "bound by the partial type signature:")
                            2 (ppr fn_name <+> dcolon <+> ppr hs_ty)))
       | otherwise -- Can't happen; by now we know it's a partial sig
-      = pprPanic "report_sig_tv_err" (ppr sig)
+      = pprPanic "report_mono_sig_tv_err" (ppr sig)
 
     choose_psig_context :: VarSet -> TcThetaType -> Maybe TcType
                         -> TcM (VarSet, TcThetaType)
@@ -1143,7 +1136,7 @@ Consider
   g x y = [x, y]
 
 Here, 'f' and 'g' are mutually recursive, and we end up unifying 'a' and 'b'
-together, which is fine.  So we bind 'a' and 'b' to SigTvs, which can then
+together, which is fine.  So we bind 'a' and 'b' to TyVarTvs, which can then
 unify with each other.
 
 But now consider:

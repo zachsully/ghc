@@ -174,8 +174,7 @@ import CoAxiom
 import ConLike
 import DataCon
 import PatSyn
-import PrelNames        ( gHC_PRIM, ioTyConName, printName, mkInteractiveModule
-                        , eqTyConName )
+import PrelNames        ( gHC_PRIM, ioTyConName, printName, mkInteractiveModule )
 import TysWiredIn
 import Packages hiding  ( Version(..) )
 import CmdLineParser
@@ -204,7 +203,6 @@ import qualified GHC.LanguageExtensions as LangExt
 
 import Foreign
 import Control.Monad    ( guard, liftM, ap )
-import Data.Foldable    ( foldl' )
 import Data.IORef
 import Data.Time
 import Exception
@@ -1712,7 +1710,7 @@ icExtendGblRdrEnv env tythings
        | is_sub_bndr thing
        = env
        | otherwise
-       = foldl extendGlobalRdrEnv env1 (concatMap localGREsFromAvail avail)
+       = foldl' extendGlobalRdrEnv env1 (concatMap localGREsFromAvail avail)
        where
           env1  = shadowNames env (concatMap availNames avail)
           avail = tyThingAvailInfo thing
@@ -2116,7 +2114,7 @@ extendTypeEnv :: TypeEnv -> TyThing -> TypeEnv
 extendTypeEnv env thing = extendNameEnv env (getName thing) thing
 
 extendTypeEnvList :: TypeEnv -> [TyThing] -> TypeEnv
-extendTypeEnvList env things = foldl extendTypeEnv env things
+extendTypeEnvList env things = foldl' extendTypeEnv env things
 
 extendTypeEnvWithIds :: TypeEnv -> [Id] -> TypeEnv
 extendTypeEnvWithIds env ids
@@ -2372,6 +2370,9 @@ data Dependencies
                         -- This is used by 'checkFamInstConsistency'.  This
                         -- does NOT include us, unlike 'imp_finsts'. See Note
                         -- [The type family instance consistency story].
+
+         , dep_plgins :: [ModuleName]
+                        -- ^ All the plugins used while compiling this module.
          }
   deriving( Eq )
         -- Equality used only for old/new comparison in MkIface.addFingerprints
@@ -2382,16 +2383,18 @@ instance Binary Dependencies where
                       put_ bh (dep_pkgs deps)
                       put_ bh (dep_orphs deps)
                       put_ bh (dep_finsts deps)
+                      put_ bh (dep_plgins deps)
 
     get bh = do ms <- get bh
                 ps <- get bh
                 os <- get bh
                 fis <- get bh
+                pl <- get bh
                 return (Deps { dep_mods = ms, dep_pkgs = ps, dep_orphs = os,
-                               dep_finsts = fis })
+                               dep_finsts = fis, dep_plgins = pl })
 
 noDependencies :: Dependencies
-noDependencies = Deps [] [] [] []
+noDependencies = Deps [] [] [] [] []
 
 -- | Records modules for which changes may force recompilation of this module
 -- See wiki: http://ghc.haskell.org/trac/ghc/wiki/Commentary/Compiler/RecompilationAvoidance
@@ -2620,11 +2623,11 @@ interface file); so we give it 'noSrcLoc' then.  Later, when we find
 its binding site, we fix it up.
 -}
 
-updNameCache :: HscEnv
+updNameCache :: IORef NameCache
              -> (NameCache -> (NameCache, c))  -- The updating function
              -> IO c
-updNameCache hsc_env upd_fn
-  = atomicModifyIORef' (hsc_NC hsc_env) upd_fn
+updNameCache ncRef upd_fn
+  = atomicModifyIORef' ncRef upd_fn
 
 mkSOName :: Platform -> FilePath -> FilePath
 mkSOName platform root

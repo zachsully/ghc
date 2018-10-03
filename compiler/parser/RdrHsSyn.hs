@@ -25,6 +25,7 @@ module   RdrHsSyn (
         mkTyClD, mkInstD,
         mkRdrRecordCon, mkRdrRecordUpd,
         setRdrNameSpace,
+        filterCTuple,
 
         cvBindGroup,
         cvBindsAndSigs,
@@ -78,7 +79,6 @@ module   RdrHsSyn (
 
 import GhcPrelude
 import HsSyn            -- Lots of it
-import Class            ( FunDep )
 import TyCon            ( TyCon, isTupleTyCon, tyConSingleDataCon_maybe )
 import DataCon          ( DataCon, dataConTyCon )
 import ConLike          ( ConLike(..) )
@@ -92,9 +92,10 @@ import Lexeme           ( isLexCon )
 import Type             ( TyThing(..) )
 import TysWiredIn       ( cTupleTyConName, tupleTyCon, tupleDataCon,
                           nilDataConName, nilDataConKey,
-                          listTyConName, listTyConKey )
+                          listTyConName, listTyConKey, eqTyCon_RDR,
+                          tupleTyConName, cTupleTyConNameArity_maybe )
 import ForeignCall
-import PrelNames        ( forall_tv_RDR, eqTyCon_RDR, allNameStrings )
+import PrelNames        ( forall_tv_RDR, allNameStrings )
 import SrcLoc
 import Unique           ( hasKey )
 import OrdList          ( OrdList, fromOL )
@@ -142,7 +143,7 @@ mkInstD (L loc d) = L loc (InstD noExt d)
 
 mkClassDecl :: SrcSpan
             -> Located (Maybe (LHsContext GhcPs), LHsType GhcPs)
-            -> Located (a,[Located (FunDep (Located RdrName))])
+            -> Located (a,[LHsFunDep GhcPs])
             -> OrdList (LHsDecl GhcPs)
             -> P (LTyClDecl GhcPs)
 
@@ -643,13 +644,13 @@ mkGadtDecl :: [Located RdrName]
 mkGadtDecl names ty
   = (ConDeclGADT { con_g_ext  = noExt
                  , con_names  = names
-                 , con_forall = L l $ isLHsForAllTy ty
+                 , con_forall = L l $ isLHsForAllTy ty'
                  , con_qvars  = mkHsQTvs tvs
                  , con_mb_cxt = mcxt
                  , con_args   = args'
                  , con_res_ty = res_ty
                  , con_doc    = Nothing }
-    , anns1 ++ anns2 ++ anns3)
+    , anns1 ++ anns2)
   where
     (ty'@(L l _),anns1) = peel_parens ty []
     (tvs, rho) = splitLHsForAllTy ty'
@@ -660,14 +661,13 @@ mkGadtDecl names ty
     split_rho (L l (HsParTy _ ty)) ann = split_rho ty (ann++mkParensApiAnn l)
     split_rho tau                  ann = (Nothing, tau, ann)
 
-    (args, res_ty, anns3) = split_tau tau []
+    (args, res_ty) = split_tau tau
     args' = nudgeHsSrcBangs args
 
     -- See Note [GADT abstract syntax] in HsDecls
-    split_tau (L _ (HsFunTy _ (L loc (HsRecTy _ rf)) res_ty)) ann
-                                       = (RecCon (L loc rf), res_ty, ann)
-    split_tau (L l (HsParTy _ ty)) ann = split_tau ty (ann++mkParensApiAnn l)
-    split_tau tau                  ann = (PrefixCon [], tau, ann)
+    split_tau (L _ (HsFunTy _ (L loc (HsRecTy _ rf)) res_ty))
+                                   = (RecCon (L loc rf), res_ty)
+    split_tau tau                  = (PrefixCon [], tau)
 
     peel_parens (L l (HsParTy _ ty)) ann = peel_parens ty
                                                        (ann++mkParensApiAnn l)
@@ -767,6 +767,13 @@ data_con_ty_con dc
   | otherwise  -- See Note [setRdrNameSpace for wired-in names]
   = Unqual (setOccNameSpace tcClsName (getOccName dc))
 
+-- | Replaces constraint tuple names with corresponding boxed ones.
+filterCTuple :: RdrName -> RdrName
+filterCTuple (Exact n)
+  | Just arity <- cTupleTyConNameArity_maybe n
+  = Exact $ tupleTyConName BoxedTuple arity
+filterCTuple rdr = rdr
+
 
 {- Note [setRdrNameSpace for wired-in names]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -811,11 +818,18 @@ checkTyVars pp_what equals_or_where tc tparms
     chk t@(L loc _)
         = Left (loc,
                 vcat [ text "Unexpected type" <+> quotes (ppr t)
-                     , text "In the" <+> pp_what <+> ptext (sLit "declaration for") <+> quotes (ppr tc)
+                     , text "In the" <+> pp_what <+> ptext (sLit "declaration for") <+> quotes tc'
                      , vcat[ (text "A" <+> pp_what <+> ptext (sLit "declaration should have form"))
-                     , nest 2 (pp_what <+> ppr tc
+                     , nest 2 (pp_what <+> tc'
                                        <+> hsep (map text (takeList tparms allNameStrings))
                                        <+> equals_or_where) ] ])
+
+    -- Avoid printing a constraint tuple in the error message. Print
+    -- a plain old tuple instead (since that's what the user probably
+    -- wrote). See #14907
+    tc' = ppr $ fmap filterCTuple tc
+
+
 
 whereDots, equalsDots :: SDoc
 -- Second argument to checkTyVars
@@ -870,6 +884,12 @@ checkTyClHdr is_cls ty
   = goL ty [] [] Prefix
   where
     goL (L l ty) acc ann fix = go l ty acc ann fix
+
+    -- workaround to define '*' despite StarIsType
+    go _ (HsParTy _ (L l (HsStarTy _ isUni))) acc ann fix
+      = do { warnStarBndr l
+           ; let name = mkOccName tcClsName (if isUni then "★" else "*")
+           ; return (L l (Unqual name), acc, fix, ann) }
 
     go l (HsTyVar _ _ (L _ tc)) acc ann fix
       | isRdrTc tc               = return (L l tc, acc, fix, ann)
@@ -1748,11 +1768,19 @@ warnStarIsType span = addWarning Opt_WarnStarIsType span msg
         $$ text "Suggested fix: use" <+> quotes (text "Type")
            <+> text "from" <+> quotes (text "Data.Kind") <+> text "instead."
 
+warnStarBndr :: SrcSpan -> P ()
+warnStarBndr span = addWarning Opt_WarnStarBinder span msg
+  where
+    msg =  text "Found binding occurrence of" <+> quotes (text "*")
+           <+> text "yet StarIsType is enabled."
+        $$ text "NB. To use (or export) this operator in"
+           <+> text "modules with StarIsType,"
+        $$ text "    including the definition module, you must qualify it."
+
 failOpFewArgs :: Located RdrName -> P a
 failOpFewArgs (L loc op) =
-  do { type_operators <- extension typeOperatorsEnabled
-     ; star_is_type <- extension starIsTypeEnabled
-     ; let msg = too_few $$ starInfo (type_operators, star_is_type) op
+  do { star_is_type <- extension starIsTypeEnabled
+     ; let msg = too_few $$ starInfo star_is_type op
      ; parseErrorSDoc loc msg }
   where
     too_few = text "Operator applied to too few arguments:" <+> ppr op

@@ -540,7 +540,7 @@ corresponds closely to the underlying bit-encoding of the number.
 In this notation floating point numbers are written using hexadecimal digits,
 and so the digits are interpreted using base 16, rather then the usual 10.
 This means that digits left of the decimal point correspond to positive
-powers of 16, while the ones to the right correspond to negaitve ones.
+powers of 16, while the ones to the right correspond to negative ones.
 
 You may also write an explicit exponent, which is similar to the exponent
 in decimal notation with the following differences:
@@ -585,7 +585,9 @@ That is, underscores in numeric literals are ignored when
 :extension:`NumericUnderscores` is enabled.
 See also :ghc-ticket:`14473`.
 
-For example: ::
+For example:
+
+.. code-block:: none
 
     -- decimal
     million    = 1_000_000
@@ -617,7 +619,9 @@ For example: ::
 
     test8bit x = (0b01_0000_0000 .&. x) /= 0
 
-About validity: ::
+About validity:
+
+.. code-block:: none
 
     x0 = 1_000_000   -- valid
     x1 = 1__000000   -- valid
@@ -1592,14 +1596,13 @@ New monadic failure desugaring mechanism
     when desugaring refutable patterns in ``do`` blocks.
 
 The ``-XMonadFailDesugaring`` extension switches the desugaring of
-``do``-blocks to use ``MonadFail.fail`` instead of ``Monad.fail``. This will
-eventually be the default behaviour in a future GHC release, under the
+``do``-blocks to use ``MonadFail.fail`` instead of ``Monad.fail``.
+
+This extension is enabled by default since GHC 8.6.1, under the
 `MonadFail Proposal (MFP)
 <https://prime.haskell.org/wiki/Libraries/Proposals/MonadFail>`__.
 
-This extension is temporary, and will be deprecated in a future release. It is
-included so that library authors have a hard check for whether their code
-will work with future GHC versions.
+This extension is temporary, and will be deprecated in a future release.
 
 .. _rebindable-syntax:
 
@@ -2291,6 +2294,9 @@ The following syntax is stolen:
 ``pattern``
     Stolen by: :extension:`PatternSynonyms`
 
+``static``
+    Stolen by: :extension:`StaticPointers`
+
 .. _data-type-extensions:
 
 Extensions to data types and type synonyms
@@ -2308,8 +2314,16 @@ Data types with no constructors
 
     Allow definition of empty ``data`` types.
 
-With the :extension:`EmptyDataDecls` extension, GHC
-lets you declare a data type with no constructors. For example: ::
+With the :extension:`EmptyDataDecls` extension, GHC lets you declare a
+data type with no constructors.
+
+You only need to enable this extension if the language you're using
+is Haskell 98, in which a data type must have at least one constructor.
+Haskell 2010 relaxed this rule to allow data types with no constructors,
+and thus :extension:`EmptyDataDecls` is enabled by default when the
+language is Haskell 2010.
+
+For example: ::
 
       data S      -- S :: Type
       data T a    -- T :: Type -> Type
@@ -3212,8 +3226,6 @@ Record field disambiguation
 
     :since: 6.8.1
 
-    :since: 6.8.1
-
     Allow the compiler to automatically choose between identically-named
     record selectors based on type (if the choice is unambiguous).
 
@@ -3546,10 +3558,10 @@ More details:
        module M where
          data R = R { a,b,c :: Int }
        module X where
-         import M( R(a,c) )
-         f b = R { .. }
+         import M( R(R,a,c) )
+         f a b = R { .. }
 
-   The ``R{..}`` expands to ``R{M.a=a}``, omitting ``b`` since the
+   The ``R{..}`` expands to ``R{a=a}``, omitting ``b`` since the
    record field is not in scope, and omitting ``c`` since the variable
    ``c`` is not in scope (apart from the binding of the record selector
    ``c``, of course).
@@ -3778,7 +3790,7 @@ GHC extends this mechanism along several axes:
 
 * In Haskell 98, the only derivable classes are ``Eq``,
   ``Ord``, ``Enum``, ``Ix``, ``Bounded``, ``Read``, and ``Show``. `Various
-  langauge extensions <#deriving-extra>`__ extend this list.
+  language extensions <#deriving-extra>`__ extend this list.
 
 * Besides the stock approach to deriving instances by generating all method
   definitions, GHC supports two additional deriving strategies, which can
@@ -4123,7 +4135,7 @@ There are two exceptions to this rule:
 
    That is, :extension:`DeriveFunctor` pattern-matches its way into tuples and maps
    over each type that constitutes the tuple. The generated code is
-   reminiscient of what would be generated from
+   reminiscent of what would be generated from
    ``data Triple a = Triple a Int [a]``, except with extra machinery to handle
    the tuple.
 
@@ -4359,7 +4371,7 @@ There are some other differences regarding what data types can have derived
    polymorphic types that are syntactically equivalent to the last type
    parameter. In particular:
 
-  -  We don't fold over the arguments of ``E1`` or ``E4`` beacause even though
+  -  We don't fold over the arguments of ``E1`` or ``E4`` because even though
      ``(a ~ Int)``, ``Int`` is not syntactically equivalent to ``a``.
 
   -  We don't fold over the argument of ``E3`` because ``a`` is not universally
@@ -4453,7 +4465,7 @@ Deriving ``Data`` instances
 
 .. extension:: DeriveDataTypeable
     :shortdesc: Enable deriving for the Data class.
-       Implied by :extension:`AutoDeriveTypeable`.
+       Implied by (deprecated) :extension:`AutoDeriveTypeable`.
 
     :since: 6.8.1
 
@@ -4508,7 +4520,7 @@ Deriving ``Lift`` instances
 .. extension:: DeriveLift
     :shortdesc: Enable deriving for the Lift class
 
-    :since: 7.2.1
+    :since: 8.0.1
 
     Enable automatic deriving of instances for the ``Lift`` typeclass for
     Template Haskell.
@@ -5435,6 +5447,37 @@ pattern synonym: ::
       pattern StrictJust a <- Just !a where
         StrictJust !a = Just a
 
+Constructing an explicitly bidirectional pattern synonym also:
+
+- can create different data constructors from the underlying data type,
+  not just the one appearing in the pattern match;
+
+- can call any functions or conditional logic, especially validation,
+  of course providing it constructs a result of the right type;
+
+- can use guards on the lhs of the ``=``;
+
+- can have multiple equations.
+
+For example: ::
+
+      data PosNeg = Pos Int | Neg Int
+      pattern Smarter{ nonneg } <- Pos nonneg  where
+        Smarter x = if x >= 0 then (Pos x) else (Neg x)
+
+Or using guards: ::
+
+      pattern Smarter{ nonneg } <- Pos nonneg  where
+        Smarter x | x >= 0    = (Pos x)
+                  | otherwise = (Neg x)
+
+There is an extensive Haskell folk art of `smart constructors
+<https://wiki.haskell.org/Smart_constructor>`_,
+essentially functions that wrap validation around a constructor,
+and avoid exposing its representation.
+The downside is that the underlying constructor can't be used as a matcher.
+Pattern synonyms can be used as genuinely smart constructors, for both validation and matching.
+
 The table below summarises where each kind of pattern synonym can be used.
 
 +---------------+----------------+---------------+---------------------------+
@@ -5508,7 +5551,7 @@ the syntax for bidirectional pattern synonyms is: ::
 and the syntax for explicitly bidirectional pattern synonyms is: ::
 
       pattern pat_lhs <- pat where
-        pat_lhs = expr
+        pat_lhs = expr                      -- lhs restricted, see below
 
 We can define either prefix, infix or record pattern synonyms by modifying
 the form of `pat_lhs`. The syntax for these is as follows:
@@ -5522,6 +5565,9 @@ Infix   ``arg1 `Name` arg2``
 Record  ``Name{arg1,arg2,...,argn}``
 ======= ============================
 
+The `pat_lhs` for explicitly bidirectional construction cannot use Record syntax.
+(Because the rhs *expr* might be constructing different data constructors.)
+It can use guards with multiple equations.
 
 Pattern synonym declarations can only occur in the top level of a
 module. In particular, they are not allowed as local definitions.
@@ -5688,7 +5734,7 @@ Note also the following points
          pattern P x y v <- MkT True x y (v::a)
 
    Here the universal type variable `a` scopes over the definition of `P`,
-   but the existential `b` does not.  (c.f. disussion on Trac #14998.)
+   but the existential `b` does not.  (c.f. discussion on Trac #14998.)
 
 -  For a bidirectional pattern synonym, a use of the pattern synonym as
    an expression has the type
@@ -7003,7 +7049,7 @@ usual: ::
 
 The class ``IsString`` is not in scope by default. If you want to
 mention it explicitly (for example, to give an instance declaration for
-it), you can import it from module ``GHC.Exts``.
+it), you can import it from module ``Data.String``.
 
 Haskell's defaulting mechanism (`Haskell Report, Section
 4.3.4 <http://www.haskell.org/onlinereport/decls.html#sect4.3.4>`__) is
@@ -7031,7 +7077,7 @@ A small example:
 
     module Main where
 
-    import GHC.Exts( IsString(..) )
+    import Data.String( IsString(..) )
 
     newtype MyString = MyString String deriving (Eq, Show)
     instance IsString MyString where
@@ -7950,7 +7996,7 @@ keyword in the family instance: ::
       type Elem [e] = e
       ...
 
-The data or type family instance for an assocated type must follow
+The data or type family instance for an associated type must follow
 the rule that the type indexes corresponding to class parameters must have
 precisely the same as type given in the instance head. For example: ::
 
@@ -8678,8 +8724,7 @@ Kind polymorphism
 .. extension:: TypeInType
     :shortdesc: Deprecated. Enable kind polymorphism and datatype promotion.
 
-    :implies: :extension:`PolyKinds`, :extension:`DataKinds`, :extension:`KindSignatures`,
-              :extension:`NoStarIsType`
+    :implies: :extension:`PolyKinds`, :extension:`DataKinds`, :extension:`KindSignatures`
     :since: 8.0.1
 
     In the past this extension used to enable advanced type-level programming
@@ -9126,13 +9171,12 @@ The kind ``Type``
 -----------------
 
 .. extension:: StarIsType
-    :shortdesc: Desugar ``*`` to ``Data.Kind.Type``.
+    :shortdesc: Treat ``*`` as ``Data.Kind.Type``.
 
     :since: 8.6.1
 
     Treat the unqualified uses of the ``*`` type operator as nullary and desugar
-    to ``Data.Kind.Type``. Disabled by :extension:`TypeOperators` and
-    :extension:`TypeInType`.
+    to ``Data.Kind.Type``.
 
 The kind ``Type`` (imported from ``Data.Kind``) classifies ordinary types. With
 :extension:`StarIsType` (currently enabled by default), ``*`` is desugared to
@@ -9590,7 +9634,7 @@ The following things have kind ``Constraint``:
 
 -  Anything whose form is not yet known, but the user has declared to
    have kind ``Constraint`` (for which they need to import it from
-   ``GHC.Exts``). So for example
+   ``Data.Kind``). So for example
    ``type Foo (f :: Type -> Constraint) = forall b. f b => b -> b``
    is allowed, as well as examples involving type families: ::
 
@@ -9716,7 +9760,7 @@ This idea is very old; see Seciton 7 of `Derivable type classes <https://www.mic
 Syntax changes
 ----------------
 
-`Haskell 2010 <https://www.haskell.org/onlinereport/haskell2010/haskellch10.html#x17-18000010.5>`_ defines a ``context`` (the bit to the left of ``=>`` in a type) like this ::
+`Haskell 2010 <https://www.haskell.org/onlinereport/haskell2010/haskellch10.html#x17-18000010.5>`_ defines a ``context`` (the bit to the left of ``=>`` in a type) like this
 
 .. code-block:: none
 
@@ -9726,26 +9770,26 @@ Syntax changes
     class ::= qtycls tyvar
             |  qtycls (tyvar atype1 ... atypen)
 
-We to extend ``class`` (warning: this is a rather confusingly named non-terminal symbol) with two extra forms, namely precisely what can appear in an instance declaration ::
+We to extend ``class`` (warning: this is a rather confusingly named non-terminal symbol) with two extra forms, namely precisely what can appear in an instance declaration
 
 .. code-block:: none
 
     class ::= ...
-          | context => qtycls inst
-          | context => tyvar inst
+          | [context =>] qtycls inst
+          | [context =>] tyvar inst
 
 The definition of ``inst`` is unchanged from the Haskell Report (roughly, just a type).
-That is the only syntactic change to the language.
+The ``context =>`` part is optional.  That is the only syntactic change to the language.
 
 Notes:
 
-- Where GHC allows extensions instance declarations we allow exactly the same extensions to this new form of ``class``.  Specifically, with :extension:`ExplicitForAll` and :extension:`MultiParameterTypeClasses` the syntax becomes ::
+- Where GHC allows extensions instance declarations we allow exactly the same extensions to this new form of ``class``.  Specifically, with :extension:`ExplicitForAll` and :extension:`MultiParameterTypeClasses` the syntax becomes
 
-.. code-block:: none
+  .. code-block:: none
 
     class ::= ...
-           | [forall tyavrs .] context => qtycls inst1 ... instn
-           | [forall tyavrs .] context => tyvar inst1 ... instn
+           | [forall tyavrs .] [context =>] qtycls inst1 ... instn
+           | [forall tyavrs .] [context =>] tyvar inst1 ... instn
 
   Note that an explicit ``forall`` is often absolutely essential. Consider the rose-tree example ::
 
@@ -10176,8 +10220,7 @@ Lexically scoped type variables
     To trigger those forms of ``ScopedTypeVariables``, the ``forall`` must appear against the top-level signature (or outer expression)
     but *not* against nested signatures referring to the same type variables.
 
-    Explicit ``forall`` is not always required -- see :ref:`pattern signature equivalent pattern-equiv-form` for the example in this section, or :ref:`pattern-type-sigs` .
-
+    Explicit ``forall`` is not always required -- see :ref:`pattern signature equivalent <pattern-equiv-form>` for the example in this section, or :ref:`pattern-type-sigs`.
 
 GHC supports *lexically scoped type variables*, without which some type
 signatures are simply impossible to write. For example: ::
@@ -10398,11 +10441,6 @@ scope, because it is bound by the pattern match.
 The effect is to bring it into scope,
 standing for the existentially-bound type variable.
 
-When a pattern type signature binds a type variable in this way, GHC
-insists that the type variable is bound to a *rigid*, or fully-known,
-type variable. This means that any user-written type signature always
-stands for a completely known type.
-
 It does seem odd that the existentially-bound type variable *must not*
 be already in scope. Contrast that usually name-bindings merely shadow
 (make a 'hole') in a same-named outer variable's scope.
@@ -10525,50 +10563,7 @@ assumptions", and a related `blog post <http://ghc.haskell.org/trac/ghc/blog/Let
 The extension :extension:`MonoLocalBinds` is implied by :extension:`TypeFamilies`
 and :extension:`GADTs`. You can switch it off again with
 :extension:`NoMonoLocalBinds <-XMonoLocalBinds>` but type inference becomes
-less predicatable if you do so. (Read the papers!)
-
-.. _kind-generalisation:
-
-Kind generalisation
--------------------
-
-Just as :extension:`MonoLocalBinds` places limitations on when the *type* of a
-*term* is generalised (see :ref:`mono-local-binds`), it also limits when the
-*kind* of a *type signature* is generalised. Here is an example involving
-:ref:`type signatures on instance declarations <instance-sigs>`: ::
-
-    data Proxy a = Proxy
-    newtype Tagged s b = Tagged b
-
-    class C b where
-      c :: forall (s :: k). Tagged s b
-
-    instance C (Proxy a) where
-      c :: forall s. Tagged s (Proxy a)
-      c = Tagged Proxy
-
-With :extension:`MonoLocalBinds` enabled, this ``C (Proxy a)`` instance will
-fail to typecheck. The reason is that the type signature for ``c`` captures
-``a``, an outer-scoped type variable, which means the type signature is not
-closed. Therefore, the inferred kind for ``s`` will *not* be generalised, and
-as a result, it will fail to unify with the kind variable ``k`` which is
-specified in the declaration of ``c``. This can be worked around by specifying
-an explicit kind variable for ``s``, e.g., ::
-
-    instance C (Proxy a) where
-      c :: forall (s :: k). Tagged s (Proxy a)
-      c = Tagged Proxy
-
-or, alternatively: ::
-
-    instance C (Proxy a) where
-      c :: forall k (s :: k). Tagged s (Proxy a)
-      c = Tagged Proxy
-
-This declarations are equivalent using Haskell's implicit "add implicit
-foralls" rules (see :ref:`implicit-quantification`). The implicit foralls rules
-are purely syntactic and are quite separate from the kind generalisation
-described here.
+less predictable if you do so. (Read the papers!)
 
 .. _visible-type-application:
 
@@ -10606,14 +10601,35 @@ Here are the details:
   will have its type variables
   ordered as ``m, a, b, c``.
 
+- If the type signature includes any kind annotations (either on variable
+  binders or as annotations on types), any variables used in kind
+  annotations come before any variables never used in kind annotations.
+  This rule is not recursive: if there is an annotation within an annotation,
+  then the variables used therein are on equal footing. Examples::
+
+    f :: Proxy (a :: k) -> Proxy (b :: j) -> ()
+      -- as if f :: forall k j a b. ...
+
+    g :: Proxy (b :: j) -> Proxy (a :: (Proxy :: (k -> Type) -> Type) Proxy) -> ()
+      -- as if g :: forall j k b a. ...
+      -- NB: k is in a kind annotation within a kind annotation
+
 - If any of the variables depend on other variables (that is, if some
   of the variables are *kind* variables), the variables are reordered
   so that kind variables come before type variables, preserving the
   left-to-right order as much as possible. That is, GHC performs a
-  stable topological sort on the variables.
+  stable topological sort on the variables. Examples::
 
-  For example: if we have ``bar :: Proxy (a :: (j, k)) -> b``, then
-  the variables are ordered ``j``, ``k``, ``a``, ``b``.
+    h :: Proxy (a :: (j, k)) -> Proxy (b :: Proxy a) -> ()
+      -- as if h :: forall j k a b. ...
+
+  In this example, all of ``a``, ``j``, and ``k`` are considered kind
+  variables and will always be placed before ``b``, a lowly type variable.
+  (Note that ``a`` is used in ``b``\'s kind.) Yet, even though ``a`` appears
+  lexically before ``j`` and ``k``, ``j`` and ``k`` are quantified first,
+  because ``a`` depends on ``j`` and ``k``. Note further that ``j`` and ``k``
+  are not reordered with respect to each other, even though doing so would
+  not violate dependency conditions.
 
 - Visible type application is available to instantiate only user-specified
   type variables. This means that in ``data Proxy a = Proxy``, the unmentioned
@@ -10683,6 +10699,29 @@ Here are the details:
   application. This isn't true, however! Be sure to use :ghci-cmd:`:type +v`
   if you want the most accurate information with respect to visible type
   application properties.
+
+- Although GHC supports visible *type* applications, it does not yet support
+  visible *kind* applications. However, GHC does follow similar rules for
+  quantifying variables in kind signatures as it does for quantifying type
+  signatures. For instance: ::
+
+    type family F (a :: j) (b :: k) :: l
+      -- F :: forall j k l. j -> k -> l
+
+  In the kind of ``F``, the left-to-right ordering of ``j``, ``k``, and ``l``
+  is preserved.
+
+  If a family declaration is associated with a class, then class-bound
+  variables always come first in the kind of the family. For instance: ::
+
+    class C (a :: Type) where
+      type T (x :: f a)
+      -- T :: forall a f. f a -> Type
+
+  Contrast this with the kind of the following top-level family declaration: ::
+
+    type family T2 (x :: f a)
+    -- T2 :: forall f a. f a -> Type
 
 .. _implicit-parameters:
 
@@ -11124,7 +11163,7 @@ the following pairs are equivalent: ::
                     h x y = y
                  in ...
 
-Notice that GHC always adds implicit quantfiers *at the outermost level*
+Notice that GHC always adds implicit quantifiers *at the outermost level*
 of a user-written type; it
 does *not* find the inner-most possible quantification
 point. For example: ::
@@ -11539,6 +11578,21 @@ configurable by a few flags.
     ``(_ :: Int -> [Int])``, ``mempty`` is a hole fit with
     ``mempty @(Int -> [Int])``. This can be toggled off with
     the reverse of this flag.
+
+.. ghc-flag:: -fshow-docs-of-hole-fits
+    :shortdesc: Toggles whether to show the documentation of the valid
+       hole fits in the output.
+    :type: dynamic
+    :category: verbosity
+    :reverse: -fno-show-docs-of-hole-fits
+
+    :default: off
+
+    It can sometime be the case that the name and type of a valid hole
+    fit is not enough to realize what the fit stands for. This flag
+    adds the documentation of the fit to the message, if the
+    documentation is available (and the module from which the function
+    comes was compiled with the ``-haddock`` flag).
 
 .. ghc-flag:: -fshow-type-app-vars-of-hole-fits
     :shortdesc: Toggles whether to show what type each quantified
@@ -14782,19 +14836,6 @@ to be called at type ``T``:
 However, sometimes there are no such calls, in which case the pragma can
 be useful.
 
-Obsolete ``SPECIALIZE`` syntax
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-In earlier versions of GHC, it was possible to provide your own
-specialised function for a given type:
-
-::
-
-    {-# SPECIALIZE hammeredLookup :: [(Int, value)] -> Int -> value = intLookup #-}
-
-This feature has been removed, as it is now subsumed by the ``RULES``
-pragma (see :ref:`rule-spec`).
-
 .. _specialize-instance-pragma:
 
 ``SPECIALIZE`` instance pragma
@@ -14946,7 +14987,7 @@ modules. ``COMPLETE`` pragmas should be thought of as asserting a
 universal truth about a set of patterns and as a result, should not be
 used to silence context specific incomplete match warnings.
 
-When specifing a ``COMPLETE`` pragma, the result types of all patterns must
+When specifying a ``COMPLETE`` pragma, the result types of all patterns must
 be consistent with each other. This is a sanity check as it would be impossible
 to match on all the patterns if the types were inconsistent.
 
@@ -15311,7 +15352,7 @@ The solution is to define the instance-specific function yourself, with
 a pragma to prevent it being inlined too early, and give a RULE for it: ::
 
     instance C Bool where
-      op x y = opBool
+      op = opBool
 
     opBool :: Bool -> Bool -> Bool
     {-# NOINLINE [1] opBool #-}
@@ -15846,8 +15887,8 @@ Here are some examples: ::
 The type ``Simple`` has its parameter at role representational, which is
 generally the most common case. ``Simple Age`` would have the same
 representation as ``Simple Int``. The type ``Complex``, on the other
-hand, has its parameter at role nominal, because ``Simple Age`` and
-``Simple Int`` are *not* the same. Lastly, ``Phant Age`` and
+hand, has its parameter at role nominal, because ``Complex Age`` and
+``Complex Int`` are *not* the same. Lastly, ``Phant Age`` and
 ``Phant Bool`` have the same representation, even though ``Age`` and
 ``Bool`` are unrelated.
 

@@ -38,8 +38,9 @@ import PrimOp      ( PrimOp(..), tagToEnumKey )
 import TysWiredIn
 import TysPrim
 import TyCon       ( tyConDataCons_maybe, isAlgTyCon, isEnumerationTyCon
-                   , isNewTyCon, unwrapNewTyCon_maybe, tyConDataCons )
-import DataCon     ( DataCon, dataConTagZ, dataConTyCon, dataConWorkId )
+                   , isNewTyCon, unwrapNewTyCon_maybe, tyConDataCons
+                   , tyConFamilySize )
+import DataCon     ( dataConTagZ, dataConTyCon, dataConWorkId )
 import CoreUtils   ( cheapEqExpr, exprIsHNF, exprType )
 import CoreUnfold  ( exprIsConApp_maybe )
 import Type
@@ -462,7 +463,10 @@ wordOpC2 op dflags (LitNumber LitNumWord w1 _) (LitNumber LitNumWord w2 _) =
 wordOpC2 _ _ _ _ = Nothing  -- Could find LitLit
 
 shiftRule :: (DynFlags -> Integer -> Int -> Integer) -> RuleM CoreExpr
-                 -- Shifts take an Int; hence third arg of op is Int
+-- Shifts take an Int; hence third arg of op is Int
+-- Used for shift primops
+--    ISllOp, ISraOp, ISrlOp :: Word# -> Int# -> Word#
+--    SllOp, SrlOp           :: Word# -> Int# -> Word#
 -- See Note [Guarding against silly shifts]
 shiftRule shift_op
   = do { dflags <- getDynFlags
@@ -689,13 +693,32 @@ Shift.$wgo = \ (w_sCS :: GHC.Prim.Int#) (w1_sCT :: [GHC.Types.Bool]) ->
                 } } } }
 
 Note the massive shift on line "!!!!".  It can't happen, because we've checked
-that w < 64, but the optimiser didn't spot that. We DO NO want to constant-fold this!
+that w < 64, but the optimiser didn't spot that. We DO NOT want to constant-fold this!
 Moreover, if the programmer writes (n `uncheckedShiftL` 9223372036854775807), we
 can't constant fold it, but if it gets to the assember we get
      Error: operand type mismatch for `shl'
 
 So the best thing to do is to rewrite the shift with a call to error,
 when the second arg is stupid.
+
+There are two cases:
+
+- Shifting fixed-width things: the primops ISll, Sll, etc
+  These are handled by shiftRule.
+
+  We are happy to shift by any amount up to wordSize but no more.
+
+- Shifting Integers: the function shiftLInteger, shiftRInteger
+  from the 'integer' library.   These are handled by rule_shift_op,
+  and match_Integer_shift_op.
+
+  Here we could in principle shift by any amount, but we arbitary
+  limit the shift to 4 bits; in particualr we do not want shift by a
+  huge amount, which can happen in code like that above.
+
+The two cases are more different in their code paths that is comfortable,
+but that is only a historical accident.
+
 
 ************************************************************************
 *                                                                      *
@@ -933,9 +956,9 @@ trueValBool   = Var trueDataConId -- see Note [What's true and false]
 falseValBool  = Var falseDataConId
 
 ltVal, eqVal, gtVal :: Expr CoreBndr
-ltVal = Var ltDataConId
-eqVal = Var eqDataConId
-gtVal = Var gtDataConId
+ltVal = Var ordLTDataConId
+eqVal = Var ordEQDataConId
+gtVal = Var ordGTDataConId
 
 mkIntVal :: DynFlags -> Integer -> Expr CoreBndr
 mkIntVal dflags i = Lit (mkMachInt dflags i)
@@ -1214,8 +1237,8 @@ builtinIntegerRules =
   rule_binop          "orInteger"           orIntegerName           (.|.),
   rule_binop          "xorInteger"          xorIntegerName          xor,
   rule_unop           "complementInteger"   complementIntegerName   complement,
-  rule_Int_binop      "shiftLInteger"       shiftLIntegerName       shiftL,
-  rule_Int_binop      "shiftRInteger"       shiftRIntegerName       shiftR,
+  rule_shift_op       "shiftLInteger"       shiftLIntegerName       shiftL,
+  rule_shift_op       "shiftRInteger"       shiftRIntegerName       shiftR,
   rule_bitInteger     "bitInteger"          bitIntegerName,
   -- See Note [Integer division constant folding] in libraries/base/GHC/Real.hs
   rule_divop_one      "quotInteger"         quotIntegerName         quot,
@@ -1265,9 +1288,9 @@ builtinIntegerRules =
           rule_divop_one str name op
            = BuiltinRule { ru_name = fsLit str, ru_fn = name, ru_nargs = 2,
                            ru_try = match_Integer_divop_one op }
-          rule_Int_binop str name op
+          rule_shift_op str name op
            = BuiltinRule { ru_name = fsLit str, ru_fn = name, ru_nargs = 2,
-                           ru_try = match_Integer_Int_binop op }
+                           ru_try = match_Integer_shift_op op }
           rule_binop_Prim str name op
            = BuiltinRule { ru_name = fsLit str, ru_fn = name, ru_nargs = 2,
                            ru_try = match_Integer_binop_Prim op }
@@ -1568,12 +1591,18 @@ match_Integer_divop_one divop _ id_unf _ [xl,yl]
   = Just (Lit (mkLitInteger (x `divop` y) i))
 match_Integer_divop_one _ _ _ _ _ = Nothing
 
-match_Integer_Int_binop :: (Integer -> Int -> Integer) -> RuleFun
-match_Integer_Int_binop binop _ id_unf _ [xl,yl]
+match_Integer_shift_op :: (Integer -> Int -> Integer) -> RuleFun
+-- Used for shiftLInteger, shiftRInteger :: Integer -> Int# -> Integer
+-- See Note [Guarding against silly shifts]
+match_Integer_shift_op binop _ id_unf _ [xl,yl]
   | Just (LitNumber LitNumInteger x i) <- exprIsLiteral_maybe id_unf xl
   , Just (LitNumber LitNumInt y _)     <- exprIsLiteral_maybe id_unf yl
+  , y >= 0
+  , y <= 4   -- Restrict constant-folding of shifts on Integers, somewhat
+             -- arbitrary.  We can get huge shifts in inaccessible code
+             -- (Trac #15673)
   = Just (Lit (mkLitInteger (x `binop` fromIntegral y) i))
-match_Integer_Int_binop _ _ _ _ _ = Nothing
+match_Integer_shift_op _ _ _ _ _ = Nothing
 
 match_Integer_binop_Prim :: (Integer -> Integer -> Bool) -> RuleFun
 match_Integer_binop_Prim binop dflags id_unf _ [xl, yl]
@@ -1782,7 +1811,7 @@ numFoldingRules op dict = do
      (v   :-: L y) :-: (w :-: L x) -> return $ mkL (x-y)   `add` (v `sub` w)
      (v   :-: L y) :-: (L x :-: w) -> return $ mkL (0-x-y) `add` (v `add` w)
      (L y :-:   v) :-: (w :-: L x) -> return $ mkL (x+y)   `sub` (v `add` w)
-     (L y :-:   v) :-: (L x :-: w) -> return $ mkL (y-x)   `add` (w `add` v)
+     (L y :-:   v) :-: (L x :-: w) -> return $ mkL (y-x)   `add` (w `sub` v)
      (x :++: w)    :-: (y :++: v)  -> return $ mkL (x-y)   `add` (w `sub` v)
      (w :-: L x)   :-: (y :++: v)  -> return $ mkL (0-y-x) `add` (w `sub` v)
      (L x :-: w)   :-: (y :++: v)  -> return $ mkL (x-y)   `sub` (v `add` w)
@@ -1929,11 +1958,13 @@ wordPrimOps dflags = PrimOps
 -- | Match the scrutinee of a case and potentially return a new scrutinee and a
 -- function to apply to each literal alternative.
 caseRules :: DynFlags
-          -> CoreExpr                    -- Scrutinee
-          -> Maybe ( CoreExpr            -- New scrutinee
-                   , AltCon -> AltCon    -- How to fix up the alt pattern
-                   , Id -> CoreExpr)     -- How to reconstruct the original scrutinee
-                                         -- from the new case-binder
+          -> CoreExpr                       -- Scrutinee
+          -> Maybe ( CoreExpr               -- New scrutinee
+                   , AltCon -> Maybe AltCon -- How to fix up the alt pattern
+                                            --   Nothing <=> Unreachable
+                                            -- See Note [Unreachable caseRules alternatives]
+                   , Id -> CoreExpr)        -- How to reconstruct the original scrutinee
+                                            -- from the new case-binder
 -- e.g  case e of b {
 --         ...;
 --         con bs -> rhs;
@@ -1982,9 +2013,9 @@ caseRules _ (App (App (Var f) (Type ty)) v)       -- dataToTag x
 caseRules _ _ = Nothing
 
 
-tx_lit_con :: DynFlags -> (Integer -> Integer) -> AltCon -> AltCon
-tx_lit_con _      _      DEFAULT    = DEFAULT
-tx_lit_con dflags adjust (LitAlt l) = LitAlt (mapLitValue dflags adjust l)
+tx_lit_con :: DynFlags -> (Integer -> Integer) -> AltCon -> Maybe AltCon
+tx_lit_con _      _      DEFAULT    = Just DEFAULT
+tx_lit_con dflags adjust (LitAlt l) = Just $ LitAlt (mapLitValue dflags adjust l)
 tx_lit_con _      _      alt        = pprPanic "caseRules" (ppr alt)
    -- NB: mapLitValue uses mkMachIntWrap etc, to ensure that the
    -- literal alternatives remain in Word/Int target ranges
@@ -2024,20 +2055,28 @@ adjustUnary op
          IntNegOp  -> Just (\y -> negate y    )
          _         -> Nothing
 
-tx_con_tte :: DynFlags -> AltCon -> AltCon
-tx_con_tte _      DEFAULT         = DEFAULT
+tx_con_tte :: DynFlags -> AltCon -> Maybe AltCon
+tx_con_tte _      DEFAULT         = Just DEFAULT
 tx_con_tte _      alt@(LitAlt {}) = pprPanic "caseRules" (ppr alt)
 tx_con_tte dflags (DataAlt dc)  -- See Note [caseRules for tagToEnum]
-  = LitAlt $ mkMachInt dflags $ toInteger $ dataConTagZ dc
+  = Just $ LitAlt $ mkMachInt dflags $ toInteger $ dataConTagZ dc
 
-tx_con_dtt :: Type -> AltCon -> AltCon
-tx_con_dtt _  DEFAULT              = DEFAULT
+tx_con_dtt :: Type -> AltCon -> Maybe AltCon
+tx_con_dtt _  DEFAULT = Just DEFAULT
 tx_con_dtt ty (LitAlt (LitNumber LitNumInt i _))
-   = DataAlt (get_con ty (fromInteger i))
-tx_con_dtt _  alt                  = pprPanic "caseRules" (ppr alt)
+   | tag >= 0
+   , tag < n_data_cons
+   = Just (DataAlt (data_cons !! tag))   -- tag is zero-indexed, as is (!!)
+   | otherwise
+   = Nothing
+   where
+     tag         = fromInteger i :: ConTagZ
+     tc          = tyConAppTyCon ty
+     n_data_cons = tyConFamilySize tc
+     data_cons   = tyConDataCons tc
 
-get_con :: Type -> ConTagZ -> DataCon
-get_con ty tag = tyConDataCons (tyConAppTyCon ty) !! tag
+tx_con_dtt _ alt = pprPanic "caseRules" (ppr alt)
+
 
 {- Note [caseRules for tagToEnum]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2096,4 +2135,19 @@ headed by a normal tycon. In particular, we do not apply this in the case of a
 data family tycon, since that would require carefully applying coercion(s)
 between the data family and the data family instance's representation type,
 which caseRules isn't currently engineered to handle (#14680).
+
+Note [Unreachable caseRules alternatives]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Take care if we see something like
+  case dataToTag x of
+    DEFAULT -> e1
+    -1# -> e2
+    100 -> e3
+because there isn't a data constructor with tag -1 or 100. In this case the
+out-of-range alterantive is dead code -- we know the range of tags for x.
+
+Hence caseRules returns (AltCon -> Maybe AltCon), with Nothing indicating
+an alternative that is unreachable.
+
+You may wonder how this can happen: check out Trac #15436.
 -}

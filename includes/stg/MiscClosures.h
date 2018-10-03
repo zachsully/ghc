@@ -390,7 +390,8 @@ RTS_FUN_DECL(stg_copySmallMutableArrayzh);
 RTS_FUN_DECL(stg_casSmallArrayzh);
 
 RTS_FUN_DECL(stg_newMutVarzh);
-RTS_FUN_DECL(stg_atomicModifyMutVarzh);
+RTS_FUN_DECL(stg_atomicModifyMutVar2zh);
+RTS_FUN_DECL(stg_atomicModifyMutVarzuzh);
 RTS_FUN_DECL(stg_casMutVarzh);
 
 RTS_FUN_DECL(stg_isEmptyMVarzh);
@@ -478,6 +479,7 @@ RTS_FUN_DECL(stg_noDuplicatezh);
 RTS_FUN_DECL(stg_traceCcszh);
 RTS_FUN_DECL(stg_clearCCSzh);
 RTS_FUN_DECL(stg_traceEventzh);
+RTS_FUN_DECL(stg_traceBinaryEventzh);
 RTS_FUN_DECL(stg_traceMarkerzh);
 RTS_FUN_DECL(stg_getThreadAllocationCounterzh);
 RTS_FUN_DECL(stg_setThreadAllocationCounterzh);
@@ -512,8 +514,10 @@ extern StgWord RTS_VAR(atomic_modify_mutvar_mutex);
 // RtsFlags
 extern StgWord RTS_VAR(RtsFlags); // bogus type
 
-// Stable.c
+// StablePtr.c
 extern StgWord RTS_VAR(stable_ptr_table);
+
+// StableName.c
 extern StgWord RTS_VAR(stable_name_table);
 
 // Profiling.c
