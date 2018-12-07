@@ -280,6 +280,7 @@ Library
         StgCmmExtCode
         SMRep
         CoreArity
+        CoreEta
         CoreFVs
         CoreLint
         CorePrep
@@ -432,6 +433,7 @@ Library
         StgLint
         StgSyn
         CallArity
+        EtaWorkerWrapper
         DmdAnal
         Exitify
         WorkWrap
