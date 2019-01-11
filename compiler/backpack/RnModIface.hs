@@ -645,6 +645,8 @@ rnIfaceCo :: Rename IfaceCoercion
 rnIfaceCo (IfaceReflCo role ty) = IfaceReflCo role <$> rnIfaceType ty
 rnIfaceCo (IfaceFunCo role co1 co2)
     = IfaceFunCo role <$> rnIfaceCo co1 <*> rnIfaceCo co2
+rnIfaceCo (IfaceFunTildeCo role co1 co2)
+    = IfaceFunTildeCo role <$> rnIfaceCo co1 <*> rnIfaceCo co2
 rnIfaceCo (IfaceTyConAppCo role tc cos)
     = IfaceTyConAppCo role <$> rnIfaceTyCon tc <*> mapM rnIfaceCo cos
 rnIfaceCo (IfaceAppCo co1 co2)
@@ -694,6 +696,8 @@ rnIfaceType (IfaceFunTy t1 t2)
     = IfaceFunTy <$> rnIfaceType t1 <*> rnIfaceType t2
 rnIfaceType (IfaceDFunTy t1 t2)
     = IfaceDFunTy <$> rnIfaceType t1 <*> rnIfaceType t2
+rnIfaceType (IfaceFunTildeTy t1 t2)
+    = IfaceFunTildeTy <$> rnIfaceType t1 <*> rnIfaceType t2
 rnIfaceType (IfaceTupleTy s i tks)
     = IfaceTupleTy s i <$> rnIfaceTcArgs tks
 rnIfaceType (IfaceTyConApp tc tks)

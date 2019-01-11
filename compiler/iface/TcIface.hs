@@ -1136,6 +1136,7 @@ tcIfaceType = go
     go (IfaceLitTy l)         = LitTy <$> tcIfaceTyLit l
     go (IfaceFunTy t1 t2)     = FunTy <$> go t1 <*> go t2
     go (IfaceDFunTy t1 t2)    = FunTy <$> go t1 <*> go t2
+    go (IfaceFunTildeTy t1 t2)= FunTildeTy <$> go t1 <*> go t2
     go (IfaceTupleTy s i tks) = tcIfaceTupleTy s i tks
     go (IfaceTyConApp tc tks)
       = do { tc' <- tcIfaceTyCon tc
@@ -1201,6 +1202,7 @@ tcIfaceCo = go
   where
     go (IfaceReflCo r t)         = Refl r <$> tcIfaceType t
     go (IfaceFunCo r c1 c2)      = mkFunCo r <$> go c1 <*> go c2
+    go (IfaceFunTildeCo r c1 c2) = mkFunTildeCo r <$> go c1 <*> go c2
     go (IfaceTyConAppCo r tc cs)
       = TyConAppCo r <$> tcIfaceTyCon tc <*> mapM go cs
     go (IfaceAppCo c1 c2)        = AppCo <$> go c1 <*> go c2

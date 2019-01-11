@@ -86,6 +86,7 @@ isTYPEApp _ = Nothing
 returnsTyCon :: Unique -> Type -> Bool
 returnsTyCon tc_u (ForAllTy _ ty)  = returnsTyCon tc_u ty
 returnsTyCon tc_u (FunTy    _ ty)  = returnsTyCon tc_u ty
+returnsTyCon tc_u (FunTildeTy _ ty) = returnsTyCon tc_u ty
 returnsTyCon tc_u (TyConApp tc' _) = tc' `hasKey` tc_u
 returnsTyCon _  _                  = False
 

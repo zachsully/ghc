@@ -2125,6 +2125,7 @@ preCheck dflags ty_fam_ok tv ty
       | otherwise              = mapM fast_check tys >> ok
     fast_check (LitTy {})      = ok
     fast_check (FunTy a r)     = fast_check a   >> fast_check r
+    fast_check (FunTildeTy a r)= fast_check a   >> fast_check r
     fast_check (AppTy fun arg) = fast_check fun >> fast_check arg
     fast_check (CastTy ty co)  = fast_check ty  >> fast_check_co co
     fast_check (CoercionTy co) = fast_check_co co

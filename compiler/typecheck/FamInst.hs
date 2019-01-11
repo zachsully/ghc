@@ -801,6 +801,8 @@ injTyVarsOfType (LitTy {})
   = emptyVarSet
 injTyVarsOfType (FunTy arg res)
   = injTyVarsOfType arg `unionVarSet` injTyVarsOfType res
+injTyVarsOfType (FunTildeTy arg res)
+  = injTyVarsOfType arg `unionVarSet` injTyVarsOfType res
 injTyVarsOfType (AppTy fun arg)
   = injTyVarsOfType fun `unionVarSet` injTyVarsOfType arg
 -- No forall types in the RHS of a type family

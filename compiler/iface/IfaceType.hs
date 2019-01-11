@@ -664,6 +664,15 @@ ppr_ty ctxt_prec (IfaceFunTy ty1 ty2)
     ppr_fun_tail other_ty
       = [arrow <+> pprIfaceType other_ty]
 
+ppr_ty ctxt_prec (IfaceFunTildeTy ty1 ty2)
+  = maybeParen ctxt_prec funPrec $
+    sep [ppr_ty funPrec ty1, sep (ppr_fun_tail ty2)]
+  where
+    ppr_fun_tail (IfaceFunTildeTy ty1 ty2)
+      = (text "~>" <+> ppr_ty funPrec ty1) : ppr_fun_tail ty2
+    ppr_fun_tail other_ty
+      = [text "~>" <+> pprIfaceType other_ty]
+
 ppr_ty ctxt_prec (IfaceAppTy ty1 ty2)
   = if_print_coercions
       ppr_app_ty
@@ -1205,6 +1214,14 @@ ppr_co ctxt_prec (IfaceFunCo r co1 co2)
       = (arrow <> ppr_role r <+> ppr_co funPrec co1) : ppr_fun_tail co2
     ppr_fun_tail other_co
       = [arrow <> ppr_role r <+> pprIfaceCoercion other_co]
+ppr_co ctxt_prec (IfaceFunTildeCo r co1 co2)
+  = maybeParen ctxt_prec funPrec $
+    sep (ppr_co funPrec co1 : ppr_fun_tail co2)
+  where
+    ppr_fun_tail (IfaceFunTildeCo r co1 co2)
+      = (text "~>" <> ppr_role r <+> ppr_co funPrec co1) : ppr_fun_tail co2
+    ppr_fun_tail other_co
+      = [text "~>" <> ppr_role r <+> pprIfaceCoercion other_co]
 
 ppr_co _         (IfaceTyConAppCo r tc cos)
   = parens (pprIfaceCoTcApp topPrec tc cos) <> ppr_role r
@@ -1487,14 +1504,13 @@ instance Binary IfaceType where
                       ; return (IfaceCastTy a b) }
               7 -> do { a <- get bh
                       ; return (IfaceCoercionTy a) }
-
               8 -> do { s <- get bh; i <- get bh; tys <- get bh
                       ; return (IfaceTupleTy s i tys) }
+              9  -> do n <- get bh
+                       return (IfaceLitTy n)
               10 -> do ag <- get bh
                        ah <- get bh
                        return (IfaceFunTildeTy ag ah)
-              _  -> do n <- get bh
-                       return (IfaceLitTy n)
 
 instance Binary IfaceCoercion where
   put_ bh (IfaceReflCo a b) = do
@@ -1572,6 +1588,11 @@ instance Binary IfaceCoercion where
   put_ _  (IfaceHoleCo cv)
        = pprPanic "Can't serialise IfaceHoleCo" (ppr cv)
           -- See Note [Holes in IfaceUnivCoProv]
+  put_ bh (IfaceFunTildeCo a b c) = do
+          putByte bh 18
+          put_ bh a
+          put_ bh b
+          put_ bh c
 
   get bh = do
       tag <- getByte bh
@@ -1629,6 +1650,10 @@ instance Binary IfaceCoercion where
            17-> do a <- get bh
                    b <- get bh
                    return $ IfaceAxiomRuleCo a b
+           19-> do a <- get bh
+                   b <- get bh
+                   c <- get bh
+                   return $ IfaceFunTildeCo a b c
            _ -> panic ("get IfaceCoercion " ++ show tag)
 
 instance Binary IfaceUnivCoProv where
