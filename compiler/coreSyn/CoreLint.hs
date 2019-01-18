@@ -811,6 +811,12 @@ lintCoreExpr e@(Case scrut var alt_ty alts) =
                         "expression with literal pattern in case " ++
                         "analysis (see Trac #9238).")
           $$ text "scrut" <+> ppr scrut)
+     -- Cannot case on tilde type
+     ; checkL (not $ isFunTildeTy scrut_ty)
+         (ptext (sLit "Lint warning: Scrutinising a call-by-name function.")
+           $$ text "scrut" <+> ppr scrut
+           $$ text "type" <+> ppr scrut_ty
+         )
 
      ; case tyConAppTyCon_maybe (idType var) of
          Just tycon
