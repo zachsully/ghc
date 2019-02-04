@@ -131,10 +131,16 @@ mkCoreAppTyped _ (fun, fun_ty) (Coercion co)
   where
     (_, res_ty) = splitFunTy fun_ty
 mkCoreAppTyped d (fun, fun_ty) arg
-  = ASSERT2( isFunTy fun_ty, ppr fun $$ ppr arg $$ d )
+  = ASSERT2( isFunTy fun_ty || isFunTildeTy fun_ty, ppr fun $$ ppr arg $$ d )
     (mk_val_app fun arg arg_ty res_ty, res_ty)
   where
-    (arg_ty, res_ty) = splitFunTy fun_ty
+    (arg_ty, res_ty) =
+      case splitFunTy_maybe fun_ty of
+        Just x -> x
+        Nothing ->
+          case splitFunTildeTy_maybe fun_ty of
+            Just x -> x
+            Nothing -> pprPanic "mkCoreAppTyped.splitFun" (ppr fun_ty)
 
 -- | Construct an expression which represents the application of one expression
 -- to the other

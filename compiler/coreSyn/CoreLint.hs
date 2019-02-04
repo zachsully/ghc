@@ -871,6 +871,7 @@ lintVarOcc var nargs
             checkL (idName var /= makeStaticName) $
               text "Found makeStatic nested in an expression"
 
+        ; checkFunTildeTySat var ty nargs
         ; checkDeadIdOcc var
         ; checkJoinOcc var nargs
 
@@ -894,6 +895,23 @@ lintCoreFun (Lam var body) nargs
 lintCoreFun expr nargs
   = markAllJoinsBadIf (nargs /= 0) $
     lintCoreExpr expr
+
+------------------
+checkFunTildeTySat :: Id -> Type -> Arity -> LintM ()
+checkFunTildeTySat id ty app_arity
+  | isFunTildeTy ty
+  = let ty_arity = length (typeArity ty) in
+      do { checkL (not (ty_arity > app_arity)) (err_msg True ty_arity)
+         ; checkL (not (ty_arity < app_arity)) (err_msg False ty_arity)
+         ; return () }
+  | otherwise
+  = return ()
+  where applied_msg True  = text "Under-applied extensional function:"
+        applied_msg False = text "Over-applied extensional function:"
+
+        err_msg b ty_arity = applied_msg b <+> ppr id
+          $$ text "Expected Args:" <+> ppr ty_arity
+          $$ text "Actual Args:" <+> ppr app_arity
 
 ------------------
 checkDeadIdOcc :: Id -> LintM ()
@@ -1068,13 +1086,12 @@ lintTyApp fun_ty arg_ty
   = failWithL (mkTyAppMsg fun_ty arg_ty)
 
 -----------------
--- Tilde Types must appear fully applied
-lintValApps :: [CoreExpr] -> OutType -> [OutType] -> LintM OutType
-lintValApps = undefined
-
 lintValApp :: CoreExpr -> OutType -> OutType -> LintM OutType
 lintValApp arg fun_ty arg_ty
   | Just (arg,res) <- splitFunTy_maybe fun_ty
+  = do { ensureEqTys arg arg_ty err1
+       ; return res }
+  | Just (arg,res) <- splitFunTildeTy_maybe fun_ty
   = do { ensureEqTys arg arg_ty err1
        ; return res }
   | otherwise
