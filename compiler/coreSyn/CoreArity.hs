@@ -10,7 +10,7 @@
 
 -- | Arity and eta expansion
 module CoreArity (
-        manifestArity, joinRhsArity, exprArity, typeArity,
+        manifestArity, joinRhsArity, exprArity, typeArity, funTildeTypeArity,
         exprEtaExpandArity, findRhsArity, CheapFun, etaExpand,
         etaExpandToJoinPoint, etaExpandToJoinPointRule,
         exprBotStrictness_maybe,
@@ -145,6 +145,12 @@ typeArity ty
 
       | otherwise
       = []
+
+-- ^ Uses only extensional functions to derive arity
+funTildeTypeArity :: Type -> Arity
+funTildeTypeArity (FunTildeTy _ res) = 1 + funTildeTypeArity res
+funTildeTypeArity (ForAllTy _ body_ty) = funTildeTypeArity body_ty
+funTildeTypeArity _ = 0
 
 ---------------
 exprBotStrictness_maybe :: CoreExpr -> Maybe (Arity, StrictSig)

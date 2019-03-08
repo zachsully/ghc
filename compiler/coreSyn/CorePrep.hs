@@ -73,7 +73,7 @@ import qualified Data.Set as S
 
 The goal of this pass is to prepare for code generation.
 
-1.  Saturate constructor and primop applications.
+1.  Saturate constructor, tilde-lambda, and primop applications.
 
 2.  Convert to A-normal form; that is, function arguments
     are always variables.
@@ -494,7 +494,8 @@ cpePair top_lvl is_rec dmd is_unlifted env bndr rhs
                then return (floats2, cpeEtaExpand arity rhs2)
                else WARN(True, text "CorePrep: silly extra arguments:" <+> ppr bndr)
                                -- Note [Silly extra arguments]
-                    (do { v <- newVar (idType bndr)
+                    (do { v <- newVar (liftFunTildeTys (idType bndr))
+                               -- Only etaWW should introduce (~>)
                         ; let float = mkFloat topDmd False v rhs2
                         ; return ( addFloat floats2 float
                                  , cpeEtaExpand arity (Var v)) })
@@ -768,7 +769,8 @@ rhsToBody expr@(Lam {})
   | all isTyVar bndrs           -- Type lambdas are ok
   = return (emptyFloats, expr)
   | otherwise                   -- Some value lambdas
-  = do { fn <- newVar (exprType expr)
+  = do { fn <- newVar (liftFunTildeTys (exprType expr))
+                   -- Only etaWW should introduce (~>)
        ; let rhs   = cpeEtaExpand (exprArity expr) expr
              float = FloatLet (NonRec fn rhs)
        ; return (unitFloat float, Var fn) }
@@ -1039,7 +1041,8 @@ cpeArg env dmd arg arg_ty
                 --            put them inside a wrapBinds
 
        ; if okCpeArg arg2
-         then do { v <- newVar arg_ty
+         then do { v <- newVar (liftFunTildeTys arg_ty)
+                      -- Only etaWW should introduce (~>)
                  ; let arg3      = cpeEtaExpand (exprArity arg2) arg2
                        arg_float = mkFloat dmd is_unlifted v arg3
                  ; return (addFloat floats2 arg_float, varToCoreExpr v) }
@@ -1068,7 +1071,7 @@ because that has different strictness.  Hence the use of 'allLazy'.
 -- Building the saturated syntax
 -- ---------------------------------------------------------------------------
 
-maybeSaturate deals with saturating primops and constructors
+maybeSaturate deals with saturating primops, tilde-lambdas, and constructors
 The type is the type of the entire application
 -}
 
@@ -1081,9 +1084,16 @@ maybeSaturate fn expr n_args
   | hasNoBinding fn        -- There's no binding
   = return sat_expr
 
+  | isFunTildeTy (idType fn)
+  = let guaranteed_arity = funTildeTypeArity (idType fn) in
+      return (cpeEtaExpand (guaranteed_arity - n_args) expr)
+
   | otherwise
   = return expr
   where
+    -- the (~>) types will always have <= the arity annotations produced by
+    -- analysis, the difference is that we always *know* that we can eta expand
+    -- them.
     fn_arity     = idArity fn
     excess_arity = fn_arity - n_args
     sat_expr     = cpeEtaExpand excess_arity expr
@@ -1101,7 +1111,8 @@ saturateDataToTag sat_expr
         | exprIsHNF arg         -- Includes nullary constructors
         = return app            -- The arg is evaluated
         | otherwise                     -- Arg not evaluated, so evaluate it
-        = do { arg_id <- newVar (exprType arg)
+        = do { arg_id <- newVar (liftFunTildeTys (exprType arg))
+                   -- Only etaWW should introduce (~>)
              ; let arg_id1 = setIdUnfolding arg_id evaldUnfolding
              ; return (Case arg arg_id1 (exprType app)
                             [(DEFAULT, [], fun `App` Var arg_id1)]) }
@@ -1221,7 +1232,7 @@ tryEtaReducePrep bndrs expr@(App _ _)
     ok _    _         = False
 
           -- We can't eta reduce something which must be saturated.
-    ok_to_eta_reduce (Var f) = not (hasNoBinding f)
+    ok_to_eta_reduce (Var f) = not (hasNoBinding f || isFunTildeTy (idType f))
     ok_to_eta_reduce _       = False -- Safe. ToDo: generalise
 
 tryEtaReducePrep bndrs (Let bind@(NonRec _ r) body)

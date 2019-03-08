@@ -45,6 +45,7 @@ module Type (
         mkLamType, mkLamTypes,
         piResultTy, piResultTys,
         applyTysX, dropForAlls,
+        liftFunTildeTys,
 
         mkNumLitTy, isNumLitTy,
         mkStrLitTy, isStrLitTy,
@@ -1111,6 +1112,22 @@ applyTysX tvs body_ty arg_tys
     pp_stuff = vcat [ppr tvs, ppr body_ty, ppr arg_tys]
     n_tvs = length tvs
 
+
+liftFunTildeTys :: Type -> Type
+liftFunTildeTys ty | Just ty' <- coreView ty = liftFunTildeTys ty'
+liftFunTildeTys (TyVarTy v) = TyVarTy v
+liftFunTildeTys (AppTy a b) = AppTy (liftFunTildeTys a) (liftFunTildeTys b)
+liftFunTildeTys (TyConApp k tys) = TyConApp k (map liftFunTildeTys tys)
+liftFunTildeTys (ForAllTy bndr ty) = ForAllTy bndr (liftFunTildeTys ty)
+liftFunTildeTys (FunTy arg res) = FunTy (liftFunTildeTys arg) (liftFunTildeTys res)
+liftFunTildeTys (FunTildeTy arg res) = FunTy (liftFunTildeTys arg) (liftFunTildeTys res)
+liftFunTildeTys (LitTy l) = LitTy l
+liftFunTildeTys (CastTy ty co) = CastTy (liftFunTildeTys ty) co
+liftFunTildeTys (CoercionTy co) = CoercionTy co
+-- TODO: handle coercions in @liftFunTildeTys@
+
+
+
 {-
 ---------------------------------------------------------------------
                                 TyConApp
@@ -1124,6 +1141,10 @@ mkTyConApp tycon tys
   | isFunTyCon tycon
   , [_rep1,_rep2,ty1,ty2] <- tys
   = FunTy ty1 ty2
+
+  | isFunTildeTyCon tycon
+  , [_rep1,_rep2,ty1,ty2] <- tys
+  = FunTildeTy ty1 ty2
 
   | otherwise
   = TyConApp tycon tys
