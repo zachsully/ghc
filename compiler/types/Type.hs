@@ -1457,6 +1457,7 @@ splitPiTy_maybe ty = go ty
     go ty | Just ty' <- coreView ty = go ty'
     go (ForAllTy bndr ty) = Just (Named bndr, ty)
     go (FunTy arg res)    = Just (Anon arg, res)
+    go (FunTildeTy arg res) = Just (Anon arg, res)
     go _                  = Nothing
 
 -- | Takes a forall type apart, or panics
