@@ -28,6 +28,8 @@ module Type (
         splitFunTys, funResultTy, funArgTy, argTy,
         splitFunTildeTy, splitFunTildeTy_maybe, funTildeArgTy, funTildeResultTy,
 
+        toShallowFunTildeType, toDeepFunTildeType,
+
         mkTyConApp, mkTyConTy,
         tyConAppTyCon_maybe, tyConAppTyConPicky_maybe,
         tyConAppArgs_maybe, tyConAppTyCon, tyConAppArgs,
@@ -1127,6 +1129,29 @@ liftFunTildeTys (CoercionTy co) = CoercionTy co
 -- TODO: handle coercions in @liftFunTildeTys@
 
 
+{-
+---------------------------------------------------------------------
+                 Extensional Function Types (FunTildeTy)
+                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-}
+
+-- | Change the top level arrows of a function into extensional arrows
+-- e.g.  a -> (b -> c) -> d  ==> a ~> (b -> c) ~> d
+toShallowFunTildeType :: Type -> Type
+toShallowFunTildeType (ForAllTy tv body_ty) = ForAllTy tv (toShallowFunTildeType body_ty)
+toShallowFunTildeType (FunTy arg res)       = FunTy arg (toShallowFunTildeType res)
+toShallowFunTildeType (FunTy arg res)       = FunTildeTy arg (toShallowFunTildeType res)
+toShallowFunTildeType ty                    = ty
+
+-- | Change the top level arrows and higher-order functions into extensional
+-- arrows
+-- e.g.  a -> (b -> c) -> d ==> a ~> (b ~> c) ~> d
+toDeepFunTildeType :: Type -> Type
+toDeepFunTildeType (ForAllTy tv body_ty) = ForAllTy tv (toDeepFunTildeType body_ty)
+toDeepFunTildeType (FunTy arg res)       = FunTildeTy (toDeepFunTildeType arg) (toDeepFunTildeType res)
+toDeepFunTildeType (FunTildeTy arg res)  = FunTildeTy (toDeepFunTildeType arg) (toDeepFunTildeType res)
+toDeepFunTildeType ty                    = ty
+
 
 {-
 ---------------------------------------------------------------------
@@ -1422,9 +1447,10 @@ isForAllTy _             = False
 -- | Is this a function or forall?
 isPiTy :: Type -> Bool
 isPiTy ty | Just ty' <- coreView ty = isForAllTy ty'
-isPiTy (ForAllTy {}) = True
-isPiTy (FunTy {})    = True
-isPiTy _             = False
+isPiTy (ForAllTy {})   = True
+isPiTy (FunTy {})      = True
+isPiTy (FunTildeTy {}) = True
+isPiTy _               = False
 
 -- | Take a forall type apart, or panics if that is not possible.
 splitForAllTy :: Type -> (TyVar, Type)

@@ -160,6 +160,7 @@ Library
         typecheck
         types
         utils
+        workwrap
 
     -- we use an explicit Prelude
     Default-Extensions:
@@ -432,11 +433,12 @@ Library
         StgLint
         StgSyn
         CallArity
-        EtaArityWW
         DmdAnal
         Exitify
         WorkWrap
         WwLib
+        WwEtaArity
+        WwUnbox
         FamInst
         Inst
         TcAnnotations

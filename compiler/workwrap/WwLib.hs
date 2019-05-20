@@ -6,7 +6,7 @@
 
 {-# LANGUAGE CPP #-}
 
-module WwLib ( mkWwBodies, mkWWstr, mkWorkerArgs
+module WwLib ( mkWwBodies, mkWWstr, mkWorkerArgs, mkCalledArityMap
              , deepSplitProductType_maybe, findTypeShape
              , isWorkerSmallEnough
  ) where
@@ -15,6 +15,8 @@ module WwLib ( mkWwBodies, mkWWstr, mkWorkerArgs
 
 import GhcPrelude
 
+import BasicTypes
+import CoreArity
 import CoreSyn
 import CoreUtils        ( exprType, mkCast )
 import Id
@@ -43,6 +45,8 @@ import Outputable
 import DynFlags
 import FastString
 import ListSetOps
+
+import qualified Data.Map as F
 
 {-
 ************************************************************************
@@ -117,10 +121,13 @@ type WwResult
   = ([Demand],              -- Demands for worker (value) args
      JoinArity,             -- Number of worker (type OR value) args
      Id -> CoreExpr,        -- Wrapper body, lacking only the worker Id
-     CoreExpr -> CoreExpr)  -- Worker body, lacking the original function rhs
+     CoreExpr -> CoreExpr,  -- Worker body, lacking the original function rhs
+     Type -> Type)          -- By simple examining the worker expression, we
+                            --   cannot recover its type if it is a (~>) type
 
 mkWwBodies :: DynFlags
            -> FamInstEnvs
+           -> F.Map Id Arity -- Called arity map for eta arity w/w
            -> VarSet         -- Free vars of RHS
                              -- See Note [Freshen WW arguments]
            -> Id             -- The original function
@@ -139,12 +146,13 @@ mkWwBodies :: DynFlags
 --                        let x = (a,b) in
 --                        E
 
-mkWwBodies dflags fam_envs rhs_fvs fun_id demands res_info
+mkWwBodies dflags fam_envs rhs_called_arity_map rhs_fvs fun_id demands res_info
   = do  { let empty_subst = mkEmptyTCvSubst (mkInScopeSet rhs_fvs)
                 -- See Note [Freshen WW arguments]
 
         ; (wrap_args, wrap_fn_args, work_fn_args, res_ty)
              <- mkWWargs empty_subst fun_ty demands
+
         ; (useful1, work_args, wrap_fn_str, work_fn_str)
              <- mkWWstr dflags fam_envs has_inlineable_prag wrap_args
 
@@ -152,16 +160,31 @@ mkWwBodies dflags fam_envs rhs_fvs fun_id demands res_info
         ; (useful2, wrap_fn_cpr, work_fn_cpr, cpr_res_ty)
               <- mkWWcpr (gopt Opt_CprAnal dflags) fam_envs res_ty res_info
 
+        ; (useful3, wrap_fn_eta_arity, work_fn_eta_arity, work_ty)
+              <- mkWWetaArity do_eta_arity fun_id
+
         ; let (work_lam_args, work_call_args) = mkWorkerArgs dflags work_args cpr_res_ty
               worker_args_dmds = [idDemandInfo v | v <- work_call_args, isId v]
-              wrapper_body = wrap_fn_args . wrap_fn_cpr . wrap_fn_str . applyToVars work_call_args . Var
-              worker_body = mkLams work_lam_args. work_fn_str . work_fn_cpr . work_fn_args
-
-        ; if isWorkerSmallEnough dflags work_args
+              wrapper_body = wrap_fn_args
+                           . wrap_fn_eta_arity
+                           . wrap_fn_cpr
+                           . wrap_fn_str
+                           . applyToVars_eta_arity do_eta_arity work_call_args
+                           . Var
+              worker_body = mkLams work_lam_args
+                          . work_fn_str
+                          . work_fn_cpr
+                          . work_fn_eta_arity
+                          . work_fn_args
+        ; if (useful3 && do_eta_arity)
+             || (isWorkerSmallEnough dflags work_args
              && not (too_many_args_for_join_point wrap_args)
-             && ((useful1 && not only_one_void_argument) || useful2)
-          then return (Just (worker_args_dmds, length work_call_args,
-                       wrapper_body, worker_body))
+             && ((useful1 && not only_one_void_argument) || useful2))
+          then return (Just (worker_args_dmds
+                            ,length work_call_args
+                            ,wrapper_body
+                            ,worker_body
+                            ,if do_eta_arity then const work_ty else id))
           else return Nothing
         }
         -- We use an INLINE unconditionally, even if the wrapper turns out to be
@@ -172,6 +195,7 @@ mkWwBodies dflags fam_envs rhs_fvs fun_id demands res_info
         -- f's RHS is now trivial (size 1) we still want the __inline__ to prevent
         -- fw from being inlined into f's RHS
   where
+    do_eta_arity  = eta_arity_condition (gopt Opt_EtaArity dflags) fun_id
     fun_ty        = idType fun_id
     mb_join_arity = isJoinId_maybe fun_id
     has_inlineable_prag = isStableUnfolding (realIdUnfolding fun_id)
@@ -265,7 +289,8 @@ add a void argument.  E.g.
 We use the state-token type which generates no code.
 -}
 
-mkWorkerArgs :: DynFlags -> [Var]
+mkWorkerArgs :: DynFlags
+             -> [Var]
              -> Type    -- Type of body
              -> ([Var], -- Lambda bound args
                  [Var]) -- Args at call site
@@ -477,8 +502,6 @@ mkWWargs subst fun_ty demands
       = mkCoreLet (NonRec bndr arg) (k body)    -- Important that arg is fresh!
     apply_or_bind_then k arg fun
       = k $ mkCoreApp (text "mkWWargs") fun arg
-applyToVars :: [Var] -> CoreExpr -> CoreExpr
-applyToVars vars fn = mkVarApps fn vars
 
 mk_wrap_arg :: Unique -> Type -> Demand -> Id
 mk_wrap_arg uniq ty dmd
@@ -487,8 +510,8 @@ mk_wrap_arg uniq ty dmd
 
 {- Note [Freshen WW arguments]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Wen we do a worker/wrapper split, we must not in-scope names as the arguments
-of the worker, else we'll get name capture.  E.g.
+When we do a worker/wrapper split, we must not use in-scope names as the
+arguments of the worker, else we'll get name capture.  E.g.
 
    -- y1 is in scope from further out
    f x = ..y1..
@@ -928,6 +951,148 @@ including the case itself in the cost centre, since it is morally
 part of the function (post transformation) anyway.
 
 
+************************************************************************
+*                                                                      *
+\subsection{Eta Arity stuff}
+*                                                                      *
+************************************************************************
+
+The etaArity worker wrapper is less a transformation of terms and more a
+transformation on types.
+-}
+
+mkWWetaArity
+  :: Bool
+  -> Id
+  -> UniqSM (Bool,                     -- Is w/w'ing useful?
+             CoreExpr -> CoreExpr,     -- New wrapper
+             CoreExpr -> CoreExpr,     -- New worker
+             Type)                     -- Worker Type
+mkWWetaArity do_eta_arity fun_id
+  | do_eta_arity
+  = return (True, id, id, toDeepFunTildeType ty)
+
+  | otherwise
+  = return (False, id, id, ty)
+  where ty = idType fun_id
+
+eta_arity_condition :: Bool -> Id -> Bool
+eta_arity_condition opt_etaArity fun_id
+  =  opt_etaArity
+  && isId fun_id                        -- * only work on terms
+  && isFunTy ty                         -- * TODO polymorphic version
+  && not (isJoinId fun_id)              -- * do not interfere with join points
+  && not (isFunTildeTy ty)              -- * do not worker/wrapper, things
+                                        --   that are already tildefuns
+  where ty = idType fun_id
+
+
+-- | @applyToVars_eta_arity@ takes into account whether or not the -feta-arity
+-- optimization is enabled. If it is, then we will need to etaExpand all
+-- functions passed to the worker.
+applyToVars_eta_arity
+  :: Bool
+  -> [Var]
+  -> CoreExpr
+  -> CoreExpr
+applyToVars_eta_arity do_eta_arity vars fn
+  | not do_eta_arity
+  = mkVarApps fn vars
+
+  | otherwise
+  = let toExpr v
+          | isId v
+          = etaExpand (demandToCalledWith (idDemandInfo v)) (varToCoreExpr v)
+          | otherwise
+          = varToCoreExpr v
+        vars' = map toExpr vars in
+      mkApps fn vars'
+  where demandToCalledWith :: Demand -> Arity
+        demandToCalledWith dmd =
+          case getUseDmd dmd of
+            Abs           -> 0
+            Use _ use_dmd -> go use_dmd
+          where go :: UseDmd -> Arity
+                go (UCall _ arg_use) = 1 + go arg_use
+                go _                 = 0
+
+mkCalledArityMap :: CoreExpr -> F.Map Id Arity
+mkCalledArityMap e =
+  case e of
+    Var x -> F.singleton x 0
+    Lit _ -> F.empty
+    expr@(App _ _) ->
+      case collectArgs expr of
+        (Var x,args) ->
+          let fm = F.unionsWith max (map mkCalledArityMap args)
+              a  = length args in
+            F.unionWith max (F.singleton x a) fm
+        (_,args) -> F.unionsWith max (map mkCalledArityMap args)
+    Lam _ expr -> mkCalledArityMap expr
+    Let bnds expr ->
+      let fm = F.unionsWith max (map mkCalledArityMap (rhssOfBind bnds)) in
+        F.unionWith max fm (mkCalledArityMap expr)
+    Case expr _ _ alts ->
+      let fm = F.unionsWith max (map mkCalledArityMap (rhssOfAlts alts)) in
+        F.unionWith max fm (mkCalledArityMap expr)
+    Cast expr _ -> mkCalledArityMap expr
+    Tick _ expr -> mkCalledArityMap expr
+    Type _ -> F.empty
+    Coercion _ -> F.empty
+
+{-
+-- | @applyToVarsEta@ takes into account whether or not the -feta-arity
+-- optimization is enabled. If it is, then we will need to etaExpand all
+-- functions passed to the worker.
+applyToVarsEta
+  :: DynFlags
+  -> F.Map Id Arity
+  -> [Var]
+  -> CoreExpr
+  -> CoreExpr
+applyToVarsEta dflags fm vars fn
+  | not (gopt Opt_EtaArity dflags)
+  = foldl (\e a -> App e (varToCoreExpr a)) fn vars
+
+  | otherwise
+  = foldl (\e a -> App e (etaExpand (F.findWithDefault 0 a fm)
+                                    (varToCoreExpr a)))
+          fn
+          vars
+-}
+
+{-
+-- ^ Given an expression and it's name, generate a new expression with a
+-- tilde-lambda type. This is the exact same code, but we have encoded the arity
+-- in the type.
+mkArityWorkerRhs
+  :: Id
+  -> Id
+  -> CoreExpr
+  -> CoreExpr
+mkArityWorkerRhs fn_id work_id rhs
+  = substExprSC (text "eta-worker-subst") subst rhs
+  where init_subst = mkEmptySubst . mkInScopeSet . exprFreeVars $ rhs
+        subst = extendSubstWithVar init_subst fn_id work_id
+
+-- ^ The wrapper does not change the type and will call the newly created worker
+-- function.
+mkArityWrapperRhs
+  :: F.Map Id Arity
+  -> Id
+  -> CoreExpr
+  -> Arity
+  -> UniqSM CoreExpr
+mkArityWrapperRhs fm work_id expr arity = go fm expr arity work_id []
+  where go fm (Lam b e) a w l
+          | isId b = let expr = etaExpand (F.findWithDefault 0 b fm) (Var b) in
+                       Lam b <$> go fm e (a-1) w (expr : l)
+          | otherwise = Lam b <$> go fm e a w (Type (TyVarTy b) : l)
+        go _ _ _ w l = return $ mkApps (Var w) (reverse l)
+-}
+
+
+{-
 ************************************************************************
 *                                                                      *
 \subsection{Utilities}
