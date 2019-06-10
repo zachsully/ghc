@@ -26,6 +26,9 @@ module IdInfo (
         oneShotInfo, noOneShotInfo, hasNoOneShotInfo,
         setOneShotInfo,
 
+        ExtensionalityInfo(..),
+        isExtensional,
+
         -- ** Zapping various forms of Info
         zapLamInfo, zapFragileInfo,
         zapDemandInfo, zapUsageInfo, zapUsageEnvInfo, zapUsedOnceInfo,
@@ -230,29 +233,31 @@ pprIdDetails other     = brackets (pp other)
 --
 -- Most of the 'IdInfo' gives information about the value, or definition, of
 -- the 'Id', independent of its usage. Exceptions to this
--- are 'demandInfo', 'occInfo', 'oneShotInfo' and 'callArityInfo'.
+-- are 'demandInfo', 'occInfo', 'oneShotInfo', 'extensionalityInfo',
+-- and 'callArityInfo'.
 --
 -- Performance note: when we update 'IdInfo', we have to reallocate this
 -- entire record, so it is a good idea not to let this data structure get
 -- too big.
 data IdInfo
   = IdInfo {
-        arityInfo       :: !ArityInfo,          -- ^ 'Id' arity
-        ruleInfo        :: RuleInfo,            -- ^ Specialisations of the 'Id's function which exist
+        arityInfo          :: !ArityInfo,          -- ^ 'Id' arity
+        ruleInfo           :: RuleInfo,            -- ^ Specialisations of the 'Id's function which exist
                                                 -- See Note [Specialisations and RULES in IdInfo]
-        unfoldingInfo   :: Unfolding,           -- ^ The 'Id's unfolding
-        cafInfo         :: CafInfo,             -- ^ 'Id' CAF info
-        oneShotInfo     :: OneShotInfo,         -- ^ Info about a lambda-bound variable, if the 'Id' is one
-        inlinePragInfo  :: InlinePragma,        -- ^ Any inline pragma atached to the 'Id'
-        occInfo         :: OccInfo,             -- ^ How the 'Id' occurs in the program
+        unfoldingInfo      :: Unfolding,           -- ^ The 'Id's unfolding
+        cafInfo            :: CafInfo,             -- ^ 'Id' CAF info
+        oneShotInfo        :: OneShotInfo,         -- ^ Info about a lambda-bound variable, if the 'Id' is one
+        extensionalityInfo :: ExtensionalityInfo,  -- ^ Info about whether this lambda can fuse with others
+        inlinePragInfo     :: InlinePragma,        -- ^ Any inline pragma atached to the 'Id'
+        occInfo            :: OccInfo,             -- ^ How the 'Id' occurs in the program
 
-        strictnessInfo  :: StrictSig,      --  ^ A strictness signature
+        strictnessInfo     :: StrictSig,      --  ^ A strictness signature
 
-        demandInfo      :: Demand,       -- ^ ID demand information
-        callArityInfo   :: !ArityInfo,   -- ^ How this is called.
+        demandInfo         :: Demand,       -- ^ ID demand information
+        callArityInfo      :: !ArityInfo,   -- ^ How this is called.
                                          -- n <=> all calls have at least n arguments
 
-        levityInfo      :: LevityInfo    -- ^ when applied, will this Id ever have a levity-polymorphic type?
+        levityInfo         :: LevityInfo    -- ^ when applied, will this Id ever have a levity-polymorphic type?
     }
 
 -- Setters
@@ -298,6 +303,7 @@ vanillaIdInfo
             ruleInfo            = emptyRuleInfo,
             unfoldingInfo       = noUnfolding,
             oneShotInfo         = NoOneShotInfo,
+            extensionalityInfo  = IsNotExtensional,
             inlinePragInfo      = defaultInlinePragma,
             occInfo             = noOccInfo,
             demandInfo          = topDmd,
