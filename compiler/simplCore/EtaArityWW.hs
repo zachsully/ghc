@@ -68,32 +68,39 @@ etaArityWWBind' dflags fn_id rhs
         work_ty = exprArityType arity (idType fn_id) rhs fm
         fn_info = idInfo fn_id
         fn_inl_prag     = inlinePragInfo fn_info
-        fn_inline_spec  = inl_inline fn_inl_prag
         fn_act          = inl_act fn_inl_prag
+        fn_unf          = realIdUnfolding fn_id
         rule_match_info = inlinePragmaRuleMatchInfo fn_inl_prag
-        work_prag = InlinePragma { inl_src = SourceText "{-# INLINE"
-                                 , inl_inline = NoInline
+        wrap_act  = case fn_act of
+                       ActiveAfter {} -> fn_act
+                       NeverActive    -> ActiveAfter NoSourceText 0
+                       _              -> ActiveAfter NoSourceText 2
+        wrap_prag = InlinePragma { inl_src    = SourceText "{-# INLINE"
+                                 , inl_inline = NoUserInline
                                  , inl_sat    = Nothing
-                                 , inl_act    = work_act
-                                 , inl_rule   = FunLike }
-        work_act  = case fn_act of
-                      ActiveAfter {} -> fn_act
-                      NeverActive    -> ActiveAfter NoSourceText 0
-                      _              -> ActiveAfter NoSourceText 2
-        wrap_prag = alwaysInlinePragma
+                                 , inl_act    = wrap_act
+                                 , inl_rule   = rule_match_info }
     in
     do { uniq <- getUniqueM
        ; let work_id = mkEtaWorkerId uniq fn_id work_ty
                          `setIdOccInfo` occInfo fn_info
                          `setIdArity` arity
-                         `setInlinePragma` work_prag
+                         `setInlinePragma` fn_inl_prag
+                         -- No need to run mkArityWorkerRhs on the
+                         -- unfolding, since if it mentions itself in
+                         -- its unfolding, it's a loop breaker anyway
+                         `setIdUnfolding` fn_unf
              wrap_id = fn_id `setIdOccInfo` noOccInfo
                              `setInlinePragma` wrap_prag
              work_rhs = mkArityWorkerRhs fn_id work_id rhs
        ; wrap_rhs <- mkArityWrapperRhs fm work_id rhs arity
-       ; return [(work_id `setIdUnfolding` mkSimpleUnfolding dflags work_rhs
+       ; let wrap_unf_guid = UnfWhen { ug_arity = 0, ug_unsat_ok = unSaturatedOk
+                                     , ug_boring_ok = boringCxtOk }
+             -- Don't use mkWwInlineRule here because it eta-reduces the RHS
+             wrap_unf = mkCoreUnfolding InlineStable True wrap_rhs wrap_unf_guid
+       ; return [(work_id
                  ,work_rhs)
-                ,(wrap_id `setIdUnfolding` mkSimpleUnfolding dflags wrap_rhs
+                ,(wrap_id `setIdUnfolding` wrap_unf
                  ,wrap_rhs)] }
 
   | otherwise
@@ -283,7 +290,8 @@ mkArityWrapperRhs
 -- mkArityWrapperRhs _ work_id _ _ = return (Var work_id)
 mkArityWrapperRhs fm work_id expr arity = go fm expr arity work_id []
   where go fm (Lam b e) a w l
-          | isId b = let expr = etaExpand (F.findWithDefault 0 b fm) (Var b) in
-                       Lam b <$> go fm e (a-1) w (expr : l)
+          | isId b = let b' = zapIdOccInfo b
+                         expr = etaExpand (F.findWithDefault 0 b fm) (Var b') in
+                       Lam b' <$> go fm e (a-1) w (expr : l)
           | otherwise = Lam b <$> go fm e a w (Type (TyVarTy b) : l)
         go _ _ _ w l = return $ mkApps (Var w) (reverse l)

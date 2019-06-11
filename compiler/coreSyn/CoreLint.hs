@@ -899,7 +899,7 @@ lintCoreFun expr nargs
 ------------------
 checkFunTildeTySat :: Id -> Type -> Arity -> LintM ()
 checkFunTildeTySat id ty app_arity
-  | isFunTildeTy ty
+  | False, isFunTildeTy ty
   = let ty_arity = length (typeArity ty) in
       do { checkL (not (ty_arity > app_arity)) (err_msg True ty_arity)
          ; checkL (not (ty_arity < app_arity)) (err_msg False ty_arity)
