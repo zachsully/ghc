@@ -518,6 +518,8 @@ instance Eq (DeBruijn Type) where
             -> D env t1 == D env' t1' && D env t2 == D env' t2'
         (FunTy t1 t2, FunTy t1' t2')
             -> D env t1 == D env' t1' && D env t2 == D env' t2'
+        (FunTildeTy t1 t2, FunTildeTy t1' t2')
+            -> D env t1 == D env' t1' && D env t2 == D env' t2'
         (TyConApp tc tys, TyConApp tc' tys')
             -> tc == tc' && D env tys == D env' tys'
         (LitTy l, LitTy l')
@@ -586,7 +588,7 @@ xtT (D env (ForAllTy (TvBndr tv _) ty))  f m
                                 |>> xtBndr env tv f }
 xtT (D _   ty@(TyConApp _ (_:_))) _ _ = pprPanic "xtT TyConApp" (ppr ty)
 xtT (D _   ty@(FunTy {}))         _ _ = pprPanic "xtT FunTy" (ppr ty)
-xtT (D _   ty@(FunTildeTy {}))    _ _ = pprPanic "xtT FunTy" (ppr ty)
+xtT (D _   ty@(FunTildeTy {}))    _ _ = pprPanic "xtT FunTildeTy" (ppr ty)
 
 fdT :: (a -> b -> b) -> TypeMapX a -> b -> b
 fdT k m = foldTM k (tm_var m)

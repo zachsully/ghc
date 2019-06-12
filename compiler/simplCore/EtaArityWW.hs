@@ -37,9 +37,9 @@ etaArityWW
 etaArityWW dflags us binds
   = initUs_ us $ concatMapM (etaArityWWBind dflags) binds
 
--- ^ Given a CoreBind, produce the WorkerWrapper transformed
--- version. This transformation may or may not produce new top level entities
--- depending on its arity.
+-- | Given a CoreBind, produce the WorkerWrapper transformed version. This
+-- transformation may or may not produce new top level entities depending on its
+-- arity.
 etaArityWWBind :: DynFlags -> CoreBind -> UniqSM [CoreBind]
 etaArityWWBind dflags (NonRec name expr)
   = map (uncurry NonRec)
@@ -50,7 +50,7 @@ etaArityWWBind dflags (Rec binds)
                     etaArityWWBind' dflags id =<< etaArityWWExpr dflags expr)
                  binds
 
--- ^ Change a function binding into a call to its wrapper and the production of
+-- | Change a function binding into a call to its wrapper and the production of
 -- a wrapper. The worker/wrapper transformation *only* makes sense for Id's or
 -- binders to code.
 etaArityWWBind'
@@ -58,15 +58,37 @@ etaArityWWBind'
   -> Id
   -> CoreExpr
   -> UniqSM [(Id,CoreExpr)]
-  -- the first component are recursive binds and the second are non-recursive
-  -- binds (the wrappers are non-recursive)
 etaArityWWBind' dflags fn_id rhs
-  | arity >= 1              -- we only do etaArityWW on functions
-    && isId fn_id           -- only work on terms
-    && not (isJoinId fn_id) -- do not interfere with join points
-  = let fm = calledArityMap rhs
-        work_ty = exprArityType arity (idType fn_id) rhs fm
-        fn_info = idInfo fn_id
+  -- The guards for when to do the worker/wrapper are listed in order of
+  -- importance
+  | arity >= 1
+    -- We only do etaArityWW on functions
+
+  , isId fn_id
+    -- Only work on terms, in other words, avoid type level functions
+
+  -- , Nothing <- certainlyWillInline dflags fn_info
+    -- The strictness analysis worker/wrappers do not run on certainly will
+    -- inline functions. We have experimented with this option here:
+
+    -- If we only etaArityWW certainly-inlining functions, then all nofib
+    -- programs compile AND there the WW transfomation has almost no impact on
+    -- allocations and runtime.
+
+    -- [TODO] If we allow all programs, nofib programs like 'sphere' will fail
+    -- to compile because it stores (~>) functions in the CoreMap during the CSE
+    -- optimization
+
+  , not (isJoinId fn_id)
+    -- Do not interfere with join points
+
+  , not (isDFunId fn_id)
+    -- Do not work on dictionary functions. [TODO] we may not want this in the
+    -- long term because DFuns can take multi-arity functions.
+
+  = let fm              = calledArityMap rhs
+                        -- We can probably use demandInfo for this
+        work_ty         = exprArityType arity (idType fn_id) rhs fm
         fn_inl_prag     = inlinePragInfo fn_info
         fn_act          = inl_act fn_inl_prag
         fn_unf          = realIdUnfolding fn_id
@@ -106,7 +128,8 @@ etaArityWWBind' dflags fn_id rhs
   | otherwise
   = return [(fn_id,rhs)]
 
-  where arity = manifestArity rhs
+  where arity   = manifestArity rhs
+        fn_info = idInfo fn_id
 
 -- ^ Traverses the expression to do etaArityWWBind in let-expressions
 etaArityWWExpr :: DynFlags -> CoreExpr -> UniqSM CoreExpr
@@ -290,7 +313,7 @@ mkArityWrapperRhs
 -- mkArityWrapperRhs _ work_id _ _ = return (Var work_id)
 mkArityWrapperRhs fm work_id expr arity = go fm expr arity work_id []
   where go fm (Lam b e) a w l
-          | isId b = let b' = zapIdOccInfo b
+          | isId b = let b'   = zapIdOccInfo b
                          expr = etaExpand (F.findWithDefault 0 b fm) (Var b') in
                        Lam b' <$> go fm e (a-1) w (expr : l)
           | otherwise = Lam b <$> go fm e a w (Type (TyVarTy b) : l)

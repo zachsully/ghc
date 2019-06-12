@@ -22,7 +22,7 @@ import CoreUtils        ( mkAltExpr, eqExpr
                         , exprIsTickedString
                         , stripTicksE, stripTicksT, mkTicks )
 import CoreFVs          ( exprFreeVars )
-import Type             ( tyConAppArgs )
+import Type             ( tyConAppArgs, isFunTildeTy )
 import CoreSyn
 import Outputable
 import BasicTypes       ( TopLevelFlag(..), isTopLevel
@@ -430,6 +430,7 @@ noCSE id =  not (isAlwaysActive (idInlineActivation id)) &&
              -- See Note [CSE for stable unfoldings]
          || isJoinId id
              -- See Note [CSE for join points?]
+         || isFunTildeTy (idType id)
 
 
 {- Note [Take care with literal strings]
