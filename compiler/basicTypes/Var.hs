@@ -55,7 +55,7 @@ module Var (
         setIdExported, setIdNotExported,
 
         -- ** Predicates
-        isId, isTyVar, isTcTyVar,
+        isId, isTyVar, isTcTyVar, isExtensionalVar,
         isLocalVar, isLocalId, isCoVar, isNonCoVarId, isTyCoVar,
         isGlobalId, isExportedId,
         mustHaveLocalBinding,
@@ -87,7 +87,7 @@ import GhcPrelude
 import {-# SOURCE #-}   TyCoRep( Type, Kind, pprKind )
 import {-# SOURCE #-}   TcType( TcTyVarDetails, pprTcTyVarDetails, vanillaSkolemTv )
 import {-# SOURCE #-}   IdInfo( IdDetails, IdInfo, coVarDetails, isCoVarDetails,
-                                vanillaIdInfo, pprIdDetails )
+                                vanillaIdInfo, pprIdDetails, isExtensionalIdInfo )
 
 import Name hiding (varName)
 import Unique ( Uniquable, Unique, getKey, getUnique
@@ -656,3 +656,6 @@ isExportedId :: Var -> Bool
 isExportedId (Id { idScope = GlobalId })        = True
 isExportedId (Id { idScope = LocalId Exported}) = True
 isExportedId _ = False
+
+isExtensionalVar :: Var -> Bool
+isExtensionalVar = isExtensionalIdInfo . idInfo

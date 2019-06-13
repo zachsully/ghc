@@ -1367,8 +1367,9 @@ mkLamTypes :: [Var] -> Type -> Type
 -- ^ 'mkLamType' for multiple type or value arguments
 
 mkLamType v ty
-   | isTyVar v = ForAllTy (TvBndr v Inferred) ty
-   | otherwise = FunTy    (varType v)          ty
+   | isTyVar v          = ForAllTy   (TvBndr v Inferred) ty
+   | isExtensionalVar v = FunTildeTy (varType v)         ty
+   | otherwise          = FunTy      (varType v)         ty
 
 mkLamTypes vs ty = foldr mkLamType ty vs
 
@@ -1422,9 +1423,10 @@ isForAllTy _             = False
 -- | Is this a function or forall?
 isPiTy :: Type -> Bool
 isPiTy ty | Just ty' <- coreView ty = isForAllTy ty'
-isPiTy (ForAllTy {}) = True
-isPiTy (FunTy {})    = True
-isPiTy _             = False
+isPiTy (ForAllTy {})   = True
+isPiTy (FunTy {})      = True
+isPiTy (FunTildeTy {}) = True
+isPiTy _               = False
 
 -- | Take a forall type apart, or panics if that is not possible.
 splitForAllTy :: Type -> (TyVar, Type)
