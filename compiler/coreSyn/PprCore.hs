@@ -171,9 +171,12 @@ ppr_expr add_par (Cast expr co)
 ppr_expr add_par expr@(Lam _ _)
   = let
         (bndrs, body) = collectBinders expr
+        tarrow = if all bndrIsExtensional bndrs
+                 then text "~>"
+                 else arrow
     in
     add_par $
-    hang (text "\\" <+> sep (map (pprBndr LambdaBind) bndrs) <+> arrow)
+    hang (text "\\" <+> sep (map (pprBndr LambdaBind) bndrs) <+> tarrow)
          2 (pprCoreExpr body)
 
 ppr_expr add_par expr@(App {})
@@ -355,12 +358,14 @@ instance OutputableBndr Var where
   pprInfixOcc  = pprInfixName  . varName
   pprPrefixOcc = pprPrefixName . varName
   bndrIsJoin_maybe = isJoinId_maybe
+  bndrIsExtensional = isExtensionalVar
 
 instance Outputable b => OutputableBndr (TaggedBndr b) where
   pprBndr _    b = ppr b   -- Simple
   pprInfixOcc  b = ppr b
   pprPrefixOcc b = ppr b
   bndrIsJoin_maybe (TB b _) = isJoinId_maybe b
+  bndrIsExtensional (TB b _) = isExtensionalVar b
 
 pprCoreBinder :: BindingSite -> Var -> SDoc
 pprCoreBinder LetBind binder
@@ -611,4 +616,3 @@ instance Outputable id => Outputable (Tickish id) where
          _            -> hcat [text "scc<",     ppr cc, char '>']
   ppr (SourceNote span _) =
       hcat [ text "src<", pprUserRealSpan True span, char '>']
-

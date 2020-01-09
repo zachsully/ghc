@@ -658,4 +658,5 @@ isExportedId (Id { idScope = LocalId Exported}) = True
 isExportedId _ = False
 
 isExtensionalVar :: Var -> Bool
-isExtensionalVar = isExtensionalIdInfo . idInfo
+isExtensionalVar i@(Id {})= isExtensionalIdInfo . idInfo $ i
+isExtensionalVar _ = False

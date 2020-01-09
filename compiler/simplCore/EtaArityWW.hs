@@ -310,10 +310,9 @@ mkArityWrapperRhs
   -> CoreExpr
   -> Arity
   -> UniqSM CoreExpr
--- mkArityWrapperRhs _ work_id _ _ = return (Var work_id)
 mkArityWrapperRhs fm work_id expr arity = go fm expr arity work_id []
   where go fm (Lam b e) a w l
-          | isId b = let b'   = zapIdOccInfo b
+          | isId b = let b'   = setExtensionalLambda (zapIdOccInfo b)
                          expr = etaExpand (F.findWithDefault 0 b fm) (Var b') in
                        Lam b' <$> go fm e (a-1) w (expr : l)
           | otherwise = Lam b <$> go fm e a w (Type (TyVarTy b) : l)

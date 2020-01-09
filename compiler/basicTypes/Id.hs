@@ -87,6 +87,9 @@ module Id (
         updOneShotInfo, setIdOneShotInfo,
         isStateHackType, stateHackOneShot, typeOneShot,
 
+        -- ** Extensional Lambdas, i.e. those that introduce (~>) types
+        setExtensionalLambda,
+
         -- ** Reading 'IdInfo' fields
         idArity,
         idCallArity, idFunRepArity,
@@ -868,6 +871,9 @@ updOneShotInfo id one_shot
 -- But watch out: this may change the type of something else
 --      f = \x -> e
 -- If we change the one-shot-ness of x, f's type changes
+
+setExtensionalLambda :: Id -> Id
+setExtensionalLambda id = modifyIdInfo (`setExtensionalInfo` IsExtensional) id
 
 zapInfo :: (IdInfo -> Maybe IdInfo) -> Id -> Id
 zapInfo zapper id = maybeModifyIdInfo (zapper (idInfo id)) id

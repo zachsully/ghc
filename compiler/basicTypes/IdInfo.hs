@@ -26,7 +26,7 @@ module IdInfo (
         oneShotInfo, noOneShotInfo, hasNoOneShotInfo,
         setOneShotInfo,
 
-        ExtensionalityInfo(..), isExtensionalIdInfo,
+        ExtensionalityInfo(..), isExtensionalIdInfo, setExtensionalInfo,
 
         -- ** Zapping various forms of Info
         zapLamInfo, zapFragileInfo,
@@ -319,6 +319,9 @@ noCafIdInfo  = vanillaIdInfo `setCafInfo`    NoCafRefs
 
 isExtensionalIdInfo :: IdInfo -> Bool
 isExtensionalIdInfo = isExtensional . extensionalityInfo
+
+setExtensionalInfo :: IdInfo -> ExtensionalityInfo -> IdInfo
+setExtensionalInfo info ei = info { extensionalityInfo = ei }
 
 {-
 ************************************************************************

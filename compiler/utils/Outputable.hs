@@ -937,6 +937,11 @@ class Outputable a => OutputableBndr a where
       -- we could have a function of type (a->Var), but Var
       -- isn't available yet, alas
 
+   bndrIsExtensional :: a -> Bool
+   bndrIsExtensional _ = False
+     -- Like with join points, we might want to print a special arrow for
+     -- extensional lambdas
+
 {-
 ************************************************************************
 *                                                                      *
