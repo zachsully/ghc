@@ -132,3 +132,6 @@
 [submodule "hadrian"]
 	path = hadrian
 	url = ../hadrian.git
+[submodule "ghc.nix"]
+	path = ghc.nix
+	url = ./ghc.nix
