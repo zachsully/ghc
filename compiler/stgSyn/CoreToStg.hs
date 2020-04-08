@@ -801,6 +801,7 @@ mkTopStgRhs dflags this_mod ccs rhs_fvs bndr binder_info rhs
     (_, unticked_rhs) = stripStgTicksTop (not . tickishIsCode) rhs
 
     upd_flag | isUsedOnce (idDemandInfo bndr) = SingleEntry
+             | isFunTildeTy (idType bndr)     = ReEntrant
              | otherwise                      = Updatable
 
     -- CAF cost centres generated for -fcaf-all
@@ -843,6 +844,7 @@ mkStgRhs rhs_fvs bndr binder_info rhs
     (_, unticked_rhs) = stripStgTicksTop (not . tickishIsCode) rhs
 
     upd_flag | isUsedOnce (idDemandInfo bndr) = SingleEntry
+             | isFunTildeTy (idType bndr)     = ReEntrant
              | otherwise                      = Updatable
 
   {-
