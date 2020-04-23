@@ -62,11 +62,11 @@ etaArityWWBind'
   -- the first component are recursive binds and the second are non-recursive
   -- binds (the wrappers are non-recursive)
 etaArityWWBind' dflags fn_id rhs
-  | arity >= 1                            -- * we only do etaArityWW on
+  | arity >= 1                            --   we only do etaArityWW on
                                           --   functions
-    && isId fn_id                         -- * only work on terms
-    && not (isJoinId fn_id)               -- * do not interfere with join points
-    && not (isFunTildeTy (idType fn_id))  -- * do not worker/wrapper, things
+    && isId fn_id                         --   only work on terms
+    && not (isJoinId fn_id)               --   do not interfere with join points
+    && not (isFunTildeTy (idType fn_id))  --   do not worker/wrapper, things
                                           --   that are already tildefuns
   = let fm              = calledArityMap rhs
         work_ty         = deepEtaType (idType fn_id)

@@ -45,6 +45,7 @@ import Outputable
 import DynFlags
 import FastString
 import ListSetOps
+import Type (toShallowFunTildeType)
 
 import qualified Data.Map as F
 
@@ -451,7 +452,7 @@ mkWWargs subst fun_ty demands
         ; return (id : wrap_args,
                   Lam id . wrap_fn_args,
                   apply_or_bind_then work_fn_args (varToCoreExpr id),
-                  res_ty) }
+                  toShallowFunTildeType res_ty) }
 
   | (dmd:demands') <- demands
   , Just (arg_ty, fun_ty') <- splitFunTildeTy_maybe fun_ty
@@ -979,10 +980,10 @@ mkWWetaArity do_eta_arity fun_id
 eta_arity_condition :: Bool -> Id -> Bool
 eta_arity_condition opt_etaArity fun_id
   =  opt_etaArity
-  && isId fun_id                        -- * only work on terms
-  && isFunTy ty                         -- * TODO polymorphic version
-  && not (isJoinId fun_id)              -- * do not interfere with join points
-  && not (isFunTildeTy ty)              -- * do not worker/wrapper, things
+  && isId fun_id                        --   only work on terms
+  && isFunTy ty                         --   TODO polymorphic version
+  && not (isJoinId fun_id)              --   do not interfere with join points
+  && not (isFunTildeTy ty)              --   do not worker/wrapper, things
                                         --   that are already tildefuns
   where ty = idType fun_id
 
